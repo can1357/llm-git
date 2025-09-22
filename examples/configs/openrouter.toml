@@ -1,0 +1,42 @@
+# OpenRouter Configuration
+# Use this to access models via OpenRouter
+# Get your API key at: https://openrouter.ai/keys
+# Set it: export LLM_GIT_API_KEY=sk-or-...
+
+# API Configuration
+api_base_url = "https://openrouter.ai/api/v1"
+# api_key can be set here or via LLM_GIT_API_KEY environment variable
+# api_key = "sk-or-..."
+
+# Models (use OpenRouter model identifiers with provider prefix)
+analysis_model = "anthropic/claude-sonnet-4.5"
+summary_model = "anthropic/claude-haiku-4-5"
+
+# Alternative models available on OpenRouter:
+# analysis_model = "openai/gpt-4o"
+# summary_model = "openai/gpt-4o-mini"
+# analysis_model = "google/gemini-pro-1.5"
+# summary_model = "google/gemini-flash-1.5"
+
+# Commit Message Limits
+summary_guideline = 72
+summary_soft_limit = 96
+summary_hard_limit = 128
+
+# Retry Configuration
+max_retries = 3
+initial_backoff_ms = 1000
+
+# HTTP Timeouts (may need higher for OpenRouter)
+request_timeout_secs = 180
+connect_timeout_secs = 30
+
+# Diff Processing
+max_diff_length = 100000
+wide_change_threshold = 0.50
+
+# Compose Mode
+compose_max_rounds = 5
+
+# Model Temperature (lower = more deterministic)
+temperature = 0.2

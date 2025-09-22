@@ -1,0 +1,34 @@
+# LiteLLM Configuration Example
+# Use this when running LiteLLM proxy locally
+# Start LiteLLM with: litellm --port 4000 --model claude-sonnet-4.5
+
+# API Configuration
+api_base_url = "http://localhost:4000"
+# No api_key needed - LiteLLM handles authentication via environment variables
+
+# Models
+analysis_model = "claude-sonnet-4.5"
+summary_model = "claude-haiku-4-5"
+
+# Commit Message Limits
+summary_guideline = 72
+summary_soft_limit = 96
+summary_hard_limit = 128
+
+# Retry Configuration
+max_retries = 3
+initial_backoff_ms = 1000
+
+# HTTP Timeouts
+request_timeout_secs = 120
+connect_timeout_secs = 30
+
+# Diff Processing
+max_diff_length = 100000
+wide_change_threshold = 0.50
+
+# Compose Mode
+compose_max_rounds = 5
+
+# Model Temperature (lower = more deterministic)
+temperature = 0.2
