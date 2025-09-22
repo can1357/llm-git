@@ -1,0 +1,984 @@
+use std::{fmt, path::PathBuf};
+
+use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::{CommitGenError, Result};
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum Mode {
+   /// Analyze staged changes
+   Staged,
+   /// Analyze a specific commit
+   Commit,
+   /// Analyze unstaged changes
+   Unstaged,
+   /// Compose changes into multiple commits
+   Compose,
+}
+
+/// Resolve model name from short aliases to full `LiteLLM` model names
+pub fn resolve_model_name(name: &str) -> String {
+   match name {
+      // Claude short names
+      "sonnet" | "s" => "claude-sonnet-4.5",
+      "opus" | "o" => "claude-opus-4.1",
+      "haiku" | "h" => "claude-haiku-4-5",
+      "3.5" | "sonnet-3.5" => "claude-3.5-sonnet",
+      "3.7" | "sonnet-3.7" => "claude-3.7-sonnet",
+
+      // GPT short names
+      "gpt5" | "g5" => "gpt-5",
+      "gpt5-pro" => "gpt-5-pro",
+      "gpt5-mini" => "gpt-5-mini",
+      "gpt5-codex" => "gpt-5-codex",
+
+      // o-series short names
+      "o3" => "o3",
+      "o3-pro" => "o3-pro",
+      "o3-mini" => "o3-mini",
+      "o1" => "o1",
+      "o1-pro" => "o1-pro",
+      "o1-mini" => "o1-mini",
+
+      // Gemini short names
+      "gemini" | "g2.5" => "gemini-2.5-pro",
+      "flash" | "g2.5-flash" => "gemini-2.5-flash",
+      "flash-lite" => "gemini-2.5-flash-lite",
+
+      // Cerebras
+      "qwen" | "q480b" => "qwen-3-coder-480b",
+
+      // GLM models
+      "glm4.6" => "glm-4.6",
+      "glm4.5" => "glm-4.5",
+      "glm-air" => "glm-4.5-air",
+
+      // Otherwise pass through as-is (allows full model names)
+      _ => name,
+   }
+   .to_string()
+}
+
+/// Scope candidate with metadata for inference
+#[derive(Debug, Clone)]
+pub struct ScopeCandidate {
+   pub path:       String,
+   pub percentage: f32,
+   pub confidence: f32,
+}
+
+/// Type-safe commit type with validation
+#[derive(Clone, PartialEq, Eq)]
+pub struct CommitType(String);
+
+impl CommitType {
+   const VALID_TYPES: &'static [&'static str] = &[
+      "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci", "revert",
+   ];
+
+   /// Create new `CommitType` with validation
+   pub fn new(s: impl Into<String>) -> Result<Self> {
+      let s = s.into();
+      let normalized = s.to_lowercase();
+
+      if !Self::VALID_TYPES.contains(&normalized.as_str()) {
+         return Err(CommitGenError::InvalidCommitType(format!(
+            "Invalid commit type '{}'. Must be one of: {}",
+            s,
+            Self::VALID_TYPES.join(", ")
+         )));
+      }
+
+      Ok(Self(normalized))
+   }
+
+   /// Returns inner string slice
+   pub fn as_str(&self) -> &str {
+      &self.0
+   }
+
+   /// Returns length of commit type
+   pub const fn len(&self) -> usize {
+      self.0.len()
+   }
+
+   /// Checks if commit type is empty
+   #[allow(dead_code, reason = "Convenience method for future use")]
+   pub const fn is_empty(&self) -> bool {
+      self.0.is_empty()
+   }
+}
+
+impl fmt::Display for CommitType {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.0)
+   }
+}
+
+impl fmt::Debug for CommitType {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      f.debug_tuple("CommitType").field(&self.0).finish()
+   }
+}
+
+impl Serialize for CommitType {
+   fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+   where
+      S: serde::Serializer,
+   {
+      self.0.serialize(serializer)
+   }
+}
+
+impl<'de> Deserialize<'de> for CommitType {
+   fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      let s = String::deserialize(deserializer)?;
+      Self::new(s).map_err(serde::de::Error::custom)
+   }
+}
+
+/// Type-safe commit summary with validation
+#[derive(Clone)]
+pub struct CommitSummary(String);
+
+impl CommitSummary {
+   /// Creates new `CommitSummary` with strict length validation and format
+   /// warnings
+   pub fn new(s: impl Into<String>, max_len: usize) -> Result<Self> {
+      Self::new_impl(s, max_len, true)
+   }
+
+   /// Internal constructor allowing warning suppression (used by
+   /// post-processing)
+   pub(crate) fn new_unchecked(s: impl Into<String>, max_len: usize) -> Result<Self> {
+      Self::new_impl(s, max_len, false)
+   }
+
+   fn new_impl(s: impl Into<String>, max_len: usize, emit_warnings: bool) -> Result<Self> {
+      let s = s.into();
+
+      // Strict validation: must not be empty
+      if s.trim().is_empty() {
+         return Err(CommitGenError::ValidationError("commit summary cannot be empty".to_string()));
+      }
+
+      // Strict validation: must be ≤ max_len characters (hard limit from config)
+      if s.len() > max_len {
+         return Err(CommitGenError::SummaryTooLong { len: s.len(), max: max_len });
+      }
+
+      if emit_warnings {
+         // Warning-only: should start with lowercase
+         if let Some(first_char) = s.chars().next()
+            && first_char.is_uppercase()
+         {
+            eprintln!("⚠ warning: commit summary should start with lowercase: {s}");
+         }
+
+         // Warning-only: should NOT end with period (conventional commits style)
+         if s.trim_end().ends_with('.') {
+            eprintln!(
+               "⚠ warning: commit summary should NOT end with period (conventional commits \
+                style): {s}"
+            );
+         }
+      }
+
+      Ok(Self(s))
+   }
+
+   /// Returns inner string slice
+   pub fn as_str(&self) -> &str {
+      &self.0
+   }
+
+   /// Returns length of summary
+   pub const fn len(&self) -> usize {
+      self.0.len()
+   }
+
+   /// Checks if summary is empty
+   #[allow(dead_code, reason = "Convenience method for future use")]
+   pub const fn is_empty(&self) -> bool {
+      self.0.is_empty()
+   }
+}
+
+impl fmt::Display for CommitSummary {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.0)
+   }
+}
+
+impl fmt::Debug for CommitSummary {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      f.debug_tuple("CommitSummary").field(&self.0).finish()
+   }
+}
+
+impl Serialize for CommitSummary {
+   fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+   where
+      S: serde::Serializer,
+   {
+      self.0.serialize(serializer)
+   }
+}
+
+impl<'de> Deserialize<'de> for CommitSummary {
+   fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      let s = String::deserialize(deserializer)?;
+      // During deserialization, bypass warnings to avoid console spam
+      if s.trim().is_empty() {
+         return Err(serde::de::Error::custom("commit summary cannot be empty"));
+      }
+      if s.len() > 128 {
+         return Err(serde::de::Error::custom(format!(
+            "commit summary must be ≤128 characters, got {}",
+            s.len()
+         )));
+      }
+      Ok(Self(s))
+   }
+}
+
+/// Type-safe scope for conventional commits
+#[derive(Clone, PartialEq, Eq)]
+pub struct Scope(String);
+
+impl Scope {
+   /// Creates new scope with validation
+   ///
+   /// Rules:
+   /// - Max 2 segments separated by `/`
+   /// - Only lowercase alphanumeric with `/`, `-`, `_`
+   /// - No empty segments
+   pub fn new(s: impl Into<String>) -> Result<Self> {
+      let s = s.into();
+      let segments: Vec<&str> = s.split('/').collect();
+
+      if segments.len() > 2 {
+         return Err(CommitGenError::InvalidScope(format!(
+            "scope has {} segments, max 2 allowed",
+            segments.len()
+         )));
+      }
+
+      for segment in &segments {
+         if segment.is_empty() {
+            return Err(CommitGenError::InvalidScope("scope contains empty segment".to_string()));
+         }
+         if !segment
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+         {
+            return Err(CommitGenError::InvalidScope(format!(
+               "invalid characters in scope segment: {segment}"
+            )));
+         }
+      }
+
+      Ok(Self(s))
+   }
+
+   /// Returns inner string slice
+   pub fn as_str(&self) -> &str {
+      &self.0
+   }
+
+   /// Splits scope by `/` into segments
+   #[allow(dead_code, reason = "Public API method for scope manipulation")]
+   pub fn segments(&self) -> Vec<&str> {
+      self.0.split('/').collect()
+   }
+
+   /// Check if scope is empty
+   pub const fn is_empty(&self) -> bool {
+      self.0.is_empty()
+   }
+}
+
+impl fmt::Display for Scope {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.0)
+   }
+}
+
+impl fmt::Debug for Scope {
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      f.debug_tuple("Scope").field(&self.0).finish()
+   }
+}
+
+impl Serialize for Scope {
+   fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+   where
+      S: serde::Serializer,
+   {
+      serializer.serialize_str(&self.0)
+   }
+}
+
+impl<'de> Deserialize<'de> for Scope {
+   fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+   where
+      D: serde::Deserializer<'de>,
+   {
+      let s = String::deserialize(deserializer)?;
+      Self::new(s).map_err(serde::de::Error::custom)
+   }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConventionalCommit {
+   pub commit_type: CommitType,
+   pub scope:       Option<Scope>,
+   pub summary:     CommitSummary,
+   pub body:        Vec<String>,
+   pub footers:     Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConventionalAnalysis {
+   #[serde(rename = "type")]
+   pub commit_type: CommitType,
+   #[serde(default, deserialize_with = "deserialize_optional_scope")]
+   pub scope:       Option<Scope>,
+   #[serde(default, deserialize_with = "deserialize_string_vec")]
+   pub body:        Vec<String>,
+   #[serde(default, deserialize_with = "deserialize_string_vec")]
+   pub issue_refs:  Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
+pub struct SummaryOutput {
+   pub summary: String,
+}
+
+/// Metadata for a single commit during history rewrite
+#[derive(Debug, Clone)]
+pub struct CommitMetadata {
+   pub hash:            String,
+   pub author_name:     String,
+   pub author_email:    String,
+   pub author_date:     String,
+   pub committer_name:  String,
+   pub committer_email: String,
+   pub committer_date:  String,
+   pub message:         String,
+   pub parent_hashes:   Vec<String>,
+   pub tree_hash:       String,
+}
+
+/// File change with specific hunks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+   pub path:  String,
+   pub hunks: Vec<String>, // Hunk headers (e.g., "@@ -10,5 +10,7 @@") or "ALL" for entire file
+}
+
+/// Represents a logical group of changes for compose mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeGroup {
+   pub changes:      Vec<FileChange>,
+   #[serde(rename = "type")]
+   pub commit_type:  CommitType,
+   pub scope:        Option<Scope>,
+   pub rationale:    String,
+   #[serde(default)]
+   pub dependencies: Vec<usize>,
+}
+
+/// Result of compose analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposeAnalysis {
+   pub groups:           Vec<ChangeGroup>,
+   pub dependency_order: Vec<usize>,
+}
+
+// API types for OpenRouter/LiteLLM communication
+#[derive(Debug, Serialize)]
+#[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
+pub struct Message {
+   pub role:    String,
+   pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
+pub struct FunctionParameters {
+   #[serde(rename = "type")]
+   pub param_type: String,
+   pub properties: serde_json::Value,
+   pub required:   Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
+pub struct Function {
+   pub name:        String,
+   pub description: String,
+   pub parameters:  FunctionParameters,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
+pub struct Tool {
+   #[serde(rename = "type")]
+   pub tool_type: String,
+   pub function:  Function,
+}
+
+// CLI Args
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Generate git commit messages using Claude AI", long_about = None)]
+pub struct Args {
+   /// What to analyze
+   #[arg(long, value_enum, default_value = "staged")]
+   pub mode: Mode,
+
+   /// Commit hash/ref when using --mode=commit
+   #[arg(long)]
+   pub target: Option<String>,
+
+   /// Copy the message to clipboard
+   #[arg(long)]
+   pub copy: bool,
+
+   /// Preview without committing (default is to commit for staged mode)
+   #[arg(long)]
+   pub dry_run: bool,
+
+   /// Directory to run git commands in
+   #[arg(long, default_value = ".")]
+   pub dir: String,
+
+   /// Model for analysis (default: sonnet). Use short names (sonnet/opus/haiku)
+   /// or full names
+   #[arg(long, short = 'm')]
+   pub model: Option<String>,
+
+   /// Model for summary creation (default: haiku)
+   #[arg(long)]
+   pub summary_model: Option<String>,
+
+   /// Temperature for API calls (0.0-1.0, default: 1.0)
+   #[arg(long, short = 't')]
+   pub temperature: Option<f32>,
+
+   /// Issue numbers this commit fixes (e.g., --fixes 123 456)
+   #[arg(long)]
+   pub fixes: Vec<String>,
+
+   /// Issue numbers this commit closes (alias for --fixes)
+   #[arg(long)]
+   pub closes: Vec<String>,
+
+   /// Issue numbers this commit resolves (alias for --fixes)
+   #[arg(long)]
+   pub resolves: Vec<String>,
+
+   /// Related issue numbers (e.g., --refs 789)
+   #[arg(long)]
+   pub refs: Vec<String>,
+
+   /// Mark this commit as a breaking change
+   #[arg(long)]
+   pub breaking: bool,
+
+   /// Path to config file (default: ~/.config/llm-git/config.toml)
+   #[arg(long)]
+   pub config: Option<PathBuf>,
+
+   /// Additional context to provide to the analysis model (all trailing
+   /// non-flag text)
+   #[arg(trailing_var_arg = true)]
+   pub context: Vec<String>,
+
+   // === Rewrite mode args ===
+   /// Rewrite git history to conventional commits
+   #[arg(long, conflicts_with_all = ["mode", "target", "copy", "dry_run"])]
+   pub rewrite: bool,
+
+   /// Preview N commits without rewriting
+   #[arg(long, requires = "rewrite")]
+   pub rewrite_preview: Option<usize>,
+
+   /// Start from this ref (exclusive, e.g., main~50)
+   #[arg(long, requires = "rewrite")]
+   pub rewrite_start: Option<String>,
+
+   /// Number of parallel API calls
+   #[arg(long, default_value = "10", requires = "rewrite")]
+   pub rewrite_parallel: usize,
+
+   /// Dry run - show what would be changed
+   #[arg(long, requires = "rewrite")]
+   pub rewrite_dry_run: bool,
+
+   /// Hide old commit type/scope tags to avoid model influence
+   #[arg(long, requires = "rewrite")]
+   pub rewrite_hide_old_types: bool,
+
+   /// Exclude old commit message from context when analyzing commits (prevents
+   /// contamination)
+   #[arg(long)]
+   pub exclude_old_message: bool,
+
+   // === Compose mode args ===
+   /// Compose changes into multiple atomic commits
+   #[arg(long, conflicts_with_all = ["mode", "target", "rewrite"])]
+   pub compose: bool,
+
+   /// Preview proposed splits without committing
+   #[arg(long, requires = "compose")]
+   pub compose_preview: bool,
+
+   /// Allow interactive refinement of splits
+   #[arg(long, requires = "compose")]
+   pub compose_interactive: bool,
+
+   /// Maximum number of commits to create
+   #[arg(long, requires = "compose")]
+   pub compose_max_commits: Option<usize>,
+
+   /// Run tests after each commit
+   #[arg(long, requires = "compose")]
+   pub compose_test_after_each: bool,
+}
+
+impl Default for Args {
+   fn default() -> Self {
+      Self {
+         mode:                    Mode::Staged,
+         target:                  None,
+         copy:                    false,
+         dry_run:                 false,
+         dir:                     ".".to_string(),
+         model:                   None,
+         summary_model:           None,
+         temperature:             None,
+         fixes:                   vec![],
+         closes:                  vec![],
+         resolves:                vec![],
+         refs:                    vec![],
+         breaking:                false,
+         config:                  None,
+         context:                 vec![],
+         rewrite:                 false,
+         rewrite_preview:         None,
+         rewrite_start:           None,
+         rewrite_parallel:        10,
+         rewrite_dry_run:         false,
+         rewrite_hide_old_types:  false,
+         exclude_old_message:     false,
+         compose:                 false,
+         compose_preview:         false,
+         compose_interactive:     false,
+         compose_max_commits:     None,
+         compose_test_after_each: false,
+      }
+   }
+}
+fn deserialize_string_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+   D: serde::Deserializer<'de>,
+{
+   let value = Value::deserialize(deserializer)?;
+   Ok(value_to_string_vec(value))
+}
+
+fn value_to_string_vec(value: Value) -> Vec<String> {
+   match value {
+      Value::Null => Vec::new(),
+      Value::String(s) => s
+         .lines()
+         .map(str::trim)
+         .filter(|s| !s.is_empty())
+         .map(|s| s.to_string())
+         .collect(),
+      Value::Array(arr) => arr
+         .into_iter()
+         .flat_map(|v| value_to_string_vec(v).into_iter())
+         .collect(),
+      Value::Object(map) => map
+         .into_iter()
+         .flat_map(|(k, v)| {
+            let values = value_to_string_vec(v);
+            if values.is_empty() {
+               vec![k]
+            } else {
+               values
+                  .into_iter()
+                  .map(|val| format!("{k}: {val}"))
+                  .collect()
+            }
+         })
+         .collect(),
+      other => vec![other.to_string()],
+   }
+}
+
+fn deserialize_optional_scope<'de, D>(
+   deserializer: D,
+) -> std::result::Result<Option<Scope>, D::Error>
+where
+   D: serde::Deserializer<'de>,
+{
+   let value = Option::<String>::deserialize(deserializer)?;
+   match value {
+      None => Ok(None),
+      Some(scope_str) => {
+         let trimmed = scope_str.trim();
+         if trimmed.is_empty() {
+            Ok(None)
+         } else {
+            Scope::new(trimmed.to_string())
+               .map(Some)
+               .map_err(serde::de::Error::custom)
+         }
+      },
+   }
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   // ========== resolve_model_name Tests ==========
+
+   #[test]
+   fn test_resolve_model_name() {
+      // Claude short names
+      assert_eq!(resolve_model_name("sonnet"), "claude-sonnet-4.5");
+      assert_eq!(resolve_model_name("s"), "claude-sonnet-4.5");
+      assert_eq!(resolve_model_name("opus"), "claude-opus-4.1");
+      assert_eq!(resolve_model_name("o"), "claude-opus-4.1");
+      assert_eq!(resolve_model_name("haiku"), "claude-haiku-4-5");
+      assert_eq!(resolve_model_name("h"), "claude-haiku-4-5");
+
+      // GPT short names
+      assert_eq!(resolve_model_name("gpt5"), "gpt-5");
+      assert_eq!(resolve_model_name("g5"), "gpt-5");
+
+      // Gemini short names
+      assert_eq!(resolve_model_name("gemini"), "gemini-2.5-pro");
+      assert_eq!(resolve_model_name("flash"), "gemini-2.5-flash");
+
+      // Pass-through for full names
+      assert_eq!(resolve_model_name("claude-sonnet-4.5"), "claude-sonnet-4.5");
+      assert_eq!(resolve_model_name("custom-model"), "custom-model");
+   }
+
+   // ========== CommitType Tests ==========
+
+   #[test]
+   fn test_commit_type_valid() {
+      let valid_types = [
+         "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci",
+         "revert",
+      ];
+
+      for ty in &valid_types {
+         assert!(CommitType::new(*ty).is_ok(), "Expected '{ty}' to be valid");
+      }
+   }
+
+   #[test]
+   fn test_commit_type_case_normalization() {
+      // Uppercase should normalize to lowercase
+      let ct = CommitType::new("FEAT").expect("FEAT should normalize");
+      assert_eq!(ct.as_str(), "feat");
+
+      let ct = CommitType::new("Fix").expect("Fix should normalize");
+      assert_eq!(ct.as_str(), "fix");
+
+      let ct = CommitType::new("ReFaCtOr").expect("ReFaCtOr should normalize");
+      assert_eq!(ct.as_str(), "refactor");
+   }
+
+   #[test]
+   fn test_commit_type_invalid() {
+      let invalid_types = ["invalid", "bug", "feature", "update", "change", "random", "xyz", "123"];
+
+      for ty in &invalid_types {
+         assert!(CommitType::new(*ty).is_err(), "Expected '{ty}' to be invalid");
+      }
+   }
+
+   #[test]
+   fn test_commit_type_empty() {
+      assert!(CommitType::new("").is_err(), "Empty string should be invalid");
+   }
+
+   #[test]
+   fn test_commit_type_display() {
+      let ct = CommitType::new("feat").unwrap();
+      assert_eq!(format!("{ct}"), "feat");
+   }
+
+   #[test]
+   fn test_commit_type_len() {
+      let ct = CommitType::new("feat").unwrap();
+      assert_eq!(ct.len(), 4);
+
+      let ct = CommitType::new("refactor").unwrap();
+      assert_eq!(ct.len(), 8);
+   }
+
+   // ========== Scope Tests ==========
+
+   #[test]
+   fn test_scope_valid_single_segment() {
+      let valid_scopes = ["core", "api", "lib", "client", "server", "ui", "test-123", "foo_bar"];
+
+      for scope in &valid_scopes {
+         assert!(Scope::new(*scope).is_ok(), "Expected '{scope}' to be valid");
+      }
+   }
+
+   #[test]
+   fn test_scope_valid_two_segments() {
+      let valid_scopes = ["api/client", "lib/core", "ui/components", "test-1/foo_2"];
+
+      for scope in &valid_scopes {
+         assert!(Scope::new(*scope).is_ok(), "Expected '{scope}' to be valid");
+      }
+   }
+
+   #[test]
+   fn test_scope_invalid_three_segments() {
+      let scope = Scope::new("a/b/c");
+      assert!(scope.is_err(), "Three segments should be invalid");
+
+      if let Err(CommitGenError::InvalidScope(msg)) = scope {
+         assert!(msg.contains("3 segments"));
+      } else {
+         panic!("Expected InvalidScope error");
+      }
+   }
+
+   #[test]
+   fn test_scope_invalid_uppercase() {
+      let invalid_scopes = ["Core", "API", "MyScope", "api/Client"];
+
+      for scope in &invalid_scopes {
+         assert!(Scope::new(*scope).is_err(), "Expected '{scope}' with uppercase to be invalid");
+      }
+   }
+
+   #[test]
+   fn test_scope_invalid_empty_segments() {
+      let invalid_scopes = ["", "a//b", "/foo", "bar/"];
+
+      for scope in &invalid_scopes {
+         assert!(
+            Scope::new(*scope).is_err(),
+            "Expected '{scope}' with empty segments to be invalid"
+         );
+      }
+   }
+
+   #[test]
+   fn test_scope_invalid_chars() {
+      let invalid_scopes = ["a b", "foo bar", "test@scope", "api/client!", "a.b"];
+
+      for scope in &invalid_scopes {
+         assert!(
+            Scope::new(*scope).is_err(),
+            "Expected '{scope}' with invalid chars to be invalid"
+         );
+      }
+   }
+
+   #[test]
+   fn test_scope_segments() {
+      let scope = Scope::new("core").unwrap();
+      assert_eq!(scope.segments(), vec!["core"]);
+
+      let scope = Scope::new("api/client").unwrap();
+      assert_eq!(scope.segments(), vec!["api", "client"]);
+   }
+
+   #[test]
+   fn test_scope_display() {
+      let scope = Scope::new("api/client").unwrap();
+      assert_eq!(format!("{scope}"), "api/client");
+   }
+
+   // ========== CommitSummary Tests ==========
+
+   #[test]
+   fn test_commit_summary_valid() {
+      let summary_72 = "a".repeat(72);
+      let summary_96 = "a".repeat(96);
+      let summary_128 = "a".repeat(128);
+      let valid_summaries = [
+         "added new feature",
+         "fixed bug in authentication",
+         "x",                  // 1 char
+         summary_72.as_str(),  // exactly 72 chars (guideline)
+         summary_96.as_str(),  // exactly 96 chars (soft limit)
+         summary_128.as_str(), // exactly 128 chars (hard limit)
+      ];
+
+      for summary in &valid_summaries {
+         assert!(
+            CommitSummary::new(*summary, 128).is_ok(),
+            "Expected '{}' (len={}) to be valid",
+            if summary.len() > 50 {
+               &summary[..50]
+            } else {
+               summary
+            },
+            summary.len()
+         );
+      }
+   }
+
+   #[test]
+   fn test_commit_summary_too_long() {
+      let long_summary = "a".repeat(129); // 129 chars (exceeds hard limit)
+      let result = CommitSummary::new(long_summary, 128);
+      assert!(result.is_err(), "129 char summary should be invalid");
+
+      if let Err(CommitGenError::SummaryTooLong { len, max }) = result {
+         assert_eq!(len, 129);
+         assert_eq!(max, 128);
+      } else {
+         panic!("Expected SummaryTooLong error");
+      }
+   }
+
+   #[test]
+   fn test_commit_summary_empty() {
+      let empty_cases = ["", "   ", "\t", "\n"];
+
+      for empty in &empty_cases {
+         assert!(
+            CommitSummary::new(*empty, 128).is_err(),
+            "Empty/whitespace-only summary should be invalid"
+         );
+      }
+   }
+
+   #[test]
+   fn test_commit_summary_warnings_uppercase_start() {
+      // Should succeed but emit warning
+      let result = CommitSummary::new("Added new feature", 128);
+      assert!(result.is_ok(), "Should succeed despite uppercase start");
+   }
+
+   #[test]
+   fn test_commit_summary_warnings_with_period() {
+      // Should succeed but emit warning (periods not allowed in conventional commits)
+      let result = CommitSummary::new("added new feature.", 128);
+      assert!(result.is_ok(), "Should succeed despite having period");
+   }
+
+   #[test]
+   fn test_commit_summary_new_unchecked() {
+      // new_unchecked should not emit warnings (internal use)
+      let result = CommitSummary::new_unchecked("Added feature", 128);
+      assert!(result.is_ok(), "new_unchecked should succeed");
+   }
+
+   #[test]
+   fn test_commit_summary_len() {
+      let summary = CommitSummary::new("hello world", 128).unwrap();
+      assert_eq!(summary.len(), 11);
+   }
+
+   #[test]
+   fn test_commit_summary_display() {
+      let summary = CommitSummary::new("fixed bug", 128).unwrap();
+      assert_eq!(format!("{summary}"), "fixed bug");
+   }
+
+   // ========== Serialization Tests ==========
+
+   #[test]
+   fn test_commit_type_serialize() {
+      let ct = CommitType::new("feat").unwrap();
+      let json = serde_json::to_string(&ct).unwrap();
+      assert_eq!(json, "\"feat\"");
+   }
+
+   #[test]
+   fn test_commit_type_deserialize() {
+      let ct: CommitType = serde_json::from_str("\"fix\"").unwrap();
+      assert_eq!(ct.as_str(), "fix");
+
+      // Invalid type should fail deserialization
+      let result: serde_json::Result<CommitType> = serde_json::from_str("\"invalid\"");
+      assert!(result.is_err());
+   }
+
+   #[test]
+   fn test_scope_serialize() {
+      let scope = Scope::new("api/client").unwrap();
+      let json = serde_json::to_string(&scope).unwrap();
+      assert_eq!(json, "\"api/client\"");
+   }
+
+   #[test]
+   fn test_scope_deserialize() {
+      let scope: Scope = serde_json::from_str("\"core\"").unwrap();
+      assert_eq!(scope.as_str(), "core");
+
+      // Invalid scope should fail deserialization
+      let result: serde_json::Result<Scope> = serde_json::from_str("\"INVALID\"");
+      assert!(result.is_err());
+   }
+
+   #[test]
+   fn test_commit_summary_serialize() {
+      let summary = CommitSummary::new("fixed bug", 128).unwrap();
+      let json = serde_json::to_string(&summary).unwrap();
+      assert_eq!(json, "\"fixed bug\"");
+   }
+
+   #[test]
+   fn test_commit_summary_deserialize() {
+      let summary: CommitSummary = serde_json::from_str("\"added feature\"").unwrap();
+      assert_eq!(summary.as_str(), "added feature");
+
+      // Too long should fail (>128 chars)
+      let long = format!("\"{}\"", "a".repeat(129));
+      let result: serde_json::Result<CommitSummary> = serde_json::from_str(&long);
+      assert!(result.is_err());
+
+      // Empty should fail
+      let result: serde_json::Result<CommitSummary> = serde_json::from_str("\"\"");
+      assert!(result.is_err());
+   }
+
+   #[test]
+   fn test_conventional_commit_roundtrip() {
+      let commit = ConventionalCommit {
+         commit_type: CommitType::new("feat").unwrap(),
+         scope:       Some(Scope::new("api").unwrap()),
+         summary:     CommitSummary::new_unchecked("added endpoint", 128).unwrap(),
+         body:        vec!["detail 1.".to_string(), "detail 2.".to_string()],
+         footers:     vec!["Fixes: #123".to_string()],
+      };
+
+      let json = serde_json::to_string(&commit).unwrap();
+      let deserialized: ConventionalCommit = serde_json::from_str(&json).unwrap();
+
+      assert_eq!(deserialized.commit_type.as_str(), "feat");
+      assert_eq!(deserialized.scope.unwrap().as_str(), "api");
+      assert_eq!(deserialized.summary.as_str(), "added endpoint");
+      assert_eq!(deserialized.body.len(), 2);
+      assert_eq!(deserialized.footers.len(), 1);
+   }
+}

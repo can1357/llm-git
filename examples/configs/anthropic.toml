@@ -1,0 +1,35 @@
+# Anthropic Direct API Configuration
+# Use this to connect directly to Anthropic's API
+# Set your API key: export LLM_GIT_API_KEY=sk-ant-...
+
+# API Configuration
+api_base_url = "https://api.anthropic.com/v1"
+# api_key can be set here or via LLM_GIT_API_KEY environment variable
+# api_key = "sk-ant-..."
+
+# Models (use full Anthropic model identifiers)
+analysis_model = "claude-sonnet-4.5-20250514"
+summary_model = "claude-haiku-4-5-20250514"
+
+# Commit Message Limits
+summary_guideline = 72
+summary_soft_limit = 96
+summary_hard_limit = 128
+
+# Retry Configuration
+max_retries = 3
+initial_backoff_ms = 1000
+
+# HTTP Timeouts
+request_timeout_secs = 120
+connect_timeout_secs = 30
+
+# Diff Processing
+max_diff_length = 100000
+wide_change_threshold = 0.50
+
+# Compose Mode
+compose_max_rounds = 5
+
+# Model Temperature (lower = more deterministic)
+temperature = 0.2

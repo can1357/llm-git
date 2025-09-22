@@ -1,0 +1,134 @@
+[package]
+name = "llm-git"
+version = "0.1.1"
+edition = "2024"
+authors = ["can1357 <me@can.ac>"]
+license = "MIT"
+description = "AI-powered git commit message generator using Claude and other LLMs via OpenAI-compatible APIs"
+repository = "https://github.com/can1357/llm-git"
+homepage = "https://github.com/can1357/llm-git"
+documentation = "https://github.com/can1357/llm-git"
+readme = "README.md"
+keywords = ["git", "commit", "ai", "claude", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.91"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+dotenvy = "0.15"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+anyhow = "1.0"
+thiserror = "2.0"
+arboard = "3.4"  # For clipboard support
+unicode-normalization = "0.1"
+rayon = "1.10"  # For parallel processing in rewrite_history
+chrono = "0.4"  # For timestamps in backup branches
+tera = "1.1"
+rust-embed = "8.1"
+parking_lot = "0.12.5"
+
+[build-dependencies]
+serde_json = "1.0"
+
+[lints.clippy]
+# Enable comprehensive linting by default
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# === Enforce reason for all allow attributes ===
+allow_attributes_without_reason = "warn"
+
+# === Floating Point Comparisons ===
+# Tests mostly do this + we know what we're doing
+float_cmp = "allow"
+
+# === Safety ===
+undocumented_unsafe_blocks = "warn"
+cast_ptr_alignment = "allow"
+
+# === Closures and Builder Patterns ===
+# Sometimes .map(ToString::to_string) is clearer than .map(|x| x.to_string())
+redundant_closure_for_method_calls = "allow"
+# Not every function needs #[must_use], especially internal APIs
+must_use_candidate = "allow"
+# Builder pattern methods don't always need #[must_use]
+return_self_not_must_use = "allow"
+
+# === Type Inference ===
+# let _ = x; is fine without explicit type when obvious from context
+let_underscore_untyped = "allow"
+
+# === Imports ===
+# Wildcard imports can be cleaner for preludes and test modules
+wildcard_imports = "allow"
+
+# === Code Organization ===
+# #[inline(always)] is sometimes needed for performance-critical code
+inline_always = "allow"
+# Sometimes const/static declarations after code is more readable
+items_after_statements = "allow"
+
+# === Documentation ===
+# Documenting every possible error return is often redundant
+missing_errors_doc = "allow"
+# Not every panic condition needs documentation, especially assert! cases
+missing_panics_doc = "allow"
+
+# === Numeric Casts ===
+# These are often necessary and the alternatives are verbose
+cast_precision_loss = "allow"      # f64 as f32 - sometimes acceptable
+cast_possible_truncation = "allow" # u64 as u32 - often intentional
+cast_lossless = "allow"            # u32 as u64 - 'as' is cleaner than From
+cast_sign_loss = "allow"           # i32 as u32 - sometimes needed
+cast_possible_wrap = "allow"       # u32 as i32 - can be intentional
+
+# === Bit Operations ===
+# Explicit bit patterns can be clearer than hex literals
+verbose_bit_mask = "allow"
+
+# === Structs ===
+needless_pass_by_value = "allow"
+inconsistent_struct_constructor = "allow"
+struct_excessive_bools = "allow"          # usually with builders
+
+# === Code Style and Readability ===
+# 10_000_000 vs 0xDEADBEEF context dependent preference
+unreadable_literal = "allow"
+# Variables like 'req' and 'res' are fine together
+similar_names = "allow"
+# Default::default() is sometimes clearer than T::default()
+default_trait_access = "allow"
+# match / if let else is clearer than functional
+option_if_let_else = "allow"
+# Non Into conversion is more clear
+tuple_array_conversions = "allow"
+# Usually it is wrong, we pay a lot of attention to this already
+significant_drop_tightening = "allow"
+
+# === Pattern Matching ===
+# Sometimes _ is clearer than listing remaining variants
+match_wildcard_for_single_variants = "allow"
+# Duplicate match arms can be intentional for clarity/future changes
+match_same_arms = "allow"
+
+# === Debug Implementations ===
+# Not every field needs to be in Debug output
+missing_fields_in_debug = "allow"
+
+# === Complexity Limits ===
+# Arbitrary line limits don't account for necessary complexity
+too_many_lines = "allow"
+
+# === Unsafe Code ===
+unsafe_derive_deserialize = "allow"
+ref_as_ptr = "allow"
+borrow_as_ptr = "allow"
+ptr_as_ptr = "allow"

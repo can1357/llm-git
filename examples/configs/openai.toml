@@ -1,0 +1,40 @@
+# OpenAI Configuration
+# Use this to connect directly to OpenAI's API
+# Get your API key at: https://platform.openai.com/api-keys
+# Set it: export LLM_GIT_API_KEY=sk-...
+
+# API Configuration
+api_base_url = "https://api.openai.com/v1"
+# api_key can be set here or via LLM_GIT_API_KEY environment variable
+# api_key = "sk-..."
+
+# Models
+analysis_model = "gpt-4o"
+summary_model = "gpt-4o-mini"
+
+# Alternative models:
+# analysis_model = "gpt-4-turbo"
+# analysis_model = "gpt-4"
+
+# Commit Message Limits
+summary_guideline = 72
+summary_soft_limit = 96
+summary_hard_limit = 128
+
+# Retry Configuration
+max_retries = 3
+initial_backoff_ms = 1000
+
+# HTTP Timeouts
+request_timeout_secs = 120
+connect_timeout_secs = 30
+
+# Diff Processing
+max_diff_length = 100000
+wide_change_threshold = 0.50
+
+# Compose Mode
+compose_max_rounds = 5
+
+# Model Temperature (OpenAI models may benefit from slightly higher temp)
+temperature = 0.3
