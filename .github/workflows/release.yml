@@ -21,6 +21,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: llm-git
             asset_name: llm-git-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: llm-git
+            asset_name: llm-git-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: llm-git
+            asset_name: llm-git-macos-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: llm-git.exe
@@ -33,23 +41,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
