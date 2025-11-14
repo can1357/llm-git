@@ -3,6 +3,32 @@ use crate::{
    error::{CommitGenError, Result},
    types::ConventionalCommit,
 };
+use std::process::Command;
+
+/// Get repository name from git working directory
+fn get_repository_name() -> Result<String> {
+   let output = Command::new("git")
+      .args(["rev-parse", "--show-toplevel"])
+      .output()
+      .map_err(|e| CommitGenError::GitError(e.to_string()))?;
+
+   if !output.status.success() {
+      return Err(CommitGenError::GitError("Failed to get repository root".to_string()));
+   }
+
+   let path = String::from_utf8_lossy(&output.stdout);
+   let repo_name = std::path::Path::new(path.trim())
+      .file_name()
+      .and_then(|n| n.to_str())
+      .ok_or_else(|| CommitGenError::GitError("Could not extract repository name".to_string()))?;
+
+   Ok(repo_name.to_string())
+}
+
+/// Normalize name for comparison (convert hyphens/underscores, lowercase)
+fn normalize_name(name: &str) -> String {
+   name.to_lowercase().replace(['-', '_'], "")
+}
 
 /// Check if word is past-tense verb using morphology + common irregulars
 pub fn is_past_tense_verb(word: &str) -> bool {
@@ -108,6 +134,21 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
       return Err(CommitGenError::InvalidScope(
          "Scope cannot be empty string (omit if not applicable)".to_string(),
       ));
+   }
+
+   // Reject scope if it's just the project/repo name
+   if let Some(ref scope) = msg.scope {
+      if let Ok(repo_name) = get_repository_name() {
+         let normalized_scope = normalize_name(scope.as_str());
+         let normalized_repo = normalize_name(&repo_name);
+
+         if normalized_scope == normalized_repo {
+            return Err(CommitGenError::InvalidScope(format!(
+               "Scope '{}' is the project name - omit scope for project-wide changes",
+               scope
+            )));
+         }
+      }
    }
 
    // Check summary not empty

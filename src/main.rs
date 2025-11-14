@@ -220,6 +220,28 @@ fn validate_and_process(
          },
          Err(e) => {
             let message = e.to_string();
+
+            // Special case: if scope is the project name, remove it and re-validate once
+            if message.contains("is the project name") && commit_msg.scope.is_some() {
+               eprintln!("⚠ Scope matches project name, removing scope...");
+               commit_msg.scope = None;
+               post_process_commit_message(commit_msg, config);
+
+               // Re-validate with scope removed
+               match validate_commit_message(commit_msg, config) {
+                  Ok(()) => {
+                     validation_error = None;
+                     break;
+                  },
+                  Err(e2) => {
+                     let message2 = e2.to_string();
+                     eprintln!("Validation failed after scope removal: {message2}");
+                     validation_error = Some(message2);
+                     // Fall through to normal retry logic
+                  }
+               }
+            }
+
             eprintln!("Validation attempt {} failed: {message}", attempt + 1);
             validation_error = Some(message);
             if attempt < 2 {
@@ -332,9 +354,9 @@ fn main() -> Result<()> {
    };
 
    // Validate and process
-   if let Some(err) =
-      validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config)
-   {
+   let validation_failed = validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config);
+
+   if let Some(ref err) = validation_failed {
       eprintln!("Warning: Generated message failed validation even after retry: {err}");
       eprintln!("You may want to manually edit the message before committing.");
    }
@@ -365,7 +387,13 @@ fn main() -> Result<()> {
    }
 
    // Auto-commit for staged mode (unless dry-run)
+   // Don't commit if validation failed
    if matches!(args.mode, Mode::Staged) {
+      if validation_failed.is_some() {
+         eprintln!("\n⚠ Skipping commit due to validation failure. Use --dry-run to test or manually commit.");
+         return Err(CommitGenError::ValidationError("Commit message validation failed".to_string()));
+      }
+
       println!("\nPreparing to commit...");
       git_commit(&formatted_message, args.dry_run, &args.dir)?;
 
