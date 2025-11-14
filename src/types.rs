@@ -458,6 +458,10 @@ pub struct Args {
    #[arg(long)]
    pub dry_run: bool,
 
+   /// Push changes after committing
+   #[arg(long)]
+   pub push: bool,
+
    /// Directory to run git commands in
    #[arg(long, default_value = ".")]
    pub dir: String,
@@ -563,6 +567,7 @@ impl Default for Args {
          target:                  None,
          copy:                    false,
          dry_run:                 false,
+         push:                    false,
          dir:                     ".".to_string(),
          model:                   None,
          summary_model:           None,

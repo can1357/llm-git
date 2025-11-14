@@ -6,7 +6,7 @@ use compose::run_compose_mode;
 use config::CommitConfig;
 use diff::smart_truncate_diff;
 use error::{CommitGenError, Result};
-use git::{get_git_diff, get_git_stat, git_commit};
+use git::{get_git_diff, get_git_stat, git_commit, git_push};
 use llm_git::*;
 use normalization::{format_commit_message, post_process_commit_message};
 use types::{Args, ConventionalAnalysis, ConventionalCommit, Mode, resolve_model_name};
@@ -368,6 +368,11 @@ fn main() -> Result<()> {
    if matches!(args.mode, Mode::Staged) {
       println!("\nPreparing to commit...");
       git_commit(&formatted_message, args.dry_run, &args.dir)?;
+
+      // Auto-push if requested (only if not dry-run)
+      if args.push && !args.dry_run {
+         git_push(&args.dir)?;
+      }
    }
 
    Ok(())

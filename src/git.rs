@@ -1,5 +1,6 @@
 use std::{collections::HashMap, process::Command};
 
+pub use self::git_push as push;
 use crate::{
    config::CommitConfig,
    error::{CommitGenError, Result},
@@ -253,6 +254,37 @@ pub fn git_commit(message: &str, dry_run: bool, dir: &str) -> Result<()> {
    let stdout = String::from_utf8_lossy(&output.stdout);
    println!("\n{stdout}");
    println!("✓ Successfully committed!");
+
+   Ok(())
+}
+
+/// Execute git push
+pub fn git_push(dir: &str) -> Result<()> {
+   println!("\nPushing changes...");
+
+   let output = Command::new("git")
+      .args(["push"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::GitError(format!("Failed to run git push: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      let stdout = String::from_utf8_lossy(&output.stdout);
+      return Err(CommitGenError::GitError(format!(
+         "Git push failed:\nstderr: {stderr}\nstdout: {stdout}"
+      )));
+   }
+
+   let stdout = String::from_utf8_lossy(&output.stdout);
+   let stderr = String::from_utf8_lossy(&output.stderr);
+   if !stdout.is_empty() {
+      println!("{stdout}");
+   }
+   if !stderr.is_empty() {
+      println!("{stderr}");
+   }
+   println!("✓ Successfully pushed!");
 
    Ok(())
 }
