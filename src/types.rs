@@ -611,7 +611,7 @@ fn value_to_string_vec(value: Value) -> Vec<String> {
          // Try to parse as JSON array if it looks like one
          if trimmed.starts_with('[') {
             // Remove trailing punctuation (., etc) that might have been added by AI
-            let cleaned = trimmed.trim_end_matches(|c: char| c == '.' || c == ',' || c == ';');
+            let cleaned = trimmed.trim_end_matches(['.', ',', ';']);
 
             // Attempt to parse as JSON array
             if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(cleaned) {
@@ -628,7 +628,7 @@ fn value_to_string_vec(value: Value) -> Vec<String> {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect()
-      }
+      },
       Value::Array(arr) => arr
          .into_iter()
          .flat_map(|v| value_to_string_vec(v).into_iter())

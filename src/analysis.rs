@@ -12,7 +12,7 @@ use crate::{
 
 /// Placeholder dirs to skip when building two-segment scopes
 const PLACEHOLDER_DIRS: &[&str] =
-   &["src", "lib", "include", "tests", "test", "benches", "examples", "docs"];
+   &["src", "lib", "bin", "crates", "include", "tests", "test", "benches", "examples", "docs"];
 
 /// Directories to skip entirely when extracting scopes
 const SKIP_DIRS: &[&str] =
@@ -123,12 +123,10 @@ impl ScopeAnalyzer {
 
       // Build candidates by walking path and extracting meaningful directory segments
       for (seg_idx, seg) in segments.iter().enumerate() {
-         // Skip placeholder dirs ONLY when deeper meaningful segments exist
+         // Skip placeholder dirs when any deeper segments exist
          if PLACEHOLDER_DIRS.contains(seg) {
-            // If this is "src" and we have more segments, skip it
-            // If it's the only segment, keep it
-            if segments.len() > seg_idx + 2 {
-               // +2 because we need at least 1 more meaningful segment after this + the file
+            // If this is a placeholder and we have more segments after it, skip it
+            if segments.len() > seg_idx + 1 {
                continue;
             }
          }
@@ -171,15 +169,11 @@ impl ScopeAnalyzer {
             if !path.contains('/') && PLACEHOLDER_DIRS.contains(&path.as_str()) {
                return false;
             }
-            // Filter out two-segment scopes starting with placeholder if root is
-            // placeholder
+            // Filter out scopes starting with placeholder dirs
             if let Some(root) = path.split('/').next()
                && PLACEHOLDER_DIRS.contains(&root)
-               && path.split('/').count() == 2
             {
-               // Only allow if this is specifically targeting a subcomponent
-               // (handled by allowing it through, filtered later if too generic)
-               return true;
+               return false;
             }
             true
          })
@@ -418,9 +412,8 @@ mod tests {
    #[test]
    fn test_extract_components_single_segment() {
       let comps = ScopeAnalyzer::extract_components_from_path("src/main.rs");
-      // "src" is placeholder, but returned by extract_components (filtered in
-      // build_scope_candidates)
-      assert_eq!(comps, vec!["src"]);
+      // "src" is a placeholder and is stripped, leaving no components
+      assert_eq!(comps, Vec::<String>::new());
    }
 
    #[test]
@@ -484,13 +477,8 @@ mod tests {
       analyzer.process_numstat_line("20\t10\tlib/{old => new}/file.rs", &config);
 
       assert_eq!(analyzer.total_lines, 30);
-      // Path "lib/new" -> extracts "lib" and "lib/new" components
-      assert!(
-         analyzer.component_lines.contains_key("lib")
-            || analyzer.component_lines.contains_key("new"),
-         "Expected either 'lib' or 'new' component, got: {:?}",
-         analyzer.component_lines
-      );
+      // Path "lib/new/file.rs" -> extracts "new" (lib is stripped as placeholder)
+      assert_eq!(analyzer.component_lines.get("new"), Some(&30));
    }
 
    #[test]

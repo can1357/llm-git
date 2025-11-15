@@ -1,9 +1,10 @@
+use std::process::Command;
+
 use crate::{
    config::CommitConfig,
    error::{CommitGenError, Result},
    types::ConventionalCommit,
 };
-use std::process::Command;
 
 /// Get repository name from git working directory
 fn get_repository_name() -> Result<String> {
@@ -137,17 +138,16 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
    }
 
    // Reject scope if it's just the project/repo name
-   if let Some(ref scope) = msg.scope {
-      if let Ok(repo_name) = get_repository_name() {
-         let normalized_scope = normalize_name(scope.as_str());
-         let normalized_repo = normalize_name(&repo_name);
+   if let Some(ref scope) = msg.scope
+      && let Ok(repo_name) = get_repository_name()
+   {
+      let normalized_scope = normalize_name(scope.as_str());
+      let normalized_repo = normalize_name(&repo_name);
 
-         if normalized_scope == normalized_repo {
-            return Err(CommitGenError::InvalidScope(format!(
-               "Scope '{}' is the project name - omit scope for project-wide changes",
-               scope
-            )));
-         }
+      if normalized_scope == normalized_repo {
+         return Err(CommitGenError::InvalidScope(format!(
+            "Scope '{scope}' is the project name - omit scope for project-wide changes"
+         )));
       }
    }
 

@@ -238,7 +238,7 @@ fn validate_and_process(
                      eprintln!("Validation failed after scope removal: {message2}");
                      validation_error = Some(message2);
                      // Fall through to normal retry logic
-                  }
+                  },
                }
             }
 
@@ -354,7 +354,8 @@ fn main() -> Result<()> {
    };
 
    // Validate and process
-   let validation_failed = validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config);
+   let validation_failed =
+      validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config);
 
    if let Some(ref err) = validation_failed {
       eprintln!("Warning: Generated message failed validation even after retry: {err}");
@@ -390,8 +391,13 @@ fn main() -> Result<()> {
    // Don't commit if validation failed
    if matches!(args.mode, Mode::Staged) {
       if validation_failed.is_some() {
-         eprintln!("\n⚠ Skipping commit due to validation failure. Use --dry-run to test or manually commit.");
-         return Err(CommitGenError::ValidationError("Commit message validation failed".to_string()));
+         eprintln!(
+            "\n⚠ Skipping commit due to validation failure. Use --dry-run to test or manually \
+             commit."
+         );
+         return Err(CommitGenError::ValidationError(
+            "Commit message validation failed".to_string(),
+         ));
       }
 
       println!("\nPreparing to commit...");
