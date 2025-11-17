@@ -670,7 +670,7 @@ where
       None => Ok(None),
       Some(scope_str) => {
          let trimmed = scope_str.trim();
-         if trimmed.is_empty() {
+         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
             Ok(None)
          } else {
             Scope::new(trimmed.to_string())
@@ -1057,5 +1057,26 @@ mod tests {
       assert_eq!(deserialized.summary.as_str(), "added endpoint");
       assert_eq!(deserialized.body.len(), 2);
       assert_eq!(deserialized.footers.len(), 1);
+   }
+
+   #[test]
+   fn test_scope_null_string_deserializes_to_none() {
+      // LLMs sometimes return "null" as a string instead of JSON null
+      let test_cases = [
+         r#"{"type":"feat","scope":"null","body":[],"issue_refs":[]}"#,
+         r#"{"type":"feat","scope":"Null","body":[],"issue_refs":[]}"#,
+         r#"{"type":"feat","scope":"NULL","body":[],"issue_refs":[]}"#,
+         r#"{"type":"feat","scope":" null ","body":[],"issue_refs":[]}"#,
+      ];
+
+      for (idx, json) in test_cases.iter().enumerate() {
+         let analysis: ConventionalAnalysis = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("Case {idx} failed to deserialize: {e}"));
+         assert!(
+            analysis.scope.is_none(),
+            "Case {idx}: Expected scope to be None, got {:?}",
+            analysis.scope
+         );
+      }
    }
 }
