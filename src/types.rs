@@ -23,7 +23,7 @@ pub fn resolve_model_name(name: &str) -> String {
    match name {
       // Claude short names
       "sonnet" | "s" => "claude-sonnet-4.5",
-      "opus" | "o" => "claude-opus-4.1",
+      "opus" | "o" | "o4.5" => "claude-opus-4.5",
       "haiku" | "h" => "claude-haiku-4-5",
       "3.5" | "sonnet-3.5" => "claude-3.5-sonnet",
       "3.7" | "sonnet-3.7" => "claude-3.7-sonnet",
