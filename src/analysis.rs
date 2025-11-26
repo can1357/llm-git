@@ -14,25 +14,12 @@ use crate::{
 /// These are organizational directories that rarely represent meaningful scopes
 const PLACEHOLDER_DIRS: &[&str] = &[
    // Rust conventions
-   "src",
-   "lib",
-   "bin",
-   "crates",
-   "benches",
-   "examples",
-   // Go conventions
-   "internal",
-   "pkg",
-   // C/C++ conventions
-   "include",
-   // Testing
-   "tests",
-   "test",
-   // Documentation
-   "docs",
-   // Generic organizational
-   "packages",
-   "modules",
+   "src", "lib", "bin", "crates", "benches", "examples", // Go conventions
+   "internal", "pkg",     // C/C++ conventions
+   "include", // Testing
+   "tests", "test", // Documentation
+   "docs", // Generic organizational
+   "packages", "modules",
 ];
 
 /// Directories to skip entirely when extracting scopes

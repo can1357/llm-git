@@ -709,13 +709,13 @@ fn extract_strings_from_malformed_json(input: &str) -> Vec<String> {
          }
 
          // Try to parse as JSON string first
-         let json_candidate = format!("\"{}\"", current_string);
+         let json_candidate = format!("\"{current_string}\"");
          if let Ok(parsed) = serde_json::from_str::<String>(&json_candidate) {
             strings.push(parsed);
          } else {
             // Fallback: Replace newlines with space and try again
             let sanitized = current_string.replace(['\n', '\r'], " ");
-            let json_sanitized = format!("\"{}\"", sanitized);
+            let json_sanitized = format!("\"{sanitized}\"");
             if let Ok(parsed) = serde_json::from_str::<String>(&json_sanitized) {
                strings.push(parsed);
             } else {
@@ -755,7 +755,8 @@ fn value_to_string_vec(value: Value) -> Vec<String> {
                   .collect();
             }
 
-            // Fallback: try sanitizing newlines (LLM sometimes outputs literal newlines in JSON strings)
+            // Fallback: try sanitizing newlines (LLM sometimes outputs literal newlines in
+            // JSON strings)
             let sanitized = cleaned.replace(['\n', '\r'], " ");
             if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&sanitized) {
                return arr
@@ -1226,36 +1227,37 @@ mod tests {
 
    #[test]
    fn test_body_array_with_newline_in_string() {
-       // This reproduces the issue where literal newlines in the string prevent JSON parsing
-       // The input mimics what happens when LLM returns a JSON string with unescaped newlines
-       let raw_str = "[\"Item 1\", \"Item\n2\"]";
-       let value = serde_json::Value::String(raw_str.to_string());
+      // This reproduces the issue where literal newlines in the string prevent JSON
+      // parsing The input mimics what happens when LLM returns a JSON string
+      // with unescaped newlines
+      let raw_str = "[\"Item 1\", \"Item\n2\"]";
+      let value = serde_json::Value::String(raw_str.to_string());
 
-       // desired behavior: should clean the newline and parse as array
-       let result = value_to_string_vec(value);
+      // desired behavior: should clean the newline and parse as array
+      let result = value_to_string_vec(value);
 
-       // It should be ["Item 1", "Item 2"] (newline replaced by space)
-       assert_eq!(result.len(), 2);
-       assert_eq!(result[0], "Item 1");
-       // Depending on implementation, it might be "Item 2" or "Item  2" etc.
-       // For now let's assume we replace with space.
-       assert_eq!(result[1], "Item 2");
+      // It should be ["Item 1", "Item 2"] (newline replaced by space)
+      assert_eq!(result.len(), 2);
+      assert_eq!(result[0], "Item 1");
+      // Depending on implementation, it might be "Item 2" or "Item  2" etc.
+      // For now let's assume we replace with space.
+      assert_eq!(result[1], "Item 2");
    }
 
    #[test]
    fn test_body_array_malformed_truncated() {
-       // This reproduces the issue where the array is truncated or has trailing punctuation
-       let raw_str = "[\"Refactored finance...\", \"Added automatic detection...\".";
-       let value = serde_json::Value::String(raw_str.to_string());
+      // This reproduces the issue where the array is truncated or has trailing
+      // punctuation
+      let raw_str = "[\"Refactored finance...\", \"Added automatic detection...\".";
+      let value = serde_json::Value::String(raw_str.to_string());
 
-       let result = value_to_string_vec(value);
+      let result = value_to_string_vec(value);
 
-       // Should recover 2 items
-       assert_eq!(result.len(), 2);
-       assert_eq!(result[0], "Refactored finance...");
-       assert_eq!(result[1], "Added automatic detection...");
+      // Should recover 2 items
+      assert_eq!(result.len(), 2);
+      assert_eq!(result[0], "Refactored finance...");
+      assert_eq!(result[1], "Added automatic detection...");
    }
-
 
    #[test]
    fn test_hunk_selector_deserialize_all() {
