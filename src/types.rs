@@ -587,6 +587,10 @@ pub struct Args {
    #[arg(long)]
    pub breaking: bool,
 
+   /// GPG sign the commit (equivalent to git commit -S)
+   #[arg(long, short = 'S')]
+   pub sign: bool,
+
    /// Path to config file (default: ~/.config/llm-git/config.toml)
    #[arg(long)]
    pub config: Option<PathBuf>,
@@ -661,6 +665,7 @@ impl Default for Args {
          resolves:                vec![],
          refs:                    vec![],
          breaking:                false,
+         sign:                    false,
          config:                  None,
          context:                 vec![],
          rewrite:                 false,

@@ -57,6 +57,10 @@ pub struct CommitConfig {
    #[serde(default = "default_exclude_old_message")]
    pub exclude_old_message: bool,
 
+   /// GPG sign commits by default (can be overridden by --sign CLI flag)
+   #[serde(default = "default_gpg_sign")]
+   pub gpg_sign: bool,
+
    /// Loaded analysis prompt (not in config file)
    #[serde(skip)]
    pub analysis_prompt: String,
@@ -80,6 +84,10 @@ const fn default_wide_change_abstract() -> bool {
 
 const fn default_exclude_old_message() -> bool {
    true
+}
+
+const fn default_gpg_sign() -> bool {
+   false
 }
 
 impl Default for CommitConfig {
@@ -130,6 +138,7 @@ impl Default for CommitConfig {
          summary_prompt_variant:  default_summary_prompt_variant(),
          wide_change_abstract:    default_wide_change_abstract(),
          exclude_old_message:     default_exclude_old_message(),
+         gpg_sign:                default_gpg_sign(),
          analysis_prompt:         String::new(),
          summary_prompt:          String::new(),
       }

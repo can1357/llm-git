@@ -101,6 +101,7 @@ llm-git --mode=commit --target=HEAD~1      # Analyze specific commit
 llm-git --copy                             # Copy message to clipboard
 llm-git -m opus                            # Use Opus model (more powerful)
 llm-git -m sonnet                          # Use Sonnet model (default)
+llm-git -S                                 # GPG sign the commit
 llm-git Fixed regression from PR #123      # Add context (trailing text)
 ```
 
@@ -275,6 +276,9 @@ compose_max_rounds = 5                           # Max rounds for multi-commit g
 
 # Model Temperature
 temperature = 0.2                                # Low for consistency (0.0-1.0)
+
+# GPG Signing
+gpg_sign = false                                 # Sign commits by default (or use --sign/-S)
 
 # File Exclusions
 excluded_files = [                               # Files to exclude from diff

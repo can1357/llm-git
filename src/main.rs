@@ -413,7 +413,8 @@ fn main() -> Result<()> {
       }
 
       println!("\nPreparing to commit...");
-      git_commit(&formatted_message, args.dry_run, &args.dir)?;
+      let sign = args.sign || config.gpg_sign;
+      git_commit(&formatted_message, args.dry_run, &args.dir, sign)?;
 
       // Auto-push if requested (only if not dry-run)
       if args.push && !args.dry_run {

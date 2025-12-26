@@ -32,3 +32,7 @@ compose_max_rounds = 5
 
 # Model Temperature (lower = more deterministic)
 temperature = 0.2
+
+# GPG Signing (set to true to always sign commits)
+# Can also use --sign/-S CLI flag
+gpg_sign = false

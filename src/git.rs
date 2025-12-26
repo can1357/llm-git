@@ -228,17 +228,28 @@ pub fn get_git_stat(
 }
 
 /// Execute git commit with the given message
-pub fn git_commit(message: &str, dry_run: bool, dir: &str) -> Result<()> {
+pub fn git_commit(message: &str, dry_run: bool, dir: &str, sign: bool) -> Result<()> {
    if dry_run {
       println!("\n{}", "=".repeat(60));
       println!("DRY RUN - Would execute:");
-      println!("git commit -m \"{}\"", message.replace('\n', "\\n"));
+      if sign {
+         println!("git commit -S -m \"{}\"", message.replace('\n', "\\n"));
+      } else {
+         println!("git commit -m \"{}\"", message.replace('\n', "\\n"));
+      }
       println!("{}", "=".repeat(60));
       return Ok(());
    }
 
+   let mut args = vec!["commit"];
+   if sign {
+      args.push("-S");
+   }
+   args.push("-m");
+   args.push(message);
+
    let output = Command::new("git")
-      .args(["commit", "-m", message])
+      .args(&args)
       .current_dir(dir)
       .output()
       .map_err(|e| CommitGenError::GitError(format!("Failed to run git commit: {e}")))?;
