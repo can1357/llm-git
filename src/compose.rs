@@ -786,7 +786,7 @@ pub fn execute_compose(
       // Create commit (unless preview mode)
       if !args.compose_preview {
          let sign = args.sign || config.gpg_sign;
-         git_commit(&formatted_message, false, dir, sign)?;
+         git_commit(&formatted_message, false, dir, sign, args.skip_hooks)?;
          let hash = get_head_hash(dir)?;
          commit_hashes.push(hash);
 

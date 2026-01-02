@@ -228,15 +228,19 @@ pub fn get_git_stat(
 }
 
 /// Execute git commit with the given message
-pub fn git_commit(message: &str, dry_run: bool, dir: &str, sign: bool) -> Result<()> {
+pub fn git_commit(
+   message: &str,
+   dry_run: bool,
+   dir: &str,
+   sign: bool,
+   skip_hooks: bool,
+) -> Result<()> {
    if dry_run {
       println!("\n{}", "=".repeat(60));
       println!("DRY RUN - Would execute:");
-      if sign {
-         println!("git commit -S -m \"{}\"", message.replace('\n', "\\n"));
-      } else {
-         println!("git commit -m \"{}\"", message.replace('\n', "\\n"));
-      }
+      let sign_flag = if sign { " -S" } else { "" };
+      let hooks_flag = if skip_hooks { " --no-verify" } else { "" };
+      println!("git commit{sign_flag}{hooks_flag} -m \"{}\"", message.replace('\n', "\\n"));
       println!("{}", "=".repeat(60));
       return Ok(());
    }
@@ -244,6 +248,9 @@ pub fn git_commit(message: &str, dry_run: bool, dir: &str, sign: bool) -> Result
    let mut args = vec!["commit"];
    if sign {
       args.push("-S");
+   }
+   if skip_hooks {
+      args.push("--no-verify");
    }
    args.push("-m");
    args.push(message);

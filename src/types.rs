@@ -591,6 +591,10 @@ pub struct Args {
    #[arg(long, short = 'S')]
    pub sign: bool,
 
+   /// Skip pre-commit and commit-msg hooks (equivalent to git commit --no-verify)
+   #[arg(long, short = 'n')]
+   pub skip_hooks: bool,
+
    /// Path to config file (default: ~/.config/llm-git/config.toml)
    #[arg(long)]
    pub config: Option<PathBuf>,
@@ -666,6 +670,7 @@ impl Default for Args {
          refs:                    vec![],
          breaking:                false,
          sign:                    false,
+         skip_hooks:              false,
          config:                  None,
          context:                 vec![],
          rewrite:                 false,
