@@ -547,7 +547,7 @@ pub struct Args {
    pub dry_run: bool,
 
    /// Push changes after committing
-   #[arg(long)]
+   #[arg(long, short = 'p')]
    pub push: bool,
 
    /// Directory to run git commands in
