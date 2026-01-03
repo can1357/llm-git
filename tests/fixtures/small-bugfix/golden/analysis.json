@@ -1,0 +1,12 @@
+{
+  "type": "fix",
+  "scope": "crypto/threshold",
+  "details": [
+    {
+      "text": "Moved BLS early-return after VSS verification to ensure proper validation before signing.",
+      "changelog_category": "Fixed",
+      "user_visible": true
+    }
+  ],
+  "issue_refs": []
+}

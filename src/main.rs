@@ -27,10 +27,203 @@ fn save_debug_output(dir: &Path, filename: &str, content: &str) -> Result<()> {
    Ok(())
 }
 
+/// Run test mode for fixture-based testing
+fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+   use llm_git::testing::{self, TestRunner, TestSummary};
+
+   let fixtures_dir = args
+      .fixtures_dir
+      .clone()
+      .unwrap_or_else(testing::fixtures_dir);
+
+   // Handle --test-list
+   if args.test_list {
+      let fixtures = testing::fixture::discover_fixtures(&fixtures_dir)?;
+      if fixtures.is_empty() {
+         println!("No fixtures found in {}", fixtures_dir.display());
+      } else {
+         println!("Available fixtures ({}):", fixtures.len());
+         for name in fixtures {
+            println!("  {name}");
+         }
+      }
+      return Ok(());
+   }
+
+   // Handle --test-add
+   if let Some(ref commit_hash) = args.test_add {
+      let name = args.test_name.as_ref().ok_or_else(|| {
+         CommitGenError::Other("--test-name is required when using --test-add".to_string())
+      })?;
+
+      return add_fixture(
+         &fixtures_dir,
+         commit_hash,
+         name,
+         &args.dir,
+         config,
+      );
+   }
+
+   // Handle --test-update
+   if args.test_update {
+      let runner = TestRunner::new(&fixtures_dir, config.clone())
+         .with_filter(args.test_filter.clone());
+
+      println!("Updating golden files...");
+      let updated = runner.update_all()?;
+      println!("Updated {} fixtures:", updated.len());
+      for name in &updated {
+         println!("  ✓ {name}");
+      }
+      return Ok(());
+   }
+
+   // Default: run tests
+   let runner = TestRunner::new(&fixtures_dir, config.clone())
+      .with_filter(args.test_filter.clone());
+
+   println!("Running fixture tests from {}...\n", fixtures_dir.display());
+
+   let results = runner.run_all()?;
+
+   if results.is_empty() {
+      println!("No fixtures found.");
+      return Ok(());
+   }
+
+   // Print results
+   for result in &results {
+      if let Some(ref err) = result.error {
+         println!("✗ {} - ERROR: {}", result.name, err);
+      } else if let Some(ref cmp) = result.comparison {
+         println!("{} {} - {}",
+            if cmp.passed { "✓" } else { "✗" },
+            result.name,
+            cmp.summary
+         );
+      } else {
+         println!("? {} - no golden file", result.name);
+      }
+   }
+
+   // Print summary
+   let summary = TestSummary::from_results(&results);
+   println!("\n─────────────────────────────────────");
+   println!(
+      "Total: {} | Passed: {} | Failed: {} | No golden: {} | Errors: {}",
+      summary.total, summary.passed, summary.failed, summary.no_golden, summary.errors
+   );
+
+   if !summary.all_passed() {
+      return Err(CommitGenError::Other("Some tests failed".to_string()));
+   }
+
+   Ok(())
+}
+
+/// Add a new fixture from a commit
+fn add_fixture(
+   fixtures_dir: &Path,
+   commit_hash: &str,
+   name: &str,
+   repo_dir: &str,
+   config: &CommitConfig,
+) -> Result<()> {
+   use llm_git::testing::{Fixture, FixtureContext, FixtureEntry, FixtureInput, FixtureMeta, Manifest};
+
+   println!("Creating fixture '{}' from commit {}...", name, commit_hash);
+
+   // Get diff and stat
+   let diff = git::get_git_diff(&Mode::Commit, Some(commit_hash), repo_dir, config)?;
+   let stat = git::get_git_stat(&Mode::Commit, Some(commit_hash), repo_dir, config)?;
+
+   // Get scope candidates
+   let (scope_candidates, _) = analysis::extract_scope_candidates(
+      &Mode::Commit,
+      Some(commit_hash),
+      repo_dir,
+      config,
+   )?;
+
+   // Get context from current repo state
+   let (recent_commits_str, common_scopes_str) = match git::get_recent_commits(repo_dir, 20) {
+      Ok(commits) if !commits.is_empty() => {
+         let style_patterns = git::extract_style_patterns(&commits);
+         let style_str = style_patterns.map(|p| p.format_for_prompt());
+
+         let scopes = git::get_common_scopes(repo_dir, 100)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|scopes| {
+               scopes
+                  .iter()
+                  .take(10)
+                  .map(|(scope, count)| format!("{scope} ({count})"))
+                  .collect::<Vec<_>>()
+                  .join(", ")
+            });
+
+         (style_str, scopes)
+      },
+      _ => (None, None),
+   };
+
+   let repo_meta = llm_git::repo::RepoMetadata::detect(std::path::Path::new(repo_dir));
+   let project_context_str = repo_meta.format_for_prompt();
+
+   // Build fixture
+   let fixture = Fixture {
+      name: name.to_string(),
+      meta: FixtureMeta {
+         source_repo:   repo_dir.to_string(),
+         source_commit: commit_hash.to_string(),
+         description:   format!("Fixture from commit {}", commit_hash),
+         captured_at:   chrono::Utc::now().to_rfc3339(),
+         tags:          vec![],
+      },
+      input: FixtureInput {
+         diff,
+         stat,
+         scope_candidates,
+         context: FixtureContext {
+            recent_commits:  recent_commits_str,
+            common_scopes:   common_scopes_str,
+            project_context: project_context_str,
+            user_context:    None,
+         },
+      },
+      golden: None,
+   };
+
+   // Save fixture
+   std::fs::create_dir_all(fixtures_dir)?;
+   fixture.save(fixtures_dir)?;
+
+   // Update manifest
+   let mut manifest = Manifest::load(fixtures_dir)?;
+   manifest.add(
+      name.to_string(),
+      FixtureEntry {
+         description: format!("From commit {}", commit_hash),
+         tags:        vec![],
+      },
+   );
+   manifest.save(fixtures_dir)?;
+
+   println!("✓ Created fixture at {}/{}", fixtures_dir.display(), name);
+   println!("  Run with --test-update to generate golden files");
+
+   Ok(())
+}
+
 /// Apply CLI overrides to config
 fn apply_cli_overrides(config: &mut CommitConfig, args: &Args) {
+   let mut model_changed = false;
+
    if let Some(ref model) = args.model {
       config.analysis_model = resolve_model_name(model);
+      model_changed = true;
    }
    if let Some(ref summary_model) = args.summary_model {
       config.summary_model = resolve_model_name(summary_model);
@@ -47,6 +240,11 @@ fn apply_cli_overrides(config: &mut CommitConfig, args: &Args) {
    }
    if args.exclude_old_message {
       config.exclude_old_message = true;
+   }
+
+   // Reinitialize token counter if model changed (affects tiktoken selection)
+   if model_changed {
+      config.init_token_counter();
    }
 }
 
@@ -348,6 +546,11 @@ fn main() -> Result<()> {
    // Route to rewrite mode if --rewrite flag is present
    if args.rewrite {
       return rewrite::run_rewrite_mode(&args, &config);
+   }
+
+   // Route to test mode if --test flag is present
+   if args.test {
+      return run_test_mode(&args, &config);
    }
 
    // Auto-stage all changes if nothing staged in commit mode

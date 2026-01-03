@@ -1,0 +1,499 @@
+diff --git a/lib/actor/src/addr.rs b/lib/actor/src/addr.rs
+index 5d4a6bfa2..4fca48603 100644
+--- a/lib/actor/src/addr.rs
++++ b/lib/actor/src/addr.rs
+@@ -303,68 +303,69 @@ impl<R: Send + Sync> JoinHandle<R> {
+    }
+ }
+ 
+-/// Runtime metadata shared between all address clones and the actor loop.
++/// Actor controller shared between all address handles and the actor
++/// loop.
+ ///
+ /// Contains the actor's task handle for exit monitoring, optional name
+ /// for debugging/lookup, and system ID for identifying the owning system.
+-pub struct Cell<A: ?Sized + Actor> {
++pub struct Controller<A: ?Sized + Actor> {
++   pub(crate) name:   Option<SmolStr>,
+    pub(crate) weak:   WeakAddrTx<A>,
+    pub(crate) id:     ActorId,
+    pub(crate) worker: JoinHandle<A::Output>,
+-   pub(crate) name:   Option<SmolStr>,
+ }
+ 
+-impl<A: ?Sized + Actor> IdRef for Cell<A> {
++impl<A: ?Sized + Actor> IdRef for Controller<A> {
+    fn actor_id(&self) -> ActorId {
+       self.id
+    }
+ }
+ 
+-impl<A: ?Sized + Actor> KnownTypeRef for Cell<A> {
++impl<A: ?Sized + Actor> KnownTypeRef for Controller<A> {
+    type Target = A;
+ }
+ 
+-/// Type-erased cell trait.
+-pub trait ErasedCell: fmt::Debug + Send + Sync + IdRef + DynTypeRef + 'static {
++/// Type-erased controller trait.
++pub trait ErasedController: fmt::Debug + Send + Sync + IdRef + DynTypeRef + 'static {
+    /// Returns the name of the actor.
+    fn name(&self) -> Option<&SmolStr>;
+ }
+ 
+-impl<A: ?Sized + Actor> ErasedCell for Cell<A> {
++impl<A: ?Sized + Actor> ErasedController for Controller<A> {
+    fn name(&self) -> Option<&SmolStr> {
+       self.name.as_ref()
+    }
+ }
+ 
+-/// Dynamic cell type erased for runtime type information.
+-pub type DynCell = Arc<dyn ErasedCell>;
++/// Dynamic controller type erased for runtime type information.
++pub type DynController = Arc<dyn ErasedController>;
+ 
+-impl dyn ErasedCell {
+-   /// Downcasts the cell to the given type and panics if the type does not
+-   /// match.
+-   pub fn downcast_into<A: ?Sized + Actor>(self: Arc<Self>) -> Arc<Cell<A>> {
++impl dyn ErasedController {
++   /// Downcasts the controller to the given type and panics if the type does
++   /// not match.
++   pub fn downcast_into<A: ?Sized + Actor>(self: Arc<Self>) -> Arc<Controller<A>> {
+       (self.as_ref() as &dyn DynTypeRef).assert_actor_type::<A>();
+ 
+-      // SAFETY: We know the cell is of type Cell<A> because it's keyed by
+-      // TypeId::of::<A>()
+-      unsafe { Arc::from_raw(Arc::into_raw(self) as *const Cell<A>) }
++      // SAFETY: We know the controller is of type Controller<A> because it's
++      // keyed by TypeId::of::<A>()
++      unsafe { Arc::from_raw(Arc::into_raw(self) as *const Controller<A>) }
+    }
+ 
+-   /// Tries to downcast the cell to the given type.
+-   pub fn try_downcast<A: ?Sized + Actor>(self: &Arc<Self>) -> Option<Arc<Cell<A>>> {
++   /// Tries to downcast the controller to the given type.
++   pub fn try_downcast<A: ?Sized + Actor>(self: &Arc<Self>) -> Option<Arc<Controller<A>>> {
+       (self.as_ref() as &dyn DynTypeRef)
+          .is_actor_type::<A>()
+          .then(|| {
+-            // SAFETY: We know the cell is of type Cell<A> because it's keyed by
+-            // TypeId::of::<A>()
+-            unsafe { Arc::from_raw(Arc::into_raw(self.clone()) as *const Cell<A>) }
++            // SAFETY: We know the controller is of type Controller<A> because it's
++            // keyed by TypeId::of::<A>()
++            unsafe { Arc::from_raw(Arc::into_raw(self.clone()) as *const Controller<A>) }
+          })
+    }
+ }
+ 
+-impl<A: ?Sized + Actor> fmt::Debug for Cell<A> {
++impl<A: ?Sized + Actor> fmt::Debug for Controller<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-      f.debug_struct("Cell")
++      f.debug_struct("Controller")
+          .field("id", &self.id)
+          .field("name", &self.name)
+          .field("weak", &self.weak)
+@@ -372,26 +373,26 @@ impl<A: ?Sized + Actor> fmt::Debug for Cell<A> {
+    }
+ }
+ 
+-impl<A: ?Sized + Actor> IdRef for Arc<Cell<A>> {
++impl<A: ?Sized + Actor> IdRef for Arc<Controller<A>> {
+    fn actor_id(&self) -> ActorId {
+       self.id
+    }
+ }
+ 
+-impl<A: ?Sized + Actor> WeakActorRef for Arc<Cell<A>> {
++impl<A: ?Sized + Actor> WeakActorRef for Arc<Controller<A>> {
+    type Target = A;
+ 
+    fn weak_addr(&self) -> WeakAddr<A> {
+-      WeakAddr { id: self.actor_id(), tx: self.weak.clone(), cell: Self::downgrade(self) }
++      WeakAddr { id: self.actor_id(), tx: self.weak.clone(), ctl: Self::downgrade(self) }
+    }
+ 
+-   fn weak_cell(&self) -> Weak<Cell<A>> {
++   fn weak_controller(&self) -> Weak<Controller<A>> {
+       Arc::downgrade(self)
+    }
+ 
+    fn try_addr(&self) -> Option<Addr<Self::Target>> {
+       let strong = self.weak.upgrade()?;
+-      Some(Addr { tx: strong, cell: self.clone() })
++      Some(Addr { tx: strong, ctl: self.clone() })
+    }
+ }
+ 
+@@ -402,19 +403,19 @@ impl<A: ?Sized + Actor> WeakActorRef for Arc<Cell<A>> {
+ /// patterns. Cloning an address is cheap as it shares the underlying channel
+ /// and metadata.
+ pub struct Addr<A: ?Sized + Actor> {
+-   pub(crate) tx:   AddrTx<A>,
+-   pub(crate) cell: Arc<Cell<A>>,
++   pub(crate) tx:  AddrTx<A>,
++   pub(crate) ctl: Arc<Controller<A>>,
+ }
+ 
+ impl<A: ?Sized + Actor> IdRef for Addr<A> {
+    fn actor_id(&self) -> ActorId {
+-      self.cell.id
++      self.ctl.id
+    }
+ }
+ 
+ impl<A: ?Sized + Actor> IdRef for &Addr<A> {
+    fn actor_id(&self) -> ActorId {
+-      self.cell.id
++      self.ctl.id
+    }
+ }
+ 
+@@ -425,12 +426,12 @@ impl<A: ?Sized + Actor> ActorRef for Addr<A> {
+       self.clone()
+    }
+ 
+-   fn cell(&self) -> Arc<Cell<A>> {
+-      self.cell.clone()
++   fn controller(&self) -> Arc<Controller<A>> {
++      self.ctl.clone()
+    }
+ 
+-   fn weak_cell(&self) -> Weak<Cell<A>> {
+-      Arc::downgrade(&self.cell)
++   fn weak_controller(&self) -> Weak<Controller<A>> {
++      Arc::downgrade(&self.ctl)
+    }
+ 
+    fn weak_addr(&self) -> WeakAddr<A> {
+@@ -445,12 +446,12 @@ impl<A: ?Sized + Actor> ActorRef for &Addr<A> {
+       (*self).clone()
+    }
+ 
+-   fn cell(&self) -> Arc<Cell<A>> {
+-      self.cell.clone()
++   fn controller(&self) -> Arc<Controller<A>> {
++      self.ctl.clone()
+    }
+ 
+-   fn weak_cell(&self) -> Weak<Cell<A>> {
+-      Arc::downgrade(&self.cell)
++   fn weak_controller(&self) -> Weak<Controller<A>> {
++      Arc::downgrade(&self.ctl)
+    }
+ 
+    fn weak_addr(&self) -> WeakAddr<A> {
+@@ -461,40 +462,40 @@ impl<A: ?Sized + Actor> ActorRef for &Addr<A> {
+ impl<A: ?Sized + Actor> Addr<A> {
+    /// Gets the ID of the actor.
+    pub fn id(&self) -> ActorId {
+-      self.cell.id
++      self.ctl.id
+    }
+ 
+-   /// Returns a reference to the cell.
+-   pub const fn cell(&self) -> &Arc<Cell<A>> {
+-      &self.cell
++   /// Returns a reference to the controller.
++   pub const fn controller(&self) -> &Arc<Controller<A>> {
++      &self.ctl
+    }
+ 
+-   /// Returns a reference to the address.
++   /// Returns a reference to the address tx.
+    pub const fn tx(&self) -> &AddrTx<A> {
+       &self.tx
+    }
+ 
+    /// Downgrades the address to a weak reference.
+    pub fn downgrade(&self) -> WeakAddr<A> {
+-      WeakAddr { id: self.id(), tx: self.tx.downgrade(), cell: Arc::downgrade(&self.cell) }
++      WeakAddr { id: self.id(), tx: self.tx.downgrade(), ctl: Arc::downgrade(&self.ctl) }
+    }
+ }
+ 
+ impl<A: ?Sized + Actor> Clone for Addr<A> {
+    fn clone(&self) -> Self {
+-      Self { tx: self.tx.clone(), cell: self.cell.clone() }
++      Self { tx: self.tx.clone(), ctl: self.ctl.clone() }
+    }
+ }
+ 
+ impl<A: ?Sized + Actor> fmt::Debug for Addr<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-      if let Some(name) = self.cell.name.as_ref() {
++      if let Some(name) = self.ctl.name.as_ref() {
+          f.debug_struct("Addr")
+             .field("name", &name)
+-            .field("id", &self.cell.id)
++            .field("id", &self.ctl.id)
+             .finish()
+       } else {
+-         f.debug_struct("Addr").field("id", &self.cell.id).finish()
++         f.debug_struct("Addr").field("id", &self.ctl.id).finish()
+       }
+    }
+ }
+@@ -506,9 +507,9 @@ impl<A: ?Sized + Actor> fmt::Debug for Addr<A> {
+ /// avoiding circular references and managing actor lifetimes without
+ /// preventing cleanup.
+ pub struct WeakAddr<A: ?Sized + Actor> {
+-   pub(crate) id:   ActorId,
+-   pub(crate) tx:   WeakAddrTx<A>,
+-   pub(crate) cell: Weak<Cell<A>>,
++   pub(crate) id:  ActorId,
++   pub(crate) tx:  WeakAddrTx<A>,
++   pub(crate) ctl: Weak<Controller<A>>,
+ }
+ 
+ impl<A: ?Sized + Actor> Default for WeakAddr<A> {
+@@ -536,8 +537,12 @@ impl<A: ?Sized + Actor> WeakActorRef for WeakAddr<A> {
+       self.clone()
+    }
+ 
+-   fn weak_cell(&self) -> Weak<Cell<A>> {
+-      self.cell.clone()
++   fn try_controller(&self) -> Option<Arc<Controller<A>>> {
++      Weak::upgrade(&self.ctl)
++   }
++
++   fn weak_controller(&self) -> Weak<Controller<A>> {
++      self.ctl.clone()
+    }
+ }
+ 
+@@ -548,15 +553,19 @@ impl<A: ?Sized + Actor> WeakActorRef for &WeakAddr<A> {
+       (*self).clone()
+    }
+ 
+-   fn weak_cell(&self) -> Weak<Cell<A>> {
+-      self.cell.clone()
++   fn try_controller(&self) -> Option<Arc<Controller<A>>> {
++      Weak::upgrade(&self.ctl)
++   }
++
++   fn weak_controller(&self) -> Weak<Controller<A>> {
++      self.ctl.clone()
+    }
+ }
+ 
+ impl<A: ?Sized + Actor> WeakAddr<A> {
+    /// Creates a new weak address.
+    pub const fn new() -> Self {
+-      Self { id: ActorId::nil(), tx: WeakAddrTx::new(), cell: Weak::new() }
++      Self { id: ActorId::nil(), tx: WeakAddrTx::new(), ctl: Weak::new() }
+    }
+ 
+    /// Gets the ID of the actor.
+@@ -564,11 +573,6 @@ impl<A: ?Sized + Actor> WeakAddr<A> {
+       self.id
+    }
+ 
+-   /// Returns a reference to the actor's cell.
+-   pub const fn cell(&self) -> &Weak<Cell<A>> {
+-      &self.cell
+-   }
+-
+    /// Returns a reference to the actor's address.
+    pub const fn tx(&self) -> &WeakAddrTx<A> {
+       &self.tx
+@@ -579,7 +583,7 @@ impl<A: ?Sized + Actor> WeakAddr<A> {
+    /// Returns `None` if the actor has already been dropped, indicating
+    /// that the actor is no longer available for messaging.
+    pub fn upgrade(&self) -> Option<Addr<A>> {
+-      Some(Addr { tx: self.tx.upgrade()?, cell: Weak::upgrade(&self.cell)? })
++      Some(Addr { tx: self.tx.upgrade()?, ctl: Weak::upgrade(&self.ctl)? })
+    }
+ 
+    /// Attempts to upgrade the weak reference to a strong [`AddrTx`].
+@@ -590,14 +594,6 @@ impl<A: ?Sized + Actor> WeakAddr<A> {
+       self.tx.upgrade()
+    }
+ 
+-   /// Attempts to upgrade the weak reference to a strong [`Cell`].
+-   ///
+-   /// Returns `None` if the actor has already been dropped, indicating
+-   /// that the actor is no longer available for messaging.
+-   pub fn upgrade_cell(&self) -> Option<Arc<Cell<A>>> {
+-      Weak::upgrade(&self.cell)
+-   }
+-
+    /// Sends a message and waits for the response (request-response).
+    pub fn request<M: Deliverable<A>>(&self, msg: M) -> RequestFuture<M, A> {
+       self.tx.request(msg)
+@@ -614,15 +610,15 @@ impl<A: ?Sized + Actor> WeakAddr<A> {
+ 
+ impl<A: ?Sized + Actor> Clone for WeakAddr<A> {
+    fn clone(&self) -> Self {
+-      Self { id: self.id, tx: self.tx.clone(), cell: self.cell.clone() }
++      Self { id: self.id, tx: self.tx.clone(), ctl: self.ctl.clone() }
+    }
+ }
+ 
+ impl<A: ?Sized + Actor> fmt::Debug for WeakAddr<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-      let cell = self.cell.upgrade();
+-      if let Some(cell) = cell {
+-         if let Some(name) = cell.name.as_ref() {
++      let controller = self.ctl.upgrade();
++      if let Some(controller) = controller {
++         if let Some(name) = controller.name.as_ref() {
+             f.debug_struct("WeakAddr")
+                .field("name", &name)
+                .field("id", &self.id)
+@@ -841,7 +837,7 @@ impl<A: ?Sized + Actor> Addr<A> {
+    /// let exit_status = handle.join().await;
+    /// ```
+    pub fn join_handle(&self) -> JoinHandle<A::Output> {
+-      self.cell.worker.clone()
++      self.ctl.worker.clone()
+    }
+ 
+    /// Waits for the actor to terminate and returns its exit status.
+@@ -850,7 +846,7 @@ impl<A: ?Sized + Actor> Addr<A> {
+    /// Multiple callers can join on cloned handles and all will
+    /// receive the same exit result.
+    pub async fn join(&self) -> &ActorExit<A::Output> {
+-      self.cell.worker.join().await
++      self.ctl.worker.join().await
+    }
+ }
+ 
+diff --git a/lib/actor/src/system.rs b/lib/actor/src/system.rs
+index c46c5ad35..82de432d6 100644
+--- a/lib/actor/src/system.rs
++++ b/lib/actor/src/system.rs
+@@ -14,13 +14,13 @@ use tetra_core::smol_str::{IntoSmolStr, SmolStr};
+ use tokio::task::JoinSet;
+ 
+ use super::{
+-   addr::{ActorExit, Addr, Cell, ExitSender},
++   addr::{ActorExit, Addr, Controller, ExitSender},
+    mailbox::Mailbox,
+    supervisor::{self, SupervisorPolicy},
+    *,
+ };
+ use crate::{
+-   addr::DynCell,
++   addr::DynController,
+    traits::{ActorId, ActorRef, WeakActorRef},
+ };
+ 
+@@ -90,7 +90,7 @@ impl<R: RngCore + Send + 'static> ActorIdSource for Mutex<R> {
+ ///
+ /// Thread-safe and can be shared across async tasks.
+ pub struct System {
+-   labels:    DashMap<SmolStr, BTreeMap<TypeId, DynCell>>,
++   labels:    DashMap<SmolStr, BTreeMap<TypeId, DynController>>,
+    tasks:     Option<Mutex<JoinSet<()>>>,
+    id_source: Box<dyn ActorIdSource>,
+ }
+@@ -163,7 +163,7 @@ impl System {
+       addr: impl ActorRef<Target = A>,
+    ) {
+       let mut labels = self.labels.entry(label.into_smolstr()).or_default();
+-      labels.insert(TypeId::of::<A>(), addr.cell());
++      labels.insert(TypeId::of::<A>(), addr.controller());
+    }
+ 
+    /// Looks up an actor address by type and label.
+@@ -175,7 +175,7 @@ impl System {
+       self.labels.get(label).and_then(|labels| {
+          labels
+             .get(&TypeId::of::<A>())
+-            .and_then(|cell| cell.try_downcast::<A>().and_then(|cell| cell.try_addr()))
++            .and_then(|ctl| ctl.try_downcast::<A>().and_then(|ctl| ctl.try_addr()))
+       })
+    }
+ 
+@@ -200,14 +200,14 @@ impl System {
+          None => Mailbox::unbounded(),
+       };
+ 
+-      // runtime cell
++      // runtime controller
+       let exit_tx = ExitSender::new();
+       let id = this.id_source.next();
+-      let cell =
+-         Arc::new(Cell::<A> { weak: tx.downgrade(), id, worker: exit_tx.subscribe(), name });
++      let controller =
++         Arc::new(Controller::<A> { weak: tx.downgrade(), id, worker: exit_tx.subscribe(), name });
+ 
+       // construct address
+-      let addr = Addr { tx, cell };
++      let addr = Addr { tx, ctl: controller };
+ 
+       // Initialize environment and initialize lazy fields
+       let mut env = env.unwrap_or_default();
+diff --git a/lib/actor/src/traits.rs b/lib/actor/src/traits.rs
+index fcb51aa0a..ef7a7c88c 100644
+--- a/lib/actor/src/traits.rs
++++ b/lib/actor/src/traits.rs
+@@ -12,7 +12,7 @@ use uuid::Uuid;
+ use super::{addr::Addr, system::Spawner, *};
+ use crate::{
+    Actenv,
+-   addr::{Cell, WeakAddr},
++   addr::{Controller, WeakAddr},
+ };
+ 
+ /// A typed result for an actor.
+@@ -298,14 +298,14 @@ pub trait ActorRef: IdRef {
+    /// the actor alive as long as it exists.
+    fn addr(&self) -> Addr<Self::Target>;
+ 
+-   /// Returns a reference to the cell of the actor.
+-   fn cell(&self) -> Arc<Cell<Self::Target>> {
+-      self.addr().cell().clone()
++   /// Returns a reference to the controller of the actor.
++   fn controller(&self) -> Arc<Controller<Self::Target>> {
++      self.addr().controller().clone()
+    }
+ 
+-   /// Returns a weak reference to the cell of the actor.
+-   fn weak_cell(&self) -> Weak<Cell<Self::Target>> {
+-      Arc::downgrade(&self.cell())
++   /// Returns a weak reference to the controller of the actor.
++   fn weak_controller(&self) -> Weak<Controller<Self::Target>> {
++      Arc::downgrade(&self.controller())
+    }
+ 
+    /// Returns a new weak address handle for the actor.
+@@ -342,11 +342,19 @@ pub trait WeakActorRef: IdRef {
+    /// dropped and must be upgraded to an [`Addr`] before use.
+    fn weak_addr(&self) -> WeakAddr<Self::Target>;
+ 
+-   /// Returns a weak reference to the cell of the actor.
++   /// Returns a weak reference to the controller of the actor.
+    ///
+-   /// The returned [`Weak`] can be used to access the actor's cell without
+-   /// preventing the actor from being dropped.
+-   fn weak_cell(&self) -> Weak<Cell<Self::Target>>;
++   /// The returned [`Weak`] can be used to access the actor's controller
++   /// without preventing the actor from being dropped.
++   fn weak_controller(&self) -> Weak<Controller<Self::Target>>;
++
++   /// Attempts to upgrade the weak reference to a strong [`Controller`].
++   ///
++   /// Returns `None` if the actor has already been dropped, indicating
++   /// that the actor is no longer available for messaging.
++   fn try_controller(&self) -> Option<Arc<Controller<Self::Target>>> {
++      Weak::upgrade(&self.weak_controller())
++   }
+ 
+    /// Attempts to upgrade the weak reference to a strong [`Addr`].
+    ///
+@@ -373,8 +381,8 @@ impl<R: ActorRef + ?Sized> WeakActorRef for R {
+    }
+ 
+    #[inline(always)]
+-   fn weak_cell(&self) -> Weak<Cell<Self::Target>> {
+-      R::weak_cell(self)
++   fn weak_controller(&self) -> Weak<Controller<Self::Target>> {
++      R::weak_controller(self)
+    }
+ 
+    #[inline(always)]

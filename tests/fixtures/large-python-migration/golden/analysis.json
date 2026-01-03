@@ -1,0 +1,27 @@
+{
+  "type": "chore",
+  "scope": "attic",
+  "details": [
+    {
+      "text": "Removed tetra-kv crate with RocksDB, LMDB, and in-memory storage backends.",
+      "user_visible": false
+    },
+    {
+      "text": "Removed HTTP client/server modules including SSE and WebSocket implementations.",
+      "user_visible": false
+    },
+    {
+      "text": "Removed vm crate containing JavaScript interpreter prototype.",
+      "user_visible": false
+    },
+    {
+      "text": "Removed vmi-precompile crate for bundled Wasm modules.",
+      "user_visible": false
+    },
+    {
+      "text": "Added pyproject.toml and updated package.json to use uv for Python environment management.",
+      "user_visible": false
+    }
+  ],
+  "issue_refs": []
+}

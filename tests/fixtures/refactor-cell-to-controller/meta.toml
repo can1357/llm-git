@@ -1,0 +1,5 @@
+source_repo = "/work/tetra"
+source_commit = "7c8d1cf30"
+description = "Fixture from commit 7c8d1cf30"
+captured_at = "2026-01-03T05:18:03.659505576+00:00"
+tags = []

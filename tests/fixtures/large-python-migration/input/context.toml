@@ -1,0 +1,10 @@
+recent_commits = """
+Scope usage: 80% of commits use scopes
+Common verbs: added (4), removed (3), implemented (2), ensured (1), renamed (1)
+Average length: 50 chars (range: 29-58)
+Capitalization: 100% start lowercase
+Top scopes: crypto (3), crypto/threshold (2), wasm-rt (2), scripts (2), wasm (1)"""
+common_scopes = "finance (14), transport (10), actor (10), py (9), wal (7), scripts (6), crypto (5), crypto/threshold (2), wasm-rt (2), fusion (2)"
+project_context = """
+Language: Rust (workspace, 1 packages)
+Framework: Axum"""

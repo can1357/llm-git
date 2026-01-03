@@ -1,0 +1,27 @@
+diff --git a/lib/crypto/src/threshold/wsts.rs b/lib/crypto/src/threshold/wsts.rs
+index b627dd342..0e7833a8c 100644
+--- a/lib/crypto/src/threshold/wsts.rs
++++ b/lib/crypto/src/threshold/wsts.rs
+@@ -1007,10 +1007,6 @@ impl<C: Curve> WeightedParticipant<C> {
+          }));
+       }
+ 
+-      if matches!(self.scheme, SignatureScheme::Bls) {
+-         return self.sign_round2_bls(key_shares, msg, signing_keys);
+-      }
+-
+       // Aggregate nonce shares for each owned key
+       let mut nonce_shares: KeyMap<C::Scalar> = KeyMap::with_capacity(self.key_ids.len());
+       for &key_id in &self.key_ids {
+@@ -1053,6 +1049,11 @@ impl<C: Curve> WeightedParticipant<C> {
+          cap_r = cap_r + broadcast.nonce_public;
+       }
+ 
++      // BLS still requires VSS verification above, but does not use nonces.
++      if matches!(self.scheme, SignatureScheme::Bls) {
++         return self.sign_round2_bls(key_shares, msg, signing_keys);
++      }
++
+       // For BIP-340 Schnorr, check if we need to negate nonces
+       let negate_nonce = if matches!(self.scheme, SignatureScheme::Schnorr) {
+          let r_bytes = cap_r.to_bytes();

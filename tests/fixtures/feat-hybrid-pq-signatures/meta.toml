@@ -1,0 +1,5 @@
+source_repo = "/work/tetra"
+source_commit = "cede01cef"
+description = "Fixture from commit cede01cef"
+captured_at = "2026-01-03T05:18:03.713635146+00:00"
+tags = []

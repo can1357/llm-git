@@ -1,0 +1,558 @@
+diff --git a/lib/crypto/src/pqc/mldsa65.rs b/lib/crypto/src/pqc/mldsa65.rs
+index ddca9914e..a6baf7f16 100644
+--- a/lib/crypto/src/pqc/mldsa65.rs
++++ b/lib/crypto/src/pqc/mldsa65.rs
+@@ -9,10 +9,11 @@ use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey, SecretKey as _};
+ use serde::{Deserialize, Serialize};
+ 
+ use crate::{
+-   Error, OpaqueBlob, Result, Signer, Verifier,
++   Blob, Error, MaterialId, OpaqueBlob, Result, Signer, Verifier, ed25519,
+    jose::{self, KeyUsage, PqParams, PqScheme},
+    pki::AlgorithmId,
+ };
++use crate::Keypair as CurveKeypair;
+ 
+ pub const TAG: &[u8] = b"ml65";
+ 
+@@ -21,19 +22,41 @@ pub const TAG: &[u8] = b"ml65";
+ #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+ pub struct Mldsa65;
+ 
+-/// Human-readable identifier for the ML-DSA 65 parameter set in use.
+-const PUBLIC_LEN: usize = mldsa65::public_key_bytes();
+-const SECRET_LEN: usize = mldsa65::secret_key_bytes();
+-const MAXSIG_LEN: usize = mldsa65::signature_bytes();
++const PQ_PUBLIC_LEN: usize = mldsa65::public_key_bytes();
++const PQ_SECRET_LEN: usize = mldsa65::secret_key_bytes();
++const PQ_SIG_LEN: usize = mldsa65::signature_bytes();
++const ED_PUBLIC_LEN: usize = ed25519::Public::LEN;
++const ED_SECRET_LEN: usize = ed25519::Keypair::LEN;
++const ED_SIG_LEN: usize = ed25519::Signature::LEN;
+ 
+-/// ML-DSA 65 public key wrapper.
++const PUBLIC_LEN: usize = PQ_PUBLIC_LEN + ED_PUBLIC_LEN;
++const SECRET_LEN: usize = PQ_SECRET_LEN + ED_SECRET_LEN;
++const MAXSIG_LEN: usize = PQ_SIG_LEN + ED_SIG_LEN;
++
++#[derive(Clone)]
++struct HybridPublic {
++   pq:    mldsa65::PublicKey,
++   ed:    ed25519::Public,
++   bytes: [u8; PUBLIC_LEN],
++}
++
++impl HybridPublic {
++   fn new(pq: mldsa65::PublicKey, ed: ed25519::Public) -> Self {
++      let mut bytes = [0u8; PUBLIC_LEN];
++      bytes[..PQ_PUBLIC_LEN].copy_from_slice(pq.as_bytes());
++      bytes[PQ_PUBLIC_LEN..].copy_from_slice(&ed.to_bytes());
++      Self { pq, ed, bytes }
++   }
++}
++
++/// ML-DSA 65 + Ed25519 public key wrapper.
+ #[derive(Clone)]
+-pub struct Public(Arc<mldsa65::PublicKey>);
++pub struct Public(Arc<HybridPublic>);
+ 
+ impl Public {
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+-      self.0.as_bytes()
++      &self.0.bytes
+    }
+ }
+ 
+@@ -44,23 +67,47 @@ crate::impl_opaque_blob!(
+    AlgorithmId::Mldsa65,
+    PUBLIC_LEN,
+    TAG,
+-   s => Ok(Public(Arc::new(mldsa65::PublicKey::from_bytes(s).map_err(Error::Mldsa65)?))),
++   bytes => {
++      if bytes.len() != PUBLIC_LEN {
++         return Err(Error::UnexpectedBlobLen(AlgorithmId::Mldsa65, MaterialId::Public, bytes.len()));
++      }
++      let pq = mldsa65::PublicKey::from_bytes(&bytes[..PQ_PUBLIC_LEN]).map_err(Error::Mldsa65)?;
++      let ed = ed25519::Public::from_bytes(&bytes[PQ_PUBLIC_LEN..])?;
++      Ok(Public(Arc::new(HybridPublic::new(pq, ed))))
++   },
+    s => s.as_bytes()
+ );
+ 
+ impl Verifier<Signature> for Public {
+    fn verify(&self, msg: &[u8], sig: &Signature) -> Result<()> {
+-      mldsa65::verify_detached_signature(&sig.0, msg, &self.0).map_err(Error::Mldsa65Verify)
++      mldsa65::verify_detached_signature(&sig.0.pq, msg, &self.0.pq).map_err(Error::Mldsa65Verify)?;
++      self.0.ed.verify(msg, &sig.0.ed)
++   }
++}
++
++#[derive(Clone)]
++struct HybridSecret {
++   pq:    mldsa65::SecretKey,
++   ed:    ed25519::Keypair,
++   bytes: [u8; SECRET_LEN],
++}
++
++impl HybridSecret {
++   fn new(pq: mldsa65::SecretKey, ed: ed25519::Keypair) -> Self {
++      let mut bytes = [0u8; SECRET_LEN];
++      bytes[..PQ_SECRET_LEN].copy_from_slice(pq.as_bytes());
++      bytes[PQ_SECRET_LEN..].copy_from_slice(&ed.to_bytes());
++      Self { pq, ed, bytes }
+    }
+ }
+ 
+-/// ML-DSA 65 secret key wrapper.
++/// ML-DSA 65 + Ed25519 secret key wrapper.
+ #[derive(Clone)]
+-pub struct Secret(Arc<mldsa65::SecretKey>);
++pub struct Secret(Arc<HybridSecret>);
+ 
+ impl Secret {
+    fn as_bytes(&self) -> &[u8] {
+-      self.0.as_bytes()
++      &self.0.bytes
+    }
+ }
+ 
+@@ -71,18 +118,41 @@ crate::impl_opaque_blob!(
+    AlgorithmId::Mldsa65,
+    SECRET_LEN,
+    TAG,
+-   s => Ok(Secret(Arc::new(mldsa65::SecretKey::from_bytes(s).map_err(Error::Mldsa65)?))),
++   bytes => {
++      if bytes.len() != SECRET_LEN {
++         return Err(Error::UnexpectedBlobLen(AlgorithmId::Mldsa65, MaterialId::Keypair, bytes.len()));
++      }
++      let pq = mldsa65::SecretKey::from_bytes(&bytes[..PQ_SECRET_LEN]).map_err(Error::Mldsa65)?;
++      let ed = ed25519::Keypair::from_bytes(&bytes[PQ_SECRET_LEN..])?;
++      Ok(Secret(Arc::new(HybridSecret::new(pq, ed))))
++   },
+    s => s.as_bytes()
+ );
+ 
+-/// ML-DSA 65 detached signature wrapper.
+ #[derive(Clone)]
+-pub struct Signature(Arc<mldsa65::DetachedSignature>);
++struct HybridSignature {
++   pq:    mldsa65::DetachedSignature,
++   ed:    ed25519::Signature,
++   bytes: [u8; MAXSIG_LEN],
++}
++
++impl HybridSignature {
++   fn new(pq: mldsa65::DetachedSignature, ed: ed25519::Signature) -> Self {
++      let mut bytes = [0u8; MAXSIG_LEN];
++      bytes[..PQ_SIG_LEN].copy_from_slice(pq.as_bytes());
++      bytes[PQ_SIG_LEN..].copy_from_slice(&ed.to_bytes());
++      Self { pq, ed, bytes }
++   }
++}
++
++/// ML-DSA 65 + Ed25519 detached signature wrapper.
++#[derive(Clone)]
++pub struct Signature(Arc<HybridSignature>);
+ 
+ impl Signature {
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+-      self.0.as_bytes()
++      &self.0.bytes
+    }
+ }
+ 
+@@ -93,7 +163,14 @@ crate::impl_opaque_blob!(
+    AlgorithmId::Mldsa65,
+    MAXSIG_LEN,
+    TAG,
+-   s => Ok(Signature(Arc::new(mldsa65::DetachedSignature::from_bytes(s).map_err(Error::Mldsa65)?))),
++   bytes => {
++      if bytes.len() != MAXSIG_LEN {
++         return Err(Error::UnexpectedBlobLen(AlgorithmId::Mldsa65, MaterialId::Signature, bytes.len()));
++      }
++      let pq = mldsa65::DetachedSignature::from_bytes(&bytes[..PQ_SIG_LEN]).map_err(Error::Mldsa65)?;
++      let ed = ed25519::Signature::from_bytes(&bytes[PQ_SIG_LEN..])?;
++      Ok(Signature(Arc::new(HybridSignature::new(pq, ed))))
++   },
+    s => s.as_bytes()
+ );
+ 
+@@ -107,8 +184,11 @@ pub struct Keypair {
+ impl Keypair {
+    /// Generate a fresh keypair.
+    pub fn new() -> Self {
+-      let (pk, sk) = mldsa65::keypair();
+-      Self { public: Public(Arc::new(pk)), secret: Secret(Arc::new(sk)) }
++      let (pq_pk, pq_sk) = mldsa65::keypair();
++      let ed_kp = ed25519::Keypair::new();
++      let public = Public(Arc::new(HybridPublic::new(pq_pk, ed_kp.into())));
++      let secret = Secret(Arc::new(HybridSecret::new(pq_sk, ed_kp)));
++      Self { public, secret }
+    }
+ 
+    pub fn from_parts(public: Public, secret: Secret) -> Self {
+@@ -126,8 +206,9 @@ impl Keypair {
+    }
+ 
+    pub fn sign_detached(&self, msg: &[u8]) -> Signature {
+-      let sig = mldsa65::detached_sign(msg, &self.secret.0);
+-      Signature(Arc::new(sig))
++      let pq_sig = mldsa65::detached_sign(msg, &self.secret.0.pq);
++      let ed_sig = self.secret.0.ed.sign(msg);
++      Signature(Arc::new(HybridSignature::new(pq_sig, ed_sig)))
+    }
+ }
+ 
+diff --git a/lib/crypto/src/pqc/sphincs256f.rs b/lib/crypto/src/pqc/sphincs256f.rs
+index 18b78f22e..5fbc765b5 100644
+--- a/lib/crypto/src/pqc/sphincs256f.rs
++++ b/lib/crypto/src/pqc/sphincs256f.rs
+@@ -15,11 +15,12 @@ use serde::{
+ use tetra_core::serde_bin;
+ 
+ use crate::{
+-   Cid, Error, H256, MaterialId, Result, Signer, ToCid, Verifier,
++   Blob, Cid, Error, H256, MaterialId, Result, Signer, ToCid, Verifier, ed25519,
+    jose::{self, KeyUsage, PqParams, PqScheme},
+    mat,
+    pki::AlgorithmId,
+ };
++use crate::Keypair as CurveKeypair;
+ 
+ /// Tag identifier for SPHINCS+ 256f blobs.
+ pub const TAG: &[u8] = b"sp256f";
+@@ -29,19 +30,42 @@ pub const TAG: &[u8] = b"sp256f";
+ #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+ pub struct Sphincs256f;
+ 
+-const PUBLIC_LEN: usize = sphincs::public_key_bytes();
+-const SECRET_LEN: usize = sphincs::secret_key_bytes();
+-const MAXSIG_LEN: usize = sphincs::signature_bytes();
++const PQ_SIG_LEN: usize = sphincs::signature_bytes();
++const PQ_PUBLIC_LEN: usize = sphincs::public_key_bytes();
++const PQ_SECRET_LEN: usize = sphincs::secret_key_bytes();
++const ED_PUBLIC_LEN: usize = ed25519::Public::LEN;
++const ED_SECRET_LEN: usize = ed25519::Keypair::LEN;
++const ED_SIG_LEN: usize = ed25519::Signature::LEN;
++
++const PUBLIC_LEN: usize = PQ_PUBLIC_LEN + ED_PUBLIC_LEN;
++const SECRET_LEN: usize = PQ_SECRET_LEN + ED_SECRET_LEN;
++const MAXSIG_LEN: usize = PQ_SIG_LEN + ED_SIG_LEN;
++
++#[derive(Clone, Copy)]
++struct HybridPublic {
++   pq:    sphincs::PublicKey,
++   ed:    ed25519::Public,
++   bytes: [u8; PUBLIC_LEN],
++}
++
++impl HybridPublic {
++   fn new(pq: sphincs::PublicKey, ed: ed25519::Public) -> Self {
++      let mut bytes = [0u8; PUBLIC_LEN];
++      bytes[..PQ_PUBLIC_LEN].copy_from_slice(pq.as_bytes());
++      bytes[PQ_PUBLIC_LEN..].copy_from_slice(&ed.to_bytes());
++      Self { pq, ed, bytes }
++   }
++}
+ 
+ /// SPHINCS+ public key.
+ #[derive(Clone, Copy)]
+-pub struct Public(sphincs::PublicKey);
++pub struct Public(HybridPublic);
+ 
+ impl Public {
+    /// Returns the raw public key bytes.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+-      self.0.as_bytes()
++      &self.0.bytes
+    }
+ }
+ 
+@@ -53,7 +77,7 @@ impl fmt::Debug for Public {
+ 
+ impl PartialEq for Public {
+    fn eq(&self, other: &Self) -> bool {
+-      self.0.as_bytes() == other.0.as_bytes()
++      self.0.bytes == other.0.bytes
+    }
+ }
+ 
+@@ -67,13 +91,13 @@ impl PartialOrd for Public {
+ 
+ impl Ord for Public {
+    fn cmp(&self, other: &Self) -> Ordering {
+-      self.0.as_bytes().cmp(other.0.as_bytes())
++      self.0.bytes.cmp(&other.0.bytes)
+    }
+ }
+ 
+ impl Hash for Public {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+-      state.write(self.0.as_bytes());
++      state.write(&self.0.bytes);
+    }
+ }
+ 
+@@ -96,9 +120,18 @@ impl<'de> Deserialize<'de> for Public {
+          }
+ 
+          fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+-            let pk = sphincs::PublicKey::from_bytes(v)
++            if v.len() != PUBLIC_LEN {
++               return Err(de::Error::custom(Error::UnexpectedBlobLen(
++                  AlgorithmId::Sphincs256f,
++                  MaterialId::Public,
++                  v.len(),
++               )));
++            }
++            let pq = sphincs::PublicKey::from_bytes(&v[..PQ_PUBLIC_LEN])
+                .map_err(|e| de::Error::custom(Error::Sphincs(e)))?;
+-            Ok(Wrapped(Public(pk)))
++            let ed = ed25519::Public::from_bytes(&v[PQ_PUBLIC_LEN..])
++               .map_err(de::Error::custom)?;
++            Ok(Wrapped(Public(HybridPublic::new(pq, ed))))
+          }
+       }
+ 
+@@ -122,24 +155,45 @@ impl TryFrom<&[u8]> for Public {
+    type Error = Error;
+ 
+    fn try_from(value: &[u8]) -> Result<Self> {
+-      let pk = sphincs::PublicKey::from_bytes(value).map_err(Error::Sphincs)?;
+-      Ok(Self(pk))
++      if value.len() != PUBLIC_LEN {
++         return Err(Error::UnexpectedBlobLen(AlgorithmId::Sphincs256f, MaterialId::Public, value.len()));
++      }
++      let pq = sphincs::PublicKey::from_bytes(&value[..PQ_PUBLIC_LEN]).map_err(Error::Sphincs)?;
++      let ed = ed25519::Public::from_bytes(&value[PQ_PUBLIC_LEN..])?;
++      Ok(Self(HybridPublic::new(pq, ed)))
+    }
+ }
+ 
+ impl Verifier<Signature> for Public {
+    fn verify(&self, msg: &[u8], sig: &Signature) -> Result<()> {
+-      sphincs::verify_detached_signature(&sig.0, msg, &self.0).map_err(Error::SphincsVerify)
++      sphincs::verify_detached_signature(&sig.0.pq, msg, &self.0.pq).map_err(Error::SphincsVerify)?;
++      self.0.ed.verify(msg, &sig.0.ed)
++   }
++}
++
++#[derive(Clone)]
++struct HybridSecret {
++   pq:    sphincs::SecretKey,
++   ed:    ed25519::Keypair,
++   bytes: [u8; SECRET_LEN],
++}
++
++impl HybridSecret {
++   fn new(pq: sphincs::SecretKey, ed: ed25519::Keypair) -> Self {
++      let mut bytes = [0u8; SECRET_LEN];
++      bytes[..PQ_SECRET_LEN].copy_from_slice(pq.as_bytes());
++      bytes[PQ_SECRET_LEN..].copy_from_slice(&ed.to_bytes());
++      Self { pq, ed, bytes }
+    }
+ }
+ 
+ /// SPHINCS+ secret key.
+ #[derive(Clone)]
+-pub struct Secret(sphincs::SecretKey);
++pub struct Secret(HybridSecret);
+ 
+ impl Secret {
+    fn as_bytes(&self) -> &[u8] {
+-      self.0.as_bytes()
++      &self.0.bytes
+    }
+ }
+ 
+@@ -169,9 +223,11 @@ impl<'de> Deserialize<'de> for Secret {
+                   v.len(),
+                )));
+             }
+-            let sk = sphincs::SecretKey::from_bytes(v)
++            let pq = sphincs::SecretKey::from_bytes(&v[..PQ_SECRET_LEN])
+                .map_err(|e| de::Error::custom(Error::Sphincs(e)))?;
+-            Ok(Wrapped(Secret(sk)))
++            let ed = ed25519::Keypair::from_bytes(&v[PQ_SECRET_LEN..])
++               .map_err(de::Error::custom)?;
++            Ok(Wrapped(Secret(HybridSecret::new(pq, ed))))
+          }
+       }
+ 
+@@ -185,11 +241,24 @@ impl<'de> Deserialize<'de> for Secret {
+    }
+ }
+ 
++impl TryFrom<&[u8]> for Secret {
++   type Error = Error;
++
++   fn try_from(value: &[u8]) -> Result<Self> {
++      if value.len() != SECRET_LEN {
++         return Err(Error::UnexpectedBlobLen(AlgorithmId::Sphincs256f, MaterialId::Keypair, value.len()));
++      }
++      let pq = sphincs::SecretKey::from_bytes(&value[..PQ_SECRET_LEN]).map_err(Error::Sphincs)?;
++      let ed = ed25519::Keypair::from_bytes(&value[PQ_SECRET_LEN..])?;
++      Ok(Secret(HybridSecret::new(pq, ed)))
++   }
++}
++
+ impl Deref for Secret {
+    type Target = sphincs::SecretKey;
+ 
+    fn deref(&self) -> &Self::Target {
+-      &self.0
++      &self.0.pq
+    }
+ }
+ 
+@@ -207,15 +276,31 @@ impl PartialEq for Secret {
+ 
+ impl Eq for Secret {}
+ 
++#[derive(Clone)]
++struct HybridSignature {
++   pq:    sphincs::DetachedSignature,
++   ed:    ed25519::Signature,
++   bytes: [u8; MAXSIG_LEN],
++}
++
++impl HybridSignature {
++   fn new(pq: sphincs::DetachedSignature, ed: ed25519::Signature) -> Self {
++      let mut bytes = [0u8; MAXSIG_LEN];
++      bytes[..PQ_SIG_LEN].copy_from_slice(pq.as_bytes());
++      bytes[PQ_SIG_LEN..].copy_from_slice(&ed.to_bytes());
++      Self { pq, ed, bytes }
++   }
++}
++
+ /// SPHINCS+ detached signature.
+ #[derive(Clone)]
+-pub struct Signature(Arc<sphincs::DetachedSignature>);
++pub struct Signature(Arc<HybridSignature>);
+ 
+ impl Signature {
+    /// Returns the signature bytes.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+-      self.0.as_bytes()
++      &self.0.bytes
+    }
+ }
+ 
+@@ -227,15 +312,16 @@ crate::impl_opaque_blob!(
+    MAXSIG_LEN,
+    TAG,
+    bytes => {
+-      if bytes.len() > MAXSIG_LEN {
++      if bytes.len() != MAXSIG_LEN {
+          return Err(Error::UnexpectedBlobLen(
+             AlgorithmId::Sphincs256f,
+             MaterialId::Signature,
+             bytes.len(),
+          ));
+       }
+-      let sig = sphincs::DetachedSignature::from_bytes(bytes).map_err(Error::Sphincs)?;
+-      Ok(Signature(Arc::new(sig)))
++      let pq = sphincs::DetachedSignature::from_bytes(&bytes[..PQ_SIG_LEN]).map_err(Error::Sphincs)?;
++      let ed = ed25519::Signature::from_bytes(&bytes[PQ_SIG_LEN..])?;
++      Ok(Signature(Arc::new(HybridSignature::new(pq, ed))))
+    },
+    s => s.as_bytes()
+ );
+@@ -250,8 +336,11 @@ pub struct Keypair {
+ impl Keypair {
+    /// Generate a fresh keypair.
+    pub fn new() -> Self {
+-      let (pk, sk) = sphincs::keypair();
+-      Self { public: Public(pk), secret: Secret(sk) }
++      let (pq_pk, pq_sk) = sphincs::keypair();
++      let ed_kp = ed25519::Keypair::new();
++      let public = Public(HybridPublic::new(pq_pk, ed_kp.into()));
++      let secret = Secret(HybridSecret::new(pq_sk, ed_kp));
++      Self { public, secret }
+    }
+ 
+    /// Construct from explicit key material.
+@@ -273,8 +362,9 @@ impl Keypair {
+ 
+    /// Create a detached signature over `msg`.
+    pub fn sign_detached(&self, msg: &[u8]) -> Signature {
+-      let sig = sphincs::detached_sign(msg, &self.secret.0);
+-      Signature(Arc::new(sig))
++      let pq_sig = sphincs::detached_sign(msg, &self.secret.0.pq);
++      let ed_sig = self.secret.0.ed.sign(msg);
++      Signature(Arc::new(HybridSignature::new(pq_sig, ed_sig)))
+    }
+ }
+ 
+@@ -315,8 +405,7 @@ impl TryFrom<&jose::Key<'_>> for Public {
+          .get::<PqParams<'_>>()?
+          .check_scheme(PqScheme::Sphincs256f)?;
+       let pk_bytes = params.get_pk(PUBLIC_LEN).map_err(Error::Jose)?;
+-      let pk = sphincs::PublicKey::from_bytes(pk_bytes).map_err(Error::Sphincs)?;
+-      Ok(Self(pk))
++      Public::try_from(pk_bytes)
+    }
+ }
+ 
+@@ -355,20 +444,8 @@ impl TryFrom<&jose::Key<'_>> for Keypair {
+          .check_scheme(PqScheme::Sphincs256f)?;
+       let pk_bytes = params.get_pk(PUBLIC_LEN).map_err(Error::Jose)?;
+       let sk_bytes = params.get_sk(SECRET_LEN).map_err(Error::Jose)?;
+-
+-      let pk = sphincs::PublicKey::from_bytes(pk_bytes).map_err(Error::Sphincs)?;
+-      let public = Public(pk);
+-
+-      if sk_bytes.len() != SECRET_LEN {
+-         return Err(Error::UnexpectedBlobLen(
+-            AlgorithmId::Sphincs256f,
+-            MaterialId::Keypair,
+-            sk_bytes.len(),
+-         ));
+-      }
+-      let sk = sphincs::SecretKey::from_bytes(sk_bytes).map_err(Error::Sphincs)?;
+-      let secret = Secret(sk);
+-
++      let public = Public::try_from(pk_bytes)?;
++      let secret = Secret::try_from(sk_bytes)?;
+       Ok(Self::from_parts(public, secret))
+    }
+ }
+@@ -410,16 +487,7 @@ impl<'a> TryFrom<&jose::Signature<'a>> for Signature {
+ 
+    fn try_from(value: &jose::Signature<'a>) -> Result<Self> {
+       value.header.alg.expect(jose::Algorithm::Sphincs256f)?;
+-      let bytes = value.signature.as_ref();
+-      if bytes.len() > MAXSIG_LEN {
+-         return Err(Error::UnexpectedBlobLen(
+-            AlgorithmId::Sphincs256f,
+-            MaterialId::Signature,
+-            bytes.len(),
+-         ));
+-      }
+-      let sig = sphincs::DetachedSignature::from_bytes(bytes).map_err(Error::Sphincs)?;
+-      Ok(Self(Arc::new(sig)))
++      Signature::try_from(value.signature.as_ref())
+    }
+ }
+ 
+@@ -471,14 +539,11 @@ impl crate::Blob for Public {
+    const TAG: &'static [u8] = TAG;
+ 
+    fn from_array(array: &Self::Array) -> Result<Self> {
+-      let pk = sphincs::PublicKey::from_bytes(array).map_err(Error::Sphincs)?;
+-      Ok(Self(pk))
++      Public::try_from(array.as_ref())
+    }
+ 
+    fn to_bytes(&self) -> Self::Array {
+-      let mut arr = [0u8; PUBLIC_LEN];
+-      arr.copy_from_slice(self.0.as_bytes());
+-      arr
++      self.0.bytes
+    }
+ }
+ 

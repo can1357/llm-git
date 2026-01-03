@@ -1,0 +1,6 @@
+refactor(actor): renamed Cell to Controller for clearer semantics
+
+- Renamed Cell to Controller throughout actor module for clearer semantics.
+- Renamed cell() methods to controller() and weak_cell() to weak_controller() across ActorRef and WeakActorRef traits.
+- Added try_controller() method to WeakActorRef trait for upgrading weak references.
+- Removed upgrade_cell() method from WeakAddr in favor of try_controller() on trait.

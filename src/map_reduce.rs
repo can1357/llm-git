@@ -53,8 +53,9 @@ pub fn should_use_map_reduce(diff: &str, config: &CommitConfig) -> bool {
       .count();
 
    // Use map-reduce for 4+ files, or if any single file would need truncation
+   let counter = &config.token_counter;
    file_count >= MIN_FILES_FOR_MAP_REDUCE
-      || files.iter().any(|f| f.token_estimate() > MAX_FILE_TOKENS)
+      || files.iter().any(|f| f.token_estimate(counter) > MAX_FILE_TOKENS)
 }
 
 /// Maximum files to include in context header (prevent token explosion)
@@ -157,6 +158,8 @@ fn map_phase(
    model_name: &str,
    config: &CommitConfig,
 ) -> Result<Vec<FileObservation>> {
+   let counter = &config.token_counter;
+
    // Process files in parallel using rayon
    let observations: Vec<Result<FileObservation>> = files
       .par_iter()
@@ -174,7 +177,7 @@ fn map_phase(
 
          // Truncate large files to fit API limits
          let mut file_clone = file.clone();
-         let file_tokens = file_clone.token_estimate();
+         let file_tokens = file_clone.token_estimate(counter);
          if file_tokens > MAX_FILE_TOKENS {
             let target_size = MAX_FILE_TOKENS * 4; // Convert tokens to chars
             file_clone.truncate(target_size);
@@ -183,7 +186,7 @@ fn map_phase(
                crate::style::icons::WARNING,
                file.filename,
                file_tokens,
-               file_clone.token_estimate()
+               file_clone.token_estimate(counter)
             );
          }
 

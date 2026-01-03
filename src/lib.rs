@@ -16,6 +16,8 @@ pub mod patch;
 pub mod repo;
 pub mod style;
 pub mod templates;
+pub mod testing;
+pub mod tokens;
 pub mod types;
 pub mod validation;
 

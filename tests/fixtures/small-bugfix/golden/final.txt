@@ -1,0 +1,3 @@
+fix(crypto/threshold): corrected BLS validation order in VSS verification
+
+- Moved BLS early-return after VSS verification to ensure proper validation before signing.

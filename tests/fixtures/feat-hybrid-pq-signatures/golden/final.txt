@@ -1,0 +1,7 @@
+feat(crypto): added Ed25519 hybrid signatures for quantum-safe transition
+
+- Added Ed25519 hybrid signatures to ML-DSA 65 and SPHINCS+ 256f for post-quantum transition safety.
+- Extended public keys, secret keys, and signatures to include both PQ and classical components.
+- Updated verification to require both PQ and Ed25519 signature validation.
+- Introduced HybridPublic, HybridSecret, and HybridSignature internal structs for composite key management.
+- Added explicit length validation with descriptive errors during blob deserialization.

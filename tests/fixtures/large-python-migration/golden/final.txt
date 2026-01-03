@@ -1,0 +1,7 @@
+chore(attic): removed obsolete kv, http, and vm crates from attic
+
+- Removed tetra-kv crate with RocksDB, LMDB, and in-memory storage backends.
+- Removed HTTP client/server modules including SSE and WebSocket implementations.
+- Removed vm crate containing JavaScript interpreter prototype.
+- Removed vmi-precompile crate for bundled Wasm modules.
+- Added pyproject.toml and updated package.json to use uv for Python environment management.

@@ -1,10 +1,5 @@
 /// Diff parsing and smart truncation logic
-use crate::config::CommitConfig;
-
-/// Estimate token count from text (rough approximation: ~4 chars per token)
-pub const fn estimate_tokens(text: &str) -> usize {
-   text.len() / 4
-}
+use crate::{config::CommitConfig, tokens::TokenCounter};
 
 #[derive(Debug, Clone)]
 pub struct FileDiff {
@@ -21,8 +16,10 @@ impl FileDiff {
       self.header.len() + self.content.len()
    }
 
-   pub const fn token_estimate(&self) -> usize {
-      self.size() / 4
+   /// Estimate token count for this file diff.
+   pub fn token_estimate(&self, counter: &TokenCounter) -> usize {
+      // Use combined header + content for token estimate
+      counter.count_sync(&self.header) + counter.count_sync(&self.content)
    }
 
    pub fn priority(&self, config: &CommitConfig) -> i32 {
@@ -199,6 +196,7 @@ pub fn parse_diff(diff: &str) -> Vec<FileDiff> {
 
 /// Smart truncation of git diff with token-aware budgeting
 pub fn smart_truncate_diff(diff: &str, max_length: usize, config: &CommitConfig) -> String {
+   let counter = &config.token_counter;
    let mut file_diffs = parse_diff(diff);
 
    // Filter out excluded files
@@ -219,11 +217,12 @@ pub fn smart_truncate_diff(diff: &str, max_length: usize, config: &CommitConfig)
 
    // Calculate total size and token estimate
    let total_size: usize = file_diffs.iter().map(|f| f.size()).sum();
-   let total_tokens: usize = file_diffs.iter().map(|f| f.token_estimate()).sum();
+   let total_tokens: usize = file_diffs.iter().map(|f| f.token_estimate(counter)).sum();
 
    // Use token budget if it's more restrictive than character budget
+   // Estimate 4 chars per token for the size conversion
    let effective_max = if total_tokens > config.max_diff_tokens {
-      // Convert token budget to character budget
+      // Convert token budget to approximate character budget
       config.max_diff_tokens * 4
    } else {
       max_length

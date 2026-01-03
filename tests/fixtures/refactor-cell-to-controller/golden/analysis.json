@@ -1,0 +1,23 @@
+{
+  "type": "refactor",
+  "scope": "actor",
+  "details": [
+    {
+      "text": "Renamed Cell to Controller throughout actor module for clearer semantics.",
+      "user_visible": false
+    },
+    {
+      "text": "Renamed cell() methods to controller() and weak_cell() to weak_controller() across ActorRef and WeakActorRef traits.",
+      "user_visible": false
+    },
+    {
+      "text": "Added try_controller() method to WeakActorRef trait for upgrading weak references.",
+      "user_visible": false
+    },
+    {
+      "text": "Removed upgrade_cell() method from WeakAddr in favor of try_controller() on trait.",
+      "user_visible": false
+    }
+  ],
+  "issue_refs": []
+}

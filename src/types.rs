@@ -1024,7 +1024,7 @@ pub struct Args {
 
    // === Rewrite mode args ===
    /// Rewrite git history to conventional commits
-   #[arg(long, conflicts_with_all = ["mode", "target", "copy", "dry_run"])]
+   #[arg(long, conflicts_with_all = ["target", "copy", "dry_run"])]
    pub rewrite: bool,
 
    /// Preview N commits without rewriting
@@ -1054,7 +1054,7 @@ pub struct Args {
 
    // === Compose mode args ===
    /// Compose changes into multiple atomic commits
-   #[arg(long, conflicts_with_all = ["mode", "target", "rewrite"])]
+   #[arg(long, conflicts_with_all = ["target", "rewrite"])]
    pub compose: bool,
 
    /// Preview proposed splits without committing
@@ -1078,6 +1078,35 @@ pub struct Args {
    /// Save intermediate outputs (diff, analysis, summary, changelog) to directory
    #[arg(long)]
    pub debug_output: Option<PathBuf>,
+
+   // === Test mode args ===
+   /// Run fixture-based tests
+   #[arg(long, conflicts_with_all = ["target", "rewrite", "compose"])]
+   pub test: bool,
+
+   /// Update golden files with current output
+   #[arg(long, requires = "test")]
+   pub test_update: bool,
+
+   /// Add a new fixture from a commit
+   #[arg(long, requires = "test")]
+   pub test_add: Option<String>,
+
+   /// Name for the new fixture (required with --test-add)
+   #[arg(long, requires = "test_add")]
+   pub test_name: Option<String>,
+
+   /// Filter fixtures by name pattern
+   #[arg(long, requires = "test")]
+   pub test_filter: Option<String>,
+
+   /// List available fixtures
+   #[arg(long, requires = "test")]
+   pub test_list: bool,
+
+   /// Custom fixtures directory
+   #[arg(long, requires = "test")]
+   pub fixtures_dir: Option<PathBuf>,
 }
 
 impl Default for Args {
@@ -1114,6 +1143,13 @@ impl Default for Args {
          compose_test_after_each: false,
          no_changelog:            false,
          debug_output:            None,
+         test:                    false,
+         test_update:             false,
+         test_add:                None,
+         test_name:               None,
+         test_filter:             None,
+         test_list:               false,
+         fixtures_dir:            None,
       }
    }
 }

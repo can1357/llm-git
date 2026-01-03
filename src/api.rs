@@ -867,7 +867,7 @@ pub fn generate_analysis_with_map_reduce<'a>(
    if should_use_map_reduce(diff, config) {
       crate::style::print_info(&format!(
          "Large diff detected ({} tokens), using map-reduce...",
-         crate::diff::estimate_tokens(diff)
+         config.token_counter.count_sync(diff)
       ));
       run_map_reduce(diff, stat, scope_candidates_str, model_name, config)
    } else {

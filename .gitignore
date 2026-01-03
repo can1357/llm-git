@@ -24,6 +24,9 @@ Thumbs.db
 # Testing
 mutants.out*/
 
+# Development artifacts
+data/
+
 # Claude Code - allow commands to be tracked
 !.claude/
 .claude/*
