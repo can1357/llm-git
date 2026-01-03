@@ -1,6 +1,6 @@
 [package]
 name = "llm-git"
-version = "2.2.2"
+version = "2.2.3"
 edition = "2024"
 authors = ["can1357 <me@can.ac>"]
 license = "MIT"
