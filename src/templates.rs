@@ -41,6 +41,14 @@ static TERA: LazyLock<Mutex<Tera>> = LazyLock::new(|| {
       {
          eprintln!("Warning: {e}");
       }
+      if let Err(e) = register_directory_templates(&mut tera, &prompts_dir.join("map"), "map") {
+         eprintln!("Warning: {e}");
+      }
+      if let Err(e) =
+         register_directory_templates(&mut tera, &prompts_dir.join("reduce"), "reduce")
+      {
+         eprintln!("Warning: {e}");
+      }
    }
 
    // Register embedded templates that aren't overridden by user-provided files.
@@ -331,5 +339,51 @@ pub fn render_changelog_prompt(
    let mut tera = TERA.lock();
    tera.render_str(&template_content, &context).map_err(|e| {
       CommitGenError::Other(format!("Failed to render changelog prompt template '{variant}': {e}"))
+   })
+}
+
+/// Render map prompt template (per-file observation extraction)
+pub fn render_map_prompt(
+   variant: &str,
+   filename: &str,
+   diff: &str,
+   context_header: &str,
+) -> Result<String> {
+   let template_content = load_template_file("map", variant)?;
+
+   let mut context = Context::new();
+   context.insert("filename", filename);
+   context.insert("diff", diff);
+   if !context_header.is_empty() {
+      context.insert("context_header", context_header);
+   }
+
+   let mut tera = TERA.lock();
+   tera.render_str(&template_content, &context).map_err(|e| {
+      CommitGenError::Other(format!("Failed to render map prompt template '{variant}': {e}"))
+   })
+}
+
+/// Render reduce prompt template (synthesis from observations)
+pub fn render_reduce_prompt(
+   variant: &str,
+   observations: &str,
+   stat: &str,
+   scope_candidates: &str,
+   types_description: Option<&str>,
+) -> Result<String> {
+   let template_content = load_template_file("reduce", variant)?;
+
+   let mut context = Context::new();
+   context.insert("observations", observations);
+   context.insert("stat", stat);
+   context.insert("scope_candidates", scope_candidates);
+   if let Some(types_desc) = types_description {
+      context.insert("types_description", types_desc);
+   }
+
+   let mut tera = TERA.lock();
+   tera.render_str(&template_content, &context).map_err(|e| {
+      CommitGenError::Other(format!("Failed to render reduce prompt template '{variant}': {e}"))
    })
 }

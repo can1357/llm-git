@@ -11,10 +11,7 @@ use crate::{
    normalization::{format_commit_message, post_process_commit_message},
    patch::{reset_staging, stage_group_changes},
    style,
-   types::{
-      Args, ChangeGroup, CommitType, ComposeAnalysis, ConventionalAnalysis, ConventionalCommit,
-      Mode,
-   },
+   types::{Args, ChangeGroup, CommitType, ComposeAnalysis, ConventionalCommit, Mode},
    validation::validate_commit_message,
 };
 

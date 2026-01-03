@@ -48,9 +48,7 @@ impl RepoMetadata {
 
    /// Format metadata for prompt injection
    pub fn format_for_prompt(&self) -> Option<String> {
-      if self.language.is_none() {
-         return None;
-      }
+      self.language.as_ref()?;
 
       let mut lines = Vec::new();
 
@@ -99,15 +97,14 @@ fn detect_rust(dir: &Path) -> Option<RepoMetadata> {
       meta.is_monorepo = true;
 
       // Count workspace members
-      if let Some(members_start) = content.find("members") {
-         if let Some(bracket_start) = content[members_start..].find('[') {
+      if let Some(members_start) = content.find("members")
+         && let Some(bracket_start) = content[members_start..].find('[') {
             let rest = &content[members_start + bracket_start..];
             if let Some(bracket_end) = rest.find(']') {
                let members_str = &rest[1..bracket_end];
                meta.package_count = Some(members_str.matches('"').count() / 2);
             }
          }
-      }
    }
 
    // Detect framework from dependencies

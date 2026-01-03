@@ -1,74 +1,68 @@
-Generate the description for: {{ commit_type }}({{ scope }}): <YOUR OUTPUT>
+Generate: {{ commit_type }}({{ scope }}): <YOUR OUTPUT>
 
-<context>
-Commit type and scope are fixed from the analysis phase.
-Your output becomes the text after the colon in the conventional commit message.
-{% if user_context %}User-provided context MUST be incorporated: {{ user_context }}{% endif %}
-</context>
+<task>
+Synthesize the detail points into a commit description (the text after the colon).
+Maximum {{ chars }} characters. No trailing period.
+</task>
 
-<instructions>
-1. Synthesize detail points into a single focused summary
-2. Start with a lowercase past-tense verb (no leading adjectives)
-3. Include WHY when it adds essential context, not just WHAT changed
-4. Be specific: name the subsystem, file, or artifact when relevant
-5. Stay under {{ chars }} characters
-6. No trailing period
-</instructions>
+<format>
+1. Start with lowercase past-tense verb
+2. Include WHY when it clarifies intent, not just WHAT changed
+3. Name the specific subsystem, file, or component affected
+4. One focused concept—no conjunctions combining unrelated changes
+</format>
 
-<constraints>
-- Do NOT repeat the commit type "{{ commit_type }}" as your verb
-  (e.g., type="refactor" → use: restructured, reorganized, migrated, simplified, etc.)
-- No leading adjectives before the verb ("quickly added..." ❌)
-- No filler words: "comprehensive", "various", "several", "improved", "enhanced"
-- No conjunctions cramming multiple concepts
-- No meta phrases: "this change", "this commit"
-- Single focused concept only
-- Must align with detail points from analysis
-</constraints>
+<verb_selection>
+Your verb MUST differ from the commit type "{{ commit_type }}".
+
+| Type     | Use instead                                        |
+|----------|---------------------------------------------------|
+| feat     | added, introduced, implemented, enabled            |
+| fix      | corrected, resolved, patched, addressed            |
+| refactor | restructured, reorganized, migrated, simplified    |
+| perf     | optimized, reduced, eliminated, accelerated        |
+| docs     | documented, clarified, expanded                    |
+| build    | upgraded, pinned, configured                       |
+| chore    | cleaned, removed, renamed, organized               |
+</verb_selection>
+
+<banned_words>
+comprehensive, various, several, improved, enhanced, quickly, simply, basically, this change, this commit, now
+</banned_words>
 
 <examples>
-<example>
-Type: feat
-Detail: Added TLS encryption to HTTP client to prevent MITM attacks
-Output: added TLS support to prevent man-in-the-middle attacks
-</example>
+feat | TLS encryption added to HTTP client for MITM prevention
+→ added TLS support to prevent man-in-the-middle attacks
 
-<example>
-Type: refactor
-Detail: Consolidated HTTP transport code into unified builder pattern for consistency
-Output: migrated HTTP transport to unified builder API for consistency
-</example>
+refactor | Consolidated HTTP transport into unified builder pattern
+→ migrated HTTP transport to unified builder API
 
-<example>
-Type: fix
-Detail: Fixed race condition in connection pool causing exhaustion under load
-Output: corrected race condition causing connection pool exhaustion
-</example>
+fix | Race condition in connection pool causing exhaustion under load
+→ corrected race condition causing connection pool exhaustion
 
-<example>
-Type: perf
-Detail: Optimized batch processing to reduce memory allocations
-Output: optimized batch processing to eliminate allocation overhead
-</example>
+perf | Batch processing optimized to reduce memory allocations
+→ eliminated allocation overhead in batch processing
 
-<example>
-Type: build
-Detail: Updated serde dependency to fix CVE-2024-1234
-Output: updated serde to 1.0.200 for CVE-2024-1234 fix
-</example>
+build | Updated serde to fix CVE-2024-1234
+→ upgraded serde to 1.0.200 for CVE-2024-1234
 </examples>
 
-<anti_patterns>
-These are BAD because they lack motivation or specificity:
-- "added retry logic" ❌ → missing WHY (why was retry needed?)
-- "restructured error handling" ❌ → no motivation (what problem did it solve?)
-- "optimized database queries" ❌ → vague (what was the performance issue?)
-- "updated HTTP client" ❌ → too generic (which aspect? why?)
-</anti_patterns>
+<bad_output_patterns>
+"added retry logic" — missing motivation
+"restructured error handling" — no problem statement
+"optimized database queries" — unspecific
+"updated HTTP client" — which aspect?
+</bad_output_patterns>
 
-Output ONLY the description text. No explanation.
+Output the description text only.
 
 --------------------
+{% if user_context %}
+
+<user_context>
+{{ user_context }}
+</user_context>
+{% endif %}
 
 <detail_points>
 {{ details }}

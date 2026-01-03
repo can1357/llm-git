@@ -229,6 +229,7 @@ cargo test --lib                            # Library tests only
 - `src/config.rs` - Configuration and prompt templates
 - `src/diff.rs` - Smart diff truncation with priority scoring
 - `src/error.rs` - Error types
+- `src/map_reduce.rs` - Map-reduce analysis for large diffs
 - `src/git.rs` - Git command wrappers
 - `src/normalization.rs` - Unicode normalization, formatting
 - `src/types.rs` - Type-safe commit types, scopes, summaries, config types
@@ -237,15 +238,100 @@ cargo test --lib                            # Library tests only
 
 **Core workflow:**
 1. `get_git_diff()` + `get_git_stat()` - Extract staged/unstaged/commit changes
-2. `smart_truncate_diff()` - Priority-based diff truncation when >100KB:
-   - Parse into `FileDiff` structs with priority scoring
-   - Source files (rs/py/js) > config > tests > binaries > lock files
-   - Excluded files: `Cargo.lock`, `package-lock.json`, etc. (see `EXCLUDED_FILES`)
-   - Preserve headers for all files, truncate content proportionally
-3. `generate_conventional_analysis()` - Call Sonnet/Opus with `CONVENTIONAL_ANALYSIS_PROMPT` using function calling
-4. `generate_summary_from_analysis()` - Call Haiku with `SUMMARY_PROMPT_TEMPLATE` + detail points
-5. `post_process_commit_message()` - Enforce length limits, punctuation, capitalization
-6. `validate_commit_message()` - Check past-tense verbs, length, punctuation
+2. Route to unified or map-reduce analysis based on file count
+3. `generate_summary_from_analysis()` - Call Haiku with detail points
+4. `post_process_commit_message()` - Enforce length limits, punctuation, capitalization
+5. `validate_commit_message()` - Check past-tense verbs, length, punctuation
+
+## LLM Call Flows
+
+llm-git uses different strategies depending on the number of files changed:
+
+### Unified Analysis (≤3 files)
+
+For small commits, a single analysis call processes the entire diff:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 UNIFIED (≤3 files, no changelog)                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  diff ──► [1] Analysis (Sonnet) ──► [2] Summary (Haiku) ──► git │
+│                                                                 │
+│  Total: 2 LLM calls                                             │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                 UNIFIED + CHANGELOG (≤3 files)                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  diff ──► [1] Changelog ──► [2] Analysis ──► [3] Summary ──► git│
+│              (Sonnet)         (Sonnet)         (Haiku)          │
+│                                                                 │
+│  Total: 3 LLM calls                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Map-Reduce Analysis (≥4 files)
+
+For larger commits, each file is analyzed independently, then results are synthesized:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│               MAP-REDUCE (≥4 files, no changelog)               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                 ┌──► [1] Map file_1 ──┐                         │
+│                 ├──► [2] Map file_2 ──┤                         │
+│  diff ──► parse ┼──► [3] Map file_3 ──┼──► [N+1] Reduce ──┐     │
+│           files ├──► ...              │      (Sonnet)     │     │
+│                 └──► [N] Map file_N ──┘                   │     │
+│                      (parallel, Sonnet)                   │     │
+│                                                           ▼     │
+│                                              [N+2] Summary ──► git
+│                                                   (Haiku)       │
+│                                                                 │
+│  Total: N + 2 LLM calls                                         │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│               MAP-REDUCE + CHANGELOG (≥4 files)                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  [1] Changelog ──► parse ──┬──► [2..N+1] Map ──┐                │
+│      (Sonnet)      files   │    (parallel)     │                │
+│                            └───────────────────┤                │
+│                                                ▼                │
+│                               [N+2] Reduce ──► [N+3] Summary    │
+│                                                                 │
+│  Total: N + 3 LLM calls                                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Example costs:**
+| Commit Size | Mode | LLM Calls | Approximate Cost |
+|-------------|------|-----------|------------------|
+| 2 files | Unified | 2-3 | ~$0.002 |
+| 10 files | Map-Reduce | 12-13 | ~$0.015 |
+| 50 files | Map-Reduce | 52-53 | ~$0.06 |
+
+### Why Map-Reduce?
+
+The map-reduce approach provides several benefits for larger commits:
+
+1. **No truncation** - Each file gets full attention without information loss
+2. **Parallel processing** - Map phase runs concurrently for faster analysis
+3. **Better detail extraction** - Per-file focus captures more specific observations
+4. **Accurate synthesis** - Reduce phase sees complete picture for classification
+
+### Configuration
+
+```toml
+# Enable/disable map-reduce (default: true)
+map_reduce_enabled = true
+```
+
+When disabled, all commits use unified analysis with smart truncation for large diffs
 
 **Prompts:**
 - `CONVENTIONAL_ANALYSIS_PROMPT` - Extracts 0-6 past-tense detail statements from diff

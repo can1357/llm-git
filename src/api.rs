@@ -150,7 +150,7 @@ where
 
 /// Format commit types from config into a rich description for the prompt
 /// Order is preserved from config (first = highest priority)
-fn format_types_description(config: &CommitConfig) -> String {
+pub fn format_types_description(config: &CommitConfig) -> String {
    use std::fmt::Write;
    let mut out = String::from("Check types in order (first match wins):\n\n");
 
@@ -846,6 +846,32 @@ pub fn fallback_summary(
    // config limit)
    CommitSummary::new(candidate, config.summary_hard_limit)
       .expect("fallback summary should always be valid")
+}
+
+/// Generate conventional commit analysis, using map-reduce for large diffs
+///
+/// This is the main entry point for analysis. It automatically routes to
+/// map-reduce when the diff exceeds the configured token threshold.
+pub fn generate_analysis_with_map_reduce<'a>(
+   stat: &'a str,
+   diff: &'a str,
+   model_name: &'a str,
+   scope_candidates_str: &'a str,
+   ctx: &AnalysisContext<'a>,
+   config: &'a CommitConfig,
+) -> Result<ConventionalAnalysis> {
+   use crate::map_reduce::{run_map_reduce, should_use_map_reduce};
+
+   if should_use_map_reduce(diff, config) {
+      eprintln!(
+         "{} Large diff detected ({} tokens), using map-reduce...",
+         crate::style::icons::INFO,
+         crate::diff::estimate_tokens(diff)
+      );
+      run_map_reduce(diff, stat, scope_candidates_str, model_name, config)
+   } else {
+      generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config)
+   }
 }
 
 #[cfg(test)]

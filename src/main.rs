@@ -2,7 +2,7 @@ use std::path::Path;
 
 use analysis::extract_scope_candidates;
 use api::{
-   AnalysisContext, fallback_summary, generate_conventional_analysis,
+   AnalysisContext, fallback_summary, generate_analysis_with_map_reduce,
    generate_summary_from_analysis,
 };
 use arboard::Clipboard;
@@ -115,8 +115,15 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
       style::model(&config.summary_model)
    );
 
-   // Smart truncation if needed
-   let diff = if diff.len() > config.max_diff_length {
+   // Check if map-reduce should be used for large diffs
+   // Map-reduce handles its own per-file processing, so we pass the original diff
+   // Only apply smart truncation if map-reduce is disabled or diff is below threshold
+   let use_map_reduce = llm_git::map_reduce::should_use_map_reduce(&diff, config);
+
+   let diff = if use_map_reduce {
+      // Map-reduce will handle the full diff with per-file analysis
+      diff
+   } else if diff.len() > config.max_diff_length {
       println!("{}", style::warning(&format!("Applying smart truncation (diff size: {} characters)", diff.len())));
       smart_truncate_diff(&diff, config.max_diff_length, config)
    } else {
@@ -166,7 +173,7 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
       project_context: project_context_str.as_deref(),
    };
    let analysis = style::with_spinner("Generating conventional commit analysis", || {
-      generate_conventional_analysis(
+      generate_analysis_with_map_reduce(
          &stat,
          &diff,
          &config.analysis_model,

@@ -81,6 +81,14 @@ pub struct CommitConfig {
    #[serde(default = "default_changelog_enabled")]
    pub changelog_enabled: bool,
 
+   /// Enable map-reduce for large diffs (default: true)
+   #[serde(default = "default_map_reduce_enabled")]
+   pub map_reduce_enabled: bool,
+
+   /// Token threshold for triggering map-reduce (default: 30000 tokens)
+   #[serde(default = "default_map_reduce_threshold")]
+   pub map_reduce_threshold: usize,
+
    /// Loaded analysis prompt (not in config file)
    #[serde(skip)]
    pub analysis_prompt: String,
@@ -112,6 +120,14 @@ const fn default_gpg_sign() -> bool {
 
 const fn default_changelog_enabled() -> bool {
    true
+}
+
+const fn default_map_reduce_enabled() -> bool {
+   true
+}
+
+const fn default_map_reduce_threshold() -> usize {
+   30000 // ~30k tokens, roughly 120k characters
 }
 
 impl Default for CommitConfig {
@@ -167,6 +183,8 @@ impl Default for CommitConfig {
          classifier_hint:         default_classifier_hint(),
          categories:              default_categories(),
          changelog_enabled:       default_changelog_enabled(),
+         map_reduce_enabled:      default_map_reduce_enabled(),
+         map_reduce_threshold:    default_map_reduce_threshold(),
          analysis_prompt:         String::new(),
          summary_prompt:          String::new(),
       }
