@@ -9,6 +9,19 @@ use tera::{Context, Tera};
 
 use crate::error::{CommitGenError, Result};
 
+/// Parameters for rendering the analysis prompt template.
+#[derive(Default)]
+pub struct AnalysisParams<'a> {
+   pub variant: &'a str,
+   pub stat: &'a str,
+   pub diff: &'a str,
+   pub scope_candidates: &'a str,
+   pub recent_commits: Option<&'a str>,
+   pub common_scopes: Option<&'a str>,
+   pub types_description: Option<&'a str>,
+   pub project_context: Option<&'a str>,
+}
+
 /// Embedded prompts folder (compiled into binary)
 #[derive(RustEmbed)]
 #[folder = "prompts/"]
@@ -243,34 +256,25 @@ fn load_template_file(category: &str, variant: &str) -> Result<String> {
 }
 
 /// Render analysis prompt template
-pub fn render_analysis_prompt(
-   variant: &str,
-   stat: &str,
-   diff: &str,
-   scope_candidates: &str,
-   recent_commits: Option<&str>,
-   common_scopes: Option<&str>,
-   types_description: Option<&str>,
-   project_context: Option<&str>,
-) -> Result<String> {
+pub fn render_analysis_prompt(p: &AnalysisParams<'_>) -> Result<String> {
    // Try to load template dynamically (supports user-added templates)
-   let template_content = load_template_file("analysis", variant)?;
+   let template_content = load_template_file("analysis", p.variant)?;
 
    // Create context with all the data
    let mut context = Context::new();
-   context.insert("stat", stat);
-   context.insert("diff", diff);
-   context.insert("scope_candidates", scope_candidates);
-   if let Some(commits) = recent_commits {
+   context.insert("stat", p.stat);
+   context.insert("diff", p.diff);
+   context.insert("scope_candidates", p.scope_candidates);
+   if let Some(commits) = p.recent_commits {
       context.insert("recent_commits", commits);
    }
-   if let Some(scopes) = common_scopes {
+   if let Some(scopes) = p.common_scopes {
       context.insert("common_scopes", scopes);
    }
-   if let Some(types) = types_description {
+   if let Some(types) = p.types_description {
       context.insert("types_description", types);
    }
-   if let Some(ctx) = project_context {
+   if let Some(ctx) = p.project_context {
       context.insert("project_context", ctx);
    }
 
@@ -278,7 +282,10 @@ pub fn render_analysis_prompt(
    let mut tera = TERA.lock();
 
    tera.render_str(&template_content, &context).map_err(|e| {
-      CommitGenError::Other(format!("Failed to render analysis prompt template '{variant}': {e}"))
+      CommitGenError::Other(format!(
+         "Failed to render analysis prompt template '{}': {e}",
+         p.variant
+      ))
    })
 }
 

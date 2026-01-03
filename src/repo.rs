@@ -180,9 +180,7 @@ fn detect_node(dir: &Path) -> Option<RepoMetadata> {
    }
 
    // Check for workspaces
-   if content.contains("\"workspaces\"") {
-      meta.is_monorepo = true;
-   } else if dir.join("pnpm-workspace.yaml").exists() {
+   if content.contains("\"workspaces\"") || dir.join("pnpm-workspace.yaml").exists() {
       meta.is_monorepo = true;
    }
 

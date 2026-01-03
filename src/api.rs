@@ -262,14 +262,16 @@ pub fn generate_conventional_analysis<'a>(
             content: {
                let types_desc = format_types_description(config);
                let mut prompt = templates::render_analysis_prompt(
-                  &config.analysis_prompt_variant,
-                  stat,
-                  diff,
-                  scope_candidates_str,
-                  ctx.recent_commits,
-                  ctx.common_scopes,
-                  Some(&types_desc),
-                  ctx.project_context,
+                  &templates::AnalysisParams {
+                     variant: &config.analysis_prompt_variant,
+                     stat,
+                     diff,
+                     scope_candidates: scope_candidates_str,
+                     recent_commits: ctx.recent_commits,
+                     common_scopes: ctx.common_scopes,
+                     types_description: Some(&types_desc),
+                     project_context: ctx.project_context,
+                  },
                )?;
 
                if let Some(user_ctx) = ctx.user_context {
@@ -863,11 +865,10 @@ pub fn generate_analysis_with_map_reduce<'a>(
    use crate::map_reduce::{run_map_reduce, should_use_map_reduce};
 
    if should_use_map_reduce(diff, config) {
-      eprintln!(
-         "{} Large diff detected ({} tokens), using map-reduce...",
-         crate::style::icons::INFO,
+      crate::style::print_info(&format!(
+         "Large diff detected ({} tokens), using map-reduce...",
          crate::diff::estimate_tokens(diff)
-      );
+      ));
       run_map_reduce(diff, stat, scope_candidates_str, model_name, config)
    } else {
       generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config)

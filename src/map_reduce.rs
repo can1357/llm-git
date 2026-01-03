@@ -3,6 +3,8 @@
 //! When diffs exceed the token threshold, this module splits analysis across files,
 //! then synthesizes results for accurate classification.
 
+use std::path::Path;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -109,11 +111,14 @@ fn infer_file_description(filename: &str, content: &str) -> &'static str {
    if filename_lower.contains("test") {
       return "test file";
    }
-   if filename_lower.ends_with(".md") {
+   if Path::new(filename).extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
       return "documentation";
    }
-   if filename_lower.contains("config") || filename_lower.ends_with(".toml")
-      || filename_lower.ends_with(".yaml") || filename_lower.ends_with(".yml")
+   let ext = Path::new(filename).extension();
+   if filename_lower.contains("config")
+      || ext.is_some_and(|e| e.eq_ignore_ascii_case("toml"))
+      || ext.is_some_and(|e| e.eq_ignore_ascii_case("yaml"))
+      || ext.is_some_and(|e| e.eq_ignore_ascii_case("yml"))
    {
       return "configuration";
    }
@@ -404,11 +409,7 @@ pub fn run_map_reduce(
    }
 
    let file_count = files.len();
-   eprintln!(
-      "{} Running map-reduce on {} files...",
-      crate::style::icons::INFO,
-      file_count
-   );
+   crate::style::print_info(&format!("Running map-reduce on {file_count} files..."));
 
    // Map phase
    let observations = map_phase(&files, model_name, config)?;
@@ -608,8 +609,7 @@ mod tests {
 
    #[test]
    fn test_should_use_map_reduce_disabled() {
-      let mut config = CommitConfig::default();
-      config.map_reduce_enabled = false;
+      let config = CommitConfig { map_reduce_enabled: false, ..Default::default() };
       // Even with many files, disabled means no map-reduce
       let diff = r"diff --git a/a.rs b/a.rs
 @@ -0,0 +1 @@

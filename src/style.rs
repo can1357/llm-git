@@ -172,6 +172,17 @@ pub fn boxed_message(title: &str, content: &str, width: usize) -> String {
    out
 }
 
+/// Print an info message that clears any spinner line first.
+pub fn print_info(msg: &str) {
+   use std::io::IsTerminal;
+   if std::io::stderr().is_terminal() && colors_enabled() {
+      // Clear line, print message with newline
+      eprintln!("\r\x1b[K{} {msg}", icons::INFO.cyan());
+   } else {
+      eprintln!("{} {msg}", icons::INFO);
+   }
+}
+
 /// Horizontal separator line.
 pub fn separator(width: usize) -> String {
    let line = box_chars::HORIZONTAL.to_string().repeat(width);
