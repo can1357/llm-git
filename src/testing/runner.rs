@@ -5,6 +5,7 @@ use crate::{
    config::CommitConfig,
    error::Result,
    normalization::format_commit_message,
+   tokens::create_token_counter,
    types::{CommitType, ConventionalAnalysis, ConventionalCommit},
 };
 
@@ -95,6 +96,7 @@ impl TestRunner {
 
    fn run_fixture_inner(&self, name: &str) -> Result<RunResult> {
       let fixture = Fixture::load(&self.fixtures_dir, name)?;
+      let token_counter = create_token_counter(&self.config);
 
       // Build analysis context from fixture
       let ctx = AnalysisContext {
@@ -112,6 +114,7 @@ impl TestRunner {
          &fixture.input.scope_candidates,
          &ctx,
          &self.config,
+         &token_counter,
       )?;
 
       // Get summary

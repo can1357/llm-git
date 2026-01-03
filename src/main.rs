@@ -14,7 +14,7 @@ use error::{CommitGenError, Result};
 use git::{
    get_common_scopes, get_git_diff, get_git_stat, get_recent_commits, git_commit, git_push,
 };
-use llm_git::{*, style};
+use llm_git::{*, style, tokens::create_token_counter};
 use normalization::{format_commit_message, post_process_commit_message};
 use types::{Args, ConventionalCommit, Mode, resolve_model_name};
 use validation::{check_type_scope_consistency, validate_commit_message};
@@ -219,11 +219,8 @@ fn add_fixture(
 
 /// Apply CLI overrides to config
 fn apply_cli_overrides(config: &mut CommitConfig, args: &Args) {
-   let mut model_changed = false;
-
    if let Some(ref model) = args.model {
       config.analysis_model = resolve_model_name(model);
-      model_changed = true;
    }
    if let Some(ref summary_model) = args.summary_model {
       config.summary_model = resolve_model_name(summary_model);
@@ -240,11 +237,6 @@ fn apply_cli_overrides(config: &mut CommitConfig, args: &Args) {
    }
    if args.exclude_old_message {
       config.exclude_old_message = true;
-   }
-
-   // Reinitialize token counter if model changed (affects tiktoken selection)
-   if model_changed {
-      config.init_token_counter();
    }
 }
 
@@ -289,7 +281,11 @@ fn build_footers(args: &Args) -> Vec<String> {
 
 /// Main generation pipeline: get diff/stat → truncate → analyze → summarize →
 /// build commit
-fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalCommit> {
+fn run_generation(
+   config: &CommitConfig,
+   args: &Args,
+   token_counter: &tokens::TokenCounter,
+) -> Result<ConventionalCommit> {
    let diff = get_git_diff(&args.mode, args.target.as_deref(), &args.dir, config)?;
    let stat = get_git_stat(&args.mode, args.target.as_deref(), &args.dir, config)?;
 
@@ -316,14 +312,14 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
    // Check if map-reduce should be used for large diffs
    // Map-reduce handles its own per-file processing, so we pass the original diff
    // Only apply smart truncation if map-reduce is disabled or diff is below threshold
-   let use_map_reduce = llm_git::map_reduce::should_use_map_reduce(&diff, config);
+   let use_map_reduce = llm_git::map_reduce::should_use_map_reduce(&diff, config, token_counter);
 
    let diff = if use_map_reduce {
       // Map-reduce will handle the full diff with per-file analysis
       diff
    } else if diff.len() > config.max_diff_length {
       println!("{}", style::warning(&format!("Applying smart truncation (diff size: {} characters)", diff.len())));
-      smart_truncate_diff(&diff, config.max_diff_length, config)
+      smart_truncate_diff(&diff, config.max_diff_length, config, token_counter)
    } else {
       diff
    };
@@ -378,6 +374,7 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
          &scope_candidates_str,
          &ctx,
          config,
+         token_counter,
       )
    })?;
 
@@ -538,6 +535,9 @@ fn main() -> Result<()> {
    let mut config = load_config_from_args(&args)?;
    apply_cli_overrides(&mut config, &args);
 
+   // Create token counter from final config
+   let token_counter = create_token_counter(&config);
+
    // Route to compose mode if --compose flag is present
    if args.compose {
       return run_compose_mode(&args, &config);
@@ -620,7 +620,7 @@ fn main() -> Result<()> {
    });
 
    // Run generation pipeline
-   let mut commit_msg = run_generation(&config, &args)?;
+   let mut commit_msg = run_generation(&config, &args, &token_counter)?;
 
    // Get stat and detail points for validation retry
    let stat = get_git_stat(&args.mode, args.target.as_deref(), &args.dir, &config)?;

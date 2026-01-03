@@ -1,11 +1,10 @@
-use std::{path::{Path, PathBuf}, sync::Arc};
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::{
    error::{CommitGenError, Result},
-   tokens::TokenCounter,
    types::{CategoryConfig, TypeConfig, default_categories, default_classifier_hint, default_types},
 };
 
@@ -97,10 +96,6 @@ pub struct CommitConfig {
    /// Loaded summary prompt (not in config file)
    #[serde(skip)]
    pub summary_prompt: String,
-
-   /// Token counter with cascading fallback (not in config file)
-   #[serde(skip)]
-   pub token_counter: Arc<TokenCounter>,
 }
 
 fn default_analysis_prompt_variant() -> String {
@@ -192,11 +187,6 @@ impl Default for CommitConfig {
          map_reduce_threshold:    default_map_reduce_threshold(),
          analysis_prompt:         String::new(),
          summary_prompt:          String::new(),
-         token_counter:           Arc::new(TokenCounter::new(
-            "http://localhost:4000",
-            None,
-            "claude-sonnet-4.5",
-         )),
       }
    }
 }
@@ -224,7 +214,6 @@ impl CommitConfig {
       Self::apply_env_overrides(&mut config);
 
       config.load_prompts()?;
-      config.init_token_counter();
       Ok(config)
    }
 
@@ -250,18 +239,7 @@ impl CommitConfig {
       Self::apply_env_overrides(&mut config);
 
       config.load_prompts()?;
-      config.init_token_counter();
       Ok(config)
-   }
-
-   /// Initialize the token counter with current config values.
-   /// Call this after modifying `api_base_url`, `api_key`, or `analysis_model`.
-   pub fn init_token_counter(&mut self) {
-      self.token_counter = Arc::new(TokenCounter::new(
-         &self.api_base_url,
-         self.api_key.as_deref(),
-         &self.analysis_model,
-      ));
    }
 
    /// Load prompts - templates are now loaded dynamically via Tera

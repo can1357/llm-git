@@ -6,6 +6,7 @@ use crate::{
    config::CommitConfig,
    error::{CommitGenError, Result},
    templates,
+   tokens::TokenCounter,
    types::{CommitSummary, ConventionalAnalysis},
 };
 
@@ -331,9 +332,8 @@ pub fn generate_conventional_analysis<'a>(
          if tool_call.function.name == "create_conventional_analysis" {
             let args = &tool_call.function.arguments;
             if args.is_empty() {
-               eprintln!(
-                  "{} Model returned empty function arguments. Model may not support function calling properly.",
-                  crate::style::icons::WARNING
+               crate::style::warn(
+                  "Model returned empty function arguments. Model may not support function calling properly.",
                );
                return Err(CommitGenError::Other(
                   "Model returned empty function arguments - try using a Claude model \
@@ -361,6 +361,25 @@ pub fn generate_conventional_analysis<'a>(
 
       Err(CommitGenError::Other("No conventional analysis found in API response".to_string()))
    })
+}
+
+/// Strip conventional commit type prefix if LLM included it in summary.
+///
+/// Some models return the full format `feat(scope): summary` instead of just `summary`.
+/// This function removes the prefix to normalize the response.
+fn strip_type_prefix(summary: &str, commit_type: &str, scope: Option<&str>) -> String {
+   let scope_part = scope.map(|s| format!("({s})")).unwrap_or_default();
+   let prefix = format!("{commit_type}{scope_part}: ");
+
+   summary
+      .strip_prefix(&prefix)
+      .or_else(|| {
+         // Also try without scope in case model omitted it
+         let prefix_no_scope = format!("{commit_type}: ");
+         summary.strip_prefix(&prefix_no_scope)
+      })
+      .unwrap_or(summary)
+      .to_string()
 }
 
 /// Validate summary against requirements
@@ -405,12 +424,11 @@ fn validate_summary_quality(
 
       // If >80% markdown but not docs type, suggest docs
       if md_count * 100 / total > 80 && commit_type != "docs" {
-         eprintln!(
-            "{} Type mismatch: {}% .md files but type is '{}' (consider docs type)",
-            crate::style::icons::WARNING,
+         crate::style::warn(&format!(
+            "Type mismatch: {}% .md files but type is '{}' (consider docs type)",
             md_count * 100 / total,
             commit_type
-         );
+         ));
       }
 
       // If no code files and type=feat/fix, warn
@@ -483,7 +501,9 @@ fn validate_summary_quality(
          .filter(|&&e| code_exts.contains(&e))
          .count();
       if code_count == 0 && (commit_type == "feat" || commit_type == "fix") {
-         eprintln!("{} Type mismatch: no code files changed but type is '{commit_type}'", crate::style::icons::WARNING);
+         crate::style::warn(&format!(
+            "Type mismatch: no code files changed but type is '{commit_type}'"
+         ));
       }
    }
 
@@ -619,9 +639,8 @@ pub fn generate_summary_from_analysis<'a>(
             if tool_call.function.name == "create_commit_summary" {
                let args = &tool_call.function.arguments;
                if args.is_empty() {
-                  eprintln!(
-                     "{} Model returned empty function arguments for summary. Model may not support function calling.",
-                     crate::style::icons::WARNING
+                  crate::style::warn(
+                     "Model returned empty function arguments for summary. Model may not support function calling.",
                   );
                   return Err(CommitGenError::Other(
                      "Model returned empty summary arguments - try using a Claude model \
@@ -636,9 +655,11 @@ pub fn generate_summary_from_analysis<'a>(
                      args.chars().take(200).collect::<String>()
                   ))
                })?;
+               // Strip type prefix if LLM included it (e.g., "feat(scope): summary" -> "summary")
+               let cleaned = strip_type_prefix(&summary.summary, commit_type, scope);
                return Ok((
                   false,
-                  Some(CommitSummary::new(summary.summary, config.summary_hard_limit)?),
+                  Some(CommitSummary::new(cleaned, config.summary_hard_limit)?),
                ));
             }
          }
@@ -646,9 +667,11 @@ pub fn generate_summary_from_analysis<'a>(
          if let Some(content) = &message_choice.content {
             let summary: SummaryOutput =
                serde_json::from_str(content.trim()).map_err(CommitGenError::JsonError)?;
+            // Strip type prefix if LLM included it
+            let cleaned = strip_type_prefix(&summary.summary, commit_type, scope);
             return Ok((
                false,
-               Some(CommitSummary::new(summary.summary, config.summary_hard_limit)?),
+               Some(CommitSummary::new(cleaned, config.summary_hard_limit)?),
             ));
          }
 
@@ -661,24 +684,22 @@ pub fn generate_summary_from_analysis<'a>(
             match validate_summary_quality(summary.as_str(), commit_type, stat) {
                Ok(()) => return Ok(summary),
                Err(reason) if validation_attempt < max_validation_retries => {
-                  eprintln!(
-                     "{} Validation failed (attempt {}/{}): {}",
-                     crate::style::icons::WARNING,
+                  crate::style::warn(&format!(
+                     "Validation failed (attempt {}/{}): {}",
                      validation_attempt + 1,
                      max_validation_retries + 1,
                      reason
-                  );
+                  ));
                   last_failure_reason = Some(reason);
                   validation_attempt += 1;
                   // Retry with constraint
                },
                Err(reason) => {
-                  eprintln!(
-                     "{} Validation failed after {} retries: {}. Using fallback.",
-                     crate::style::icons::WARNING,
+                  crate::style::warn(&format!(
+                     "Validation failed after {} retries: {}. Using fallback.",
                      max_validation_retries + 1,
                      reason
-                  );
+                  ));
                   // Fallback: use first detail or heuristic
                   return Ok(fallback_from_details_or_summary(
                      details,
@@ -861,15 +882,16 @@ pub fn generate_analysis_with_map_reduce<'a>(
    scope_candidates_str: &'a str,
    ctx: &AnalysisContext<'a>,
    config: &'a CommitConfig,
+   counter: &TokenCounter,
 ) -> Result<ConventionalAnalysis> {
    use crate::map_reduce::{run_map_reduce, should_use_map_reduce};
 
-   if should_use_map_reduce(diff, config) {
+   if should_use_map_reduce(diff, config, counter) {
       crate::style::print_info(&format!(
          "Large diff detected ({} tokens), using map-reduce...",
-         config.token_counter.count_sync(diff)
+         counter.count_sync(diff)
       ));
-      run_map_reduce(diff, stat, scope_candidates_str, model_name, config)
+      run_map_reduce(diff, stat, scope_candidates_str, model_name, config, counter)
    } else {
       generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config)
    }

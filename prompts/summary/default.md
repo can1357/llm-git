@@ -1,9 +1,8 @@
-Generate: {{ commit_type }}({{ scope }}): <YOUR OUTPUT>
+The full commit message will be: {{ commit_type }}{% if scope %}({{ scope }}){% endif %}: <description>
 
-<task>
-Synthesize the detail points into a commit description (the text after the colon).
+Your task: Generate ONLY the <description> portion (the text after the colon).
+Do NOT include "{{ commit_type }}:" or any type prefix in your output.
 Maximum {{ chars }} characters. No trailing period.
-</task>
 
 <format>
 1. Start with lowercase past-tense verb
@@ -53,8 +52,6 @@ build | Updated serde to fix CVE-2024-1234
 "optimized database queries" — unspecific
 "updated HTTP client" — which aspect?
 </bad_output_patterns>
-
-Output the description text only.
 
 --------------------
 {% if user_context %}

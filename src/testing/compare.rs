@@ -77,29 +77,31 @@ pub fn compare_analysis(golden: &ConventionalAnalysis, actual: &ConventionalAnal
    }
 }
 
-/// Compute Jaccard similarity between two strings (word-level)
-pub fn jaccard_similarity(a: &str, b: &str) -> f64 {
-   let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
-   let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
-
-   if words_a.is_empty() && words_b.is_empty() {
-      return 1.0;
-   }
-
-   let intersection = words_a.intersection(&words_b).count();
-   let union = words_a.union(&words_b).count();
-
-   if union == 0 {
-      return 0.0;
-   }
-
-   intersection as f64 / union as f64
-}
-
 #[cfg(test)]
 mod tests {
+   use std::collections::HashSet;
+
    use super::*;
    use crate::types::{CommitType, Scope};
+
+   /// Compute Jaccard similarity between two strings (word-level)
+   fn jaccard_similarity(a: &str, b: &str) -> f64 {
+      let words_a: HashSet<&str> = a.split_whitespace().collect();
+      let words_b: HashSet<&str> = b.split_whitespace().collect();
+
+      if words_a.is_empty() && words_b.is_empty() {
+         return 1.0;
+      }
+
+      let intersection = words_a.intersection(&words_b).count();
+      let union = words_a.union(&words_b).count();
+
+      if union == 0 {
+         return 0.0;
+      }
+
+      intersection as f64 / union as f64
+   }
 
    #[test]
    fn test_compare_exact_match() {

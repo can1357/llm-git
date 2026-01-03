@@ -15,6 +15,7 @@ use crate::{
    },
    normalization::{format_commit_message, post_process_commit_message},
    style,
+   tokens::create_token_counter,
    types::{Args, CommitMetadata, ConventionalCommit, Mode},
    validation::validate_commit_message,
 };
@@ -168,6 +169,8 @@ fn generate_for_commit(
    config: &CommitConfig,
    dir: &str,
 ) -> Result<String> {
+   let token_counter = create_token_counter(config);
+
    // Get diff and stat using commit hash as target (exclude old message for
    // rewrite)
    let diff = get_git_diff(&Mode::Commit, Some(&commit.hash), dir, config)?;
@@ -175,7 +178,7 @@ fn generate_for_commit(
 
    // Truncate if needed
    let diff = if diff.len() > config.max_diff_length {
-      smart_truncate_diff(&diff, config.max_diff_length, config)
+      smart_truncate_diff(&diff, config.max_diff_length, config, &token_counter)
    } else {
       diff
    };

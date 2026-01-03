@@ -47,6 +47,17 @@ pub fn info(s: &str) -> String {
    if colors_enabled() { s.cyan().to_string() } else { s.to_string() }
 }
 
+/// Print warning message, clearing any active spinner line first.
+///
+/// This ensures warnings appear on their own line even when a spinner is active,
+/// by writing a carriage return + clear-line escape sequence before the message.
+pub fn warn(msg: &str) {
+   // Clear current line in case spinner is active (stdout, not stderr)
+   print!("\r\x1b[K");
+   io::stdout().flush().ok();
+   eprintln!("{} {}", warning(icons::WARNING), warning(msg));
+}
+
 /// Dim: less important details, file paths (dimmed).
 pub fn dim(s: &str) -> String {
    if colors_enabled() { s.dimmed().to_string() } else { s.to_string() }

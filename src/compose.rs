@@ -11,6 +11,7 @@ use crate::{
    normalization::{format_commit_message, post_process_commit_message},
    patch::{reset_staging, stage_group_changes},
    style,
+   tokens::create_token_counter,
    types::{Args, ChangeGroup, CommitType, ComposeAnalysis, ConventionalCommit, Mode},
    validation::validate_commit_message,
 };
@@ -679,6 +680,7 @@ pub fn execute_compose(
    args: &Args,
 ) -> Result<Vec<String>> {
    let dir = &args.dir;
+   let token_counter = create_token_counter(config);
 
    // Reset staging area
    println!("{}", style::info("Resetting staging area..."));
@@ -731,7 +733,7 @@ pub fn execute_compose(
 
       // Truncate if needed
       let diff = if diff.len() > config.max_diff_length {
-         smart_truncate_diff(&diff, config.max_diff_length, config)
+         smart_truncate_diff(&diff, config.max_diff_length, config, &token_counter)
       } else {
          diff
       };
@@ -881,6 +883,8 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
 /// Run a single round of compose
 fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result<()> {
+   let token_counter = create_token_counter(config);
+
    // Get combined diff (staged + unstaged)
    let diff_staged = get_git_diff(&Mode::Staged, None, &args.dir, config).unwrap_or_default();
    let diff_unstaged = get_git_diff(&Mode::Unstaged, None, &args.dir, config).unwrap_or_default();
@@ -921,7 +925,7 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
             combined_diff.len()
          ))
       );
-      smart_truncate_diff(&combined_diff, config.max_diff_length, config)
+      smart_truncate_diff(&combined_diff, config.max_diff_length, config, &token_counter)
    } else {
       combined_diff
    };

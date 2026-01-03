@@ -14,6 +14,7 @@ use crate::{
    diff::{FileDiff, parse_diff, reconstruct_diff},
    error::{CommitGenError, Result},
    templates,
+   tokens::TokenCounter,
    types::ConventionalAnalysis,
 };
 
@@ -36,7 +37,7 @@ const MAX_FILE_TOKENS: usize = 50_000;
 /// Always use map-reduce except for:
 /// 1. Explicitly disabled in config
 /// 2. Very small diffs (≤3 files) where overhead isn't worth it
-pub fn should_use_map_reduce(diff: &str, config: &CommitConfig) -> bool {
+pub fn should_use_map_reduce(diff: &str, config: &CommitConfig, counter: &TokenCounter) -> bool {
    if !config.map_reduce_enabled {
       return false;
    }
@@ -53,7 +54,6 @@ pub fn should_use_map_reduce(diff: &str, config: &CommitConfig) -> bool {
       .count();
 
    // Use map-reduce for 4+ files, or if any single file would need truncation
-   let counter = &config.token_counter;
    file_count >= MIN_FILES_FOR_MAP_REDUCE
       || files.iter().any(|f| f.token_estimate(counter) > MAX_FILE_TOKENS)
 }
@@ -157,8 +157,8 @@ fn map_phase(
    files: &[FileDiff],
    model_name: &str,
    config: &CommitConfig,
+   counter: &TokenCounter,
 ) -> Result<Vec<FileObservation>> {
-   let counter = &config.token_counter;
 
    // Process files in parallel using rayon
    let observations: Vec<Result<FileObservation>> = files
@@ -394,6 +394,7 @@ pub fn run_map_reduce(
    scope_candidates: &str,
    model_name: &str,
    config: &CommitConfig,
+   counter: &TokenCounter,
 ) -> Result<ConventionalAnalysis> {
    let mut files = parse_diff(diff);
 
@@ -415,7 +416,7 @@ pub fn run_map_reduce(
    crate::style::print_info(&format!("Running map-reduce on {file_count} files..."));
 
    // Map phase
-   let observations = map_phase(&files, model_name, config)?;
+   let observations = map_phase(&files, model_name, config, counter)?;
 
    // Reduce phase
    reduce_phase(&observations, stat, scope_candidates, model_name, config)

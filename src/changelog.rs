@@ -22,6 +22,7 @@ use crate::{
    error::{CommitGenError, Result},
    patch::stage_files,
    templates,
+   tokens::create_token_counter,
    types::{ChangelogBoundary, ChangelogCategory, UnreleasedSection},
 };
 
@@ -38,6 +39,8 @@ struct ChangelogResponse {
 /// 3. For each boundary: generate entries via LLM, write to changelog
 /// 4. Stage modified changelogs
 pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> Result<()> {
+   let token_counter = create_token_counter(config);
+
    // Get list of staged files
    let staged_files = get_staged_files(&args.dir)?;
    if staged_files.is_empty() {
@@ -83,7 +86,7 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
 
       // Truncate if needed
       let diff = if diff.len() > config.max_diff_length {
-         smart_truncate_diff(&diff, config.max_diff_length, config)
+         smart_truncate_diff(&diff, config.max_diff_length, config, &token_counter)
       } else {
          diff
       };

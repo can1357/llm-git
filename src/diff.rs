@@ -195,8 +195,12 @@ pub fn parse_diff(diff: &str) -> Vec<FileDiff> {
 }
 
 /// Smart truncation of git diff with token-aware budgeting
-pub fn smart_truncate_diff(diff: &str, max_length: usize, config: &CommitConfig) -> String {
-   let counter = &config.token_counter;
+pub fn smart_truncate_diff(
+   diff: &str,
+   max_length: usize,
+   config: &CommitConfig,
+   counter: &TokenCounter,
+) -> String {
    let mut file_diffs = parse_diff(diff);
 
    // Filter out excluded files

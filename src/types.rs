@@ -554,15 +554,14 @@ impl CommitSummary {
          if let Some(first_char) = s.chars().next()
             && first_char.is_uppercase()
          {
-            eprintln!("{} commit summary should start with lowercase: {s}", crate::style::icons::WARNING);
+            crate::style::warn(&format!("commit summary should start with lowercase: {s}"));
          }
 
          // Warning-only: should NOT end with period (conventional commits style)
          if s.trim_end().ends_with('.') {
-            eprintln!(
-               "{} commit summary should NOT end with period (conventional commits style): {s}",
-               crate::style::icons::WARNING
-            );
+            crate::style::warn(&format!(
+               "commit summary should NOT end with period (conventional commits style): {s}"
+            ));
          }
       }
 
