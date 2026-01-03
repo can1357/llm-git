@@ -121,7 +121,7 @@ where
          },
          Ok((true, _)) if attempt < config.max_retries => {
             let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
-            eprintln!("Retry {}/{} after {}ms...", attempt, config.max_retries, backoff_ms);
+            eprintln!("{}", crate::style::warning(&format!("Retry {}/{} after {}ms...", attempt, config.max_retries, backoff_ms)));
             thread::sleep(Duration::from_millis(backoff_ms));
          },
          Ok((true, _last_err)) => {
@@ -134,8 +134,8 @@ where
             if attempt < config.max_retries {
                let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
                eprintln!(
-                  "Error: {} - Retry {}/{} after {}ms...",
-                  e, attempt, config.max_retries, backoff_ms
+                  "{}",
+                  crate::style::warning(&format!("Error: {} - Retry {}/{} after {}ms...", e, attempt, config.max_retries, backoff_ms))
                );
                thread::sleep(Duration::from_millis(backoff_ms));
                continue;
@@ -149,30 +149,28 @@ where
 /// Format commit types from config into a rich description for the prompt
 /// Order is preserved from config (first = highest priority)
 fn format_types_description(config: &CommitConfig) -> String {
+   use std::fmt::Write;
    let mut out = String::from("Check types in order (first match wins):\n\n");
 
    for (name, tc) in &config.types {
-      out.push_str(&format!("**{}**: {}\n", name, tc.description));
+      let _ = writeln!(out, "**{name}**: {}", tc.description);
       if !tc.diff_indicators.is_empty() {
-         out.push_str(&format!(
-            "  Diff indicators: `{}`\n",
-            tc.diff_indicators.join("`, `")
-         ));
+         let _ = writeln!(out, "  Diff indicators: `{}`", tc.diff_indicators.join("`, `"));
       }
       if !tc.file_patterns.is_empty() {
-         out.push_str(&format!("  File patterns: {}\n", tc.file_patterns.join(", ")));
+         let _ = writeln!(out, "  File patterns: {}", tc.file_patterns.join(", "));
       }
       for ex in &tc.examples {
-         out.push_str(&format!("  - {}\n", ex));
+         let _ = writeln!(out, "  - {ex}");
       }
       if !tc.hint.is_empty() {
-         out.push_str(&format!("  Note: {}\n", tc.hint));
+         let _ = writeln!(out, "  Note: {}", tc.hint);
       }
       out.push('\n');
    }
 
    if !config.classifier_hint.is_empty() {
-      out.push_str(&format!("\n{}\n", config.classifier_hint));
+      let _ = writeln!(out, "\n{}", config.classifier_hint);
    }
 
    out
@@ -286,7 +284,7 @@ pub fn generate_conventional_analysis<'a>(
          let error_text = response
             .text()
             .unwrap_or_else(|_| "Unknown error".to_string());
-         eprintln!("Server error {status}: {error_text}");
+         eprintln!("{}", crate::style::error(&format!("Server error {status}: {error_text}")));
          return Ok((true, None)); // Retry
       }
 
@@ -314,8 +312,8 @@ pub fn generate_conventional_analysis<'a>(
             let args = &tool_call.function.arguments;
             if args.is_empty() {
                eprintln!(
-                  "Warning: Model returned empty function arguments. Model may not support \
-                   function calling properly."
+                  "{} Model returned empty function arguments. Model may not support function calling properly.",
+                  crate::style::icons::WARNING
                );
                return Err(CommitGenError::Other(
                   "Model returned empty function arguments - try using a Claude model \
@@ -388,7 +386,8 @@ fn validate_summary_quality(
       // If >80% markdown but not docs type, suggest docs
       if md_count * 100 / total > 80 && commit_type != "docs" {
          eprintln!(
-            "⚠ Type mismatch: {}% .md files but type is '{}' (consider docs type)",
+            "{} Type mismatch: {}% .md files but type is '{}' (consider docs type)",
+            crate::style::icons::WARNING,
             md_count * 100 / total,
             commit_type
          );
@@ -464,7 +463,7 @@ fn validate_summary_quality(
          .filter(|&&e| code_exts.contains(&e))
          .count();
       if code_count == 0 && (commit_type == "feat" || commit_type == "fix") {
-         eprintln!("⚠ Type mismatch: no code files changed but type is '{commit_type}'");
+         eprintln!("{} Type mismatch: no code files changed but type is '{commit_type}'", crate::style::icons::WARNING);
       }
    }
 
@@ -576,7 +575,7 @@ pub fn generate_summary_from_analysis<'a>(
             let error_text = response
                .text()
                .unwrap_or_else(|_| "Unknown error".to_string());
-            eprintln!("Server error {status}: {error_text}");
+            eprintln!("{}", crate::style::error(&format!("Server error {status}: {error_text}")));
             return Ok((true, None)); // Retry
          }
 
@@ -601,8 +600,8 @@ pub fn generate_summary_from_analysis<'a>(
                let args = &tool_call.function.arguments;
                if args.is_empty() {
                   eprintln!(
-                     "Warning: Model returned empty function arguments for summary. Model may not \
-                      support function calling."
+                     "{} Model returned empty function arguments for summary. Model may not support function calling.",
+                     crate::style::icons::WARNING
                   );
                   return Err(CommitGenError::Other(
                      "Model returned empty summary arguments - try using a Claude model \
@@ -643,7 +642,8 @@ pub fn generate_summary_from_analysis<'a>(
                Ok(()) => return Ok(summary),
                Err(reason) if validation_attempt < max_validation_retries => {
                   eprintln!(
-                     "⚠ Validation failed (attempt {}/{}): {}",
+                     "{} Validation failed (attempt {}/{}): {}",
+                     crate::style::icons::WARNING,
                      validation_attempt + 1,
                      max_validation_retries + 1,
                      reason
@@ -654,7 +654,8 @@ pub fn generate_summary_from_analysis<'a>(
                },
                Err(reason) => {
                   eprintln!(
-                     "⚠ Validation failed after {} retries: {}. Using fallback.",
+                     "{} Validation failed after {} retries: {}. Using fallback.",
+                     crate::style::icons::WARNING,
                      max_validation_retries + 1,
                      reason
                   );

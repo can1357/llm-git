@@ -3,6 +3,7 @@ use std::process::Command;
 use crate::{
    config::CommitConfig,
    error::{CommitGenError, Result},
+   style::{self, icons},
    types::ConventionalCommit,
 };
 
@@ -250,16 +251,24 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
    // Soft limit warning (triggers retry in main.rs) - WARN but pass
    if first_line_len > config.summary_soft_limit {
       eprintln!(
-         "⚠ Summary exceeds soft limit: {} > {} chars (retry recommended)",
-         first_line_len, config.summary_soft_limit
+         "{} {}",
+         style::warning(icons::WARNING),
+         style::warning(&format!(
+            "Summary exceeds soft limit: {} > {} chars (retry recommended)",
+            first_line_len, config.summary_soft_limit
+         ))
       );
    }
 
    // Guideline warning (72-96 range) - INFO
    if first_line_len > config.summary_guideline && first_line_len <= config.summary_soft_limit {
       eprintln!(
-         "ℹ Summary exceeds guideline: {} > {} chars (still acceptable)",
-         first_line_len, config.summary_guideline
+         "{} {}",
+         style::info(icons::INFO),
+         style::info(&format!(
+            "Summary exceeds guideline: {} > {} chars (still acceptable)",
+            first_line_len, config.summary_guideline
+         ))
       );
    }
 
@@ -267,7 +276,11 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
    if let Some(first_char) = msg.summary.as_str().trim().chars().next()
       && first_char.is_uppercase()
    {
-      eprintln!("Warning: Summary '{}' should start lowercase after type:", msg.summary);
+      eprintln!(
+         "{} {}",
+         style::warning(icons::WARNING),
+         style::warning(&format!("Summary '{}' should start lowercase after type:", msg.summary))
+      );
    }
 
    // Check first word is past-tense verb (morphology-based)
@@ -300,7 +313,11 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
    const FILLER_WORDS: &[&str] = &["comprehensive", "better", "various", "several"];
    for filler in FILLER_WORDS {
       if msg.summary.as_str().to_lowercase().contains(filler) {
-         eprintln!("Warning: Summary contains filler word '{}': {}", filler, msg.summary);
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning(&format!("Summary contains filler word '{}': {}", filler, msg.summary))
+         );
       }
    }
 
@@ -319,8 +336,11 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
    for phrase in META_PHRASES {
       if msg.summary.as_str().to_lowercase().contains(phrase) {
          eprintln!(
-            "Warning: Summary contains meta-phrase '{phrase}' - be more specific about what \
-             changed"
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning(&format!(
+               "Summary contains meta-phrase '{phrase}' - be more specific about what changed"
+            ))
          );
       }
    }
@@ -369,10 +389,18 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
          .iter()
          .any(|&word| first_word.to_lowercase() == word)
       {
-         eprintln!("Warning: Body item uses present tense: '{item}'");
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning(&format!("Body item uses present tense: '{item}'"))
+         );
       }
       if !item.trim_end().ends_with('.') {
-         eprintln!("Warning: Body item missing period: '{item}'");
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning(&format!("Body item missing period: '{item}'"))
+         );
       }
    }
 
@@ -401,7 +429,11 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
             || path.to_lowercase().contains("readme")
       });
       if !has_docs {
-         eprintln!("Warning: Commit type 'docs' but no documentation files changed");
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning("Commit type 'docs' but no documentation files changed")
+         );
       }
    }
 
@@ -412,7 +444,11 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
          path.contains("/test") || path.contains("_test.") || path.contains(".test.")
       });
       if !has_test {
-         eprintln!("Warning: Commit type 'test' but no test files changed");
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning("Commit type 'test' but no test files changed")
+         );
       }
    }
 
@@ -424,7 +460,11 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
          path_obj.extension().is_some_and(|ext| is_code_extension(ext.to_str().unwrap_or("")))
       });
       if has_code {
-         eprintln!("Warning: Commit type 'style' but code files changed (verify no logic changes)");
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning("Commit type 'style' but code files changed (verify no logic changes)")
+         );
       }
    }
 
@@ -437,7 +477,11 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
             || path.contains("jenkinsfile")
       });
       if !has_ci {
-         eprintln!("Warning: Commit type 'ci' but no CI configuration files changed");
+         eprintln!(
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning("Commit type 'ci' but no CI configuration files changed")
+         );
       }
    }
 
@@ -452,7 +496,9 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
       });
       if !has_build {
          eprintln!(
-            "Warning: Commit type 'build' but no build files (Cargo.toml, package.json) changed"
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning("Commit type 'build' but no build files (Cargo.toml, package.json) changed")
          );
       }
    }
@@ -464,8 +510,12 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
          .any(|line| line.trim().starts_with("create mode") || line.contains("new file"));
       if has_new_files {
          eprintln!(
-            "Warning: Commit type 'refactor' but new files were created - verify no new \
-             capabilities added (might be 'feat')"
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning(
+               "Commit type 'refactor' but new files were created - verify no new capabilities \
+                added (might be 'feat')"
+            )
          );
       }
    }
@@ -486,8 +536,11 @@ pub fn check_type_scope_consistency(msg: &ConventionalCommit, stat: &str) {
 
       if !has_perf_files && !has_perf_details {
          eprintln!(
-            "Warning: Commit type 'perf' but no performance-related files or optimization \
-             keywords found"
+            "{} {}",
+            style::warning(icons::WARNING),
+            style::warning(
+               "Commit type 'perf' but no performance-related files or optimization keywords found"
+            )
          );
       }
    }

@@ -10,6 +10,7 @@ use crate::{
    git::{get_git_diff, get_git_stat, get_head_hash, git_commit},
    normalization::{format_commit_message, post_process_commit_message},
    patch::{reset_staging, stage_group_changes},
+   style,
    types::{
       Args, ChangeGroup, CommitType, ComposeAnalysis, ConventionalAnalysis, ConventionalCommit,
       Mode,
@@ -588,23 +589,35 @@ fn validate_compose_groups(groups: &[ChangeGroup], full_diff: &str) -> Result<()
                crate::types::HunkSelector::Lines { start, end } => {
                   if start > end {
                      eprintln!(
-                        "⚠ Warning: Group {idx} has invalid line range {start}-{end} in {}",
-                        change.path
+                        "{}",
+                        style::warning(&format!(
+                           "{} Warning: Group {idx} has invalid line range {start}-{end} in {}",
+                           style::icons::WARNING,
+                           change.path
+                        ))
                      );
                   }
                   if *start == 0 {
                      eprintln!(
-                        "⚠ Warning: Group {idx} has line range starting at 0 (should be \
-                         1-indexed) in {}",
-                        change.path
+                        "{}",
+                        style::warning(&format!(
+                           "{} Warning: Group {idx} has line range starting at 0 (should be \
+                            1-indexed) in {}",
+                           style::icons::WARNING,
+                           change.path
+                        ))
                      );
                   }
                },
                crate::types::HunkSelector::Search { pattern } => {
                   if pattern.is_empty() {
                      eprintln!(
-                        "⚠ Warning: Group {idx} has empty search pattern in {}",
-                        change.path
+                        "{}",
+                        style::warning(&format!(
+                           "{} Warning: Group {idx} has empty search pattern in {}",
+                           style::icons::WARNING,
+                           change.path
+                        ))
                      );
                   }
                },
@@ -629,7 +642,7 @@ fn validate_compose_groups(groups: &[ChangeGroup], full_diff: &str) -> Result<()
    // Check for missing files
    let missing_files: Vec<&String> = diff_files.difference(&covered_files).collect();
    if !missing_files.is_empty() {
-      eprintln!("⚠ Warning: Groups don't cover all files. Missing:");
+      eprintln!("{}", style::warning(&format!("{} Warning: Groups don't cover all files. Missing:", style::icons::WARNING)));
       for file in &missing_files {
          eprintln!("   - {file}");
       }
@@ -646,7 +659,7 @@ fn validate_compose_groups(groups: &[ChangeGroup], full_diff: &str) -> Result<()
       .collect();
 
    if !duplicates.is_empty() {
-      eprintln!("⚠ Warning: Some files appear in multiple groups:");
+      eprintln!("{}", style::warning(&format!("{} Warning: Some files appear in multiple groups:", style::icons::WARNING)));
       for (file, count) in duplicates {
          eprintln!("   - {file} ({count} times)");
       }
@@ -671,7 +684,7 @@ pub fn execute_compose(
    let dir = &args.dir;
 
    // Reset staging area
-   println!("Resetting staging area...");
+   println!("{}", style::info("Resetting staging area..."));
    reset_staging(dir)?;
 
    // Capture the full diff against the original HEAD once so we can reuse the same
@@ -705,9 +718,9 @@ pub fn execute_compose(
          analysis.dependency_order.len(),
          group.rationale
       );
-      println!("  Type: {}", group.commit_type);
+      println!("  Type: {}", style::commit_type(&group.commit_type.to_string()));
       if let Some(ref scope) = group.scope {
-         println!("  Scope: {scope}");
+         println!("  Scope: {}", style::scope(&scope.to_string()));
       }
       let files: Vec<String> = group.changes.iter().map(|c| c.path.clone()).collect();
       println!("  Files: {}", files.join(", "));
@@ -727,7 +740,7 @@ pub fn execute_compose(
       };
 
       // Generate commit message using existing infrastructure
-      println!("  Generating commit message...");
+      println!("  {}", style::info("Generating commit message..."));
       let ctx = AnalysisContext {
          user_context:   Some(&group.rationale),
          recent_commits: None, // No recent commits for compose mode
@@ -769,7 +782,7 @@ pub fn execute_compose(
       post_process_commit_message(&mut commit, config);
 
       if let Err(e) = validate_commit_message(&commit, config) {
-         eprintln!("  Warning: Validation failed: {e}");
+         eprintln!("  {}", style::warning(&format!("{} Warning: Validation failed: {e}", style::icons::WARNING)));
       }
 
       let formatted_message = format_commit_message(&commit);
@@ -792,7 +805,7 @@ pub fn execute_compose(
 
          // Run tests if requested
          if args.compose_test_after_each {
-            println!("  Running tests...");
+            println!("  {}", style::info("Running tests..."));
             let test_result = std::process::Command::new("cargo")
                .arg("test")
                .current_dir(dir)
@@ -804,7 +817,7 @@ pub fn execute_compose(
                      "Tests failed after commit {idx}. Aborting."
                   )));
                }
-               println!("  ✓ Tests passed");
+               println!("  {}", style::success(&format!("{} Tests passed", style::icons::SUCCESS)));
             }
          }
       }
@@ -819,11 +832,11 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
    for round in 1..=max_rounds {
       if round > 1 {
-         println!("\n=== Compose Round {round}/{max_rounds} ===");
+         println!("\n{}", style::section_header(&format!("Compose Round {round}/{max_rounds}"), 80));
       } else {
-         println!("=== Compose Mode ===");
+         println!("{}", style::section_header("Compose Mode", 80));
       }
-      println!("Analyzing all changes for intelligent splitting...\n");
+      println!("{}\n", style::info("Analyzing all changes for intelligent splitting..."));
 
       run_compose_round(args, config, round)?;
 
@@ -844,11 +857,11 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
       let remaining_diff = String::from_utf8_lossy(&remaining_diff_output.stdout);
       if remaining_diff.trim().is_empty() {
-         println!("\n✓ All changes committed successfully");
+         println!("\n{}", style::success(&format!("{} All changes committed successfully", style::icons::SUCCESS)));
          break;
       }
 
-      eprintln!("\n⚠ Uncommitted changes remain after round {round}");
+      eprintln!("\n{}", style::warning(&format!("{} Uncommitted changes remain after round {round}", style::icons::WARNING)));
 
       let stat_output = std::process::Command::new("git")
          .args(["diff", "HEAD", "--stat"])
@@ -864,10 +877,10 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
       }
 
       if round < max_rounds {
-         eprintln!("Starting another compose round...");
+         eprintln!("{}", style::info("Starting another compose round..."));
          continue;
       }
-      eprintln!("Reached max rounds ({max_rounds}). Remaining changes need manual commit.");
+      eprintln!("{}", style::warning(&format!("Reached max rounds ({max_rounds}). Remaining changes need manual commit.")));
    }
 
    Ok(())
@@ -908,8 +921,12 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
    // Truncate if needed
    let diff = if combined_diff.len() > config.max_diff_length {
       println!(
-         "Warning: Applying smart truncation (diff size: {} characters)",
-         combined_diff.len()
+         "{}",
+         style::warning(&format!(
+            "{} Applying smart truncation (diff size: {} characters)",
+            style::icons::WARNING,
+            combined_diff.len()
+         ))
       );
       smart_truncate_diff(&combined_diff, config.max_diff_length, config)
    } else {
@@ -918,14 +935,14 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
 
    let max_commits = args.compose_max_commits.unwrap_or(3);
 
-   println!("Analyzing changes (max {max_commits} commits)...");
+   println!("{}", style::info(&format!("Analyzing changes (max {max_commits} commits)...")));
    let analysis = analyze_for_compose(&diff, &combined_stat, config, max_commits)?;
 
    // Validate groups for exhaustiveness and correctness
-   println!("Validating groups...");
+   println!("{}", style::info("Validating groups..."));
    validate_compose_groups(&analysis.groups, &original_diff)?;
 
-   println!("\n=== Proposed Commit Groups ===");
+   println!("\n{}", style::section_header("Proposed Commit Groups", 80));
    for (idx, &group_idx) in analysis.dependency_order.iter().enumerate() {
       let mut group = analysis.groups[group_idx].clone();
       if group_affects_only_dependency_files(&group) && group.commit_type.as_str() != "build" {
@@ -934,11 +951,11 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
       println!(
          "\n{}. [{}{}] {}",
          idx + 1,
-         group.commit_type,
+         style::commit_type(&group.commit_type.to_string()),
          group
             .scope
             .as_ref()
-            .map(|s| format!("({s})"))
+            .map(|s| format!("({})", style::scope(&s.to_string())))
             .unwrap_or_default(),
          group.rationale
       );
@@ -977,13 +994,13 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
    }
 
    if args.compose_preview {
-      println!("\n✓ Preview complete (use --compose without --compose-preview to execute)");
+      println!("\n{}", style::success(&format!("{} Preview complete (use --compose without --compose-preview to execute)", style::icons::SUCCESS)));
       return Ok(());
    }
 
-   println!("\nExecuting compose (round {round})...");
+   println!("\n{}", style::info(&format!("Executing compose (round {round})...")));
    let hashes = execute_compose(&analysis, config, args)?;
 
-   println!("✓ Round {round}: Created {} commit(s)", hashes.len());
+   println!("{}", style::success(&format!("{} Round {round}: Created {} commit(s)", style::icons::SUCCESS, hashes.len())));
    Ok(())
 }

@@ -14,6 +14,7 @@ use crate::{
       get_git_diff, get_git_stat, rewrite_history,
    },
    normalization::{format_commit_message, post_process_commit_message},
+   style,
    types::{Args, CommitMetadata, ConventionalCommit, Mode},
    validation::validate_commit_message,
 };
@@ -31,23 +32,23 @@ pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    }
 
    // 2. Get commit list
-   println!("📋 Collecting commits...");
+   println!("{} Collecting commits...", style::info("📋"));
    let mut commit_hashes = get_commit_list(args.rewrite_start.as_deref(), &args.dir)?;
 
    if let Some(n) = args.rewrite_preview {
       commit_hashes.truncate(n);
    }
 
-   println!("Found {} commits to process", commit_hashes.len());
+   println!("Found {} commits to process", style::bold(&commit_hashes.len().to_string()));
 
    // 3. Extract metadata
-   println!("🔍 Extracting commit metadata...");
+   println!("{} Extracting commit metadata...", style::info("🔍"));
    let commits: Vec<CommitMetadata> = commit_hashes
       .iter()
       .enumerate()
       .map(|(i, hash)| {
          if (i + 1) % 50 == 0 {
-            eprintln!("  {}/{}...", i + 1, commit_hashes.len());
+            eprintln!("  {}/{}...", style::dim(&(i + 1).to_string()), commit_hashes.len());
          }
          get_commit_metadata(hash, &args.dir)
       })
@@ -60,7 +61,11 @@ pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    }
 
    // 5. Generate new messages (parallel)
-   println!("🤖 Converting to conventional commits (parallel={})...\n", args.rewrite_parallel);
+   println!(
+      "{} Converting to conventional commits (parallel={})...\n",
+      style::info("🤖"),
+      style::bold(&args.rewrite_parallel.to_string())
+   );
 
    // Force exclude_old_message for rewrite mode
    let mut rewrite_config = config.clone();
@@ -73,7 +78,7 @@ pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
    // 7. Preview or apply
    if args.rewrite_dry_run {
-      println!("\n=== DRY RUN - No changes made ===");
+      println!("\n{}", style::section_header("DRY RUN - No changes made", 50));
       println!("Run without --rewrite-dry-run to apply changes");
       return Ok(());
    }
@@ -84,16 +89,16 @@ pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    }
 
    // 8. Create backup
-   println!("\n💾 Creating backup branch...");
+   println!("\n{} Creating backup branch...", style::info("💾"));
    let backup = create_backup_branch(&args.dir)?;
-   println!("✓ Backup: {backup}");
+   println!("{} Backup: {}", style::success("✓"), style::bold(&backup));
 
    // 9. Rewrite history
-   println!("\n⚠️  Rewriting history...");
+   println!("\n{} Rewriting history...", style::warning("⚠️"));
    rewrite_history(&commits, &new_messages, &args.dir)?;
 
-   println!("\n✅ Done! Rewrote {} commits", commits.len());
-   println!("Restore with: git reset --hard {backup}");
+   println!("\n{} Done! Rewrote {} commits", style::success("✅"), style::bold(&commits.len().to_string()));
+   println!("Restore with: {}", style::dim(&format!("git reset --hard {backup}")));
 
    Ok(())
 }
@@ -121,17 +126,18 @@ fn generate_messages_parallel(
                   let old = commit.message.lines().next().unwrap_or("");
                   let new = new_msg.lines().next().unwrap_or("");
 
-                  println!("[{:3}/{:3}] {}", idx + 1, commits.len(), &commit.hash[..8]);
-                  println!("  - {}", TruncStr(old, 60));
-                  println!("  + {}", TruncStr(new, 60));
+                  println!("[{:3}/{:3}] {}", idx + 1, commits.len(), style::dim(&commit.hash[..8]));
+                  println!("  {} {}", style::error("-"), style::dim(&TruncStr(old, 60).to_string()));
+                  println!("  {} {}", style::success("+"), TruncStr(new, 60));
                   println!();
                },
                Err(e) => {
                   eprintln!(
-                     "[{:3}/{:3}] {} ❌ ERROR: {}",
+                     "[{:3}/{:3}] {} {} {}",
                      idx + 1,
                      commits.len(),
-                     &commit.hash[..8],
+                     style::dim(&commit.hash[..8]),
+                     style::error("❌ ERROR:"),
                      e
                   );
                   // Fallback to original message
@@ -146,7 +152,11 @@ fn generate_messages_parallel(
    let error_list = Arc::try_unwrap(errors).unwrap().into_inner();
 
    if !error_list.is_empty() {
-      eprintln!("\n⚠️  {} commits failed, kept original messages", error_list.len());
+      eprintln!(
+         "\n{} {} commits failed, kept original messages",
+         style::warning("⚠️"),
+         style::bold(&error_list.len().to_string())
+      );
    }
 
    Ok(final_messages)
@@ -220,7 +230,13 @@ fn generate_for_commit(
 
 /// Print preview list of commits (no API calls)
 fn print_preview_list(commits: &[CommitMetadata]) {
-   println!("\n=== PREVIEW - Showing {} commits (no API calls) ===\n", commits.len());
+   println!(
+      "\n{}\n",
+      style::section_header(
+         &format!("PREVIEW - Showing {} commits (no API calls)", commits.len()),
+         70
+      )
+   );
 
    for (i, commit) in commits.iter().enumerate() {
       let summary = commit
@@ -232,27 +248,27 @@ fn print_preview_list(commits: &[CommitMetadata]) {
          .take(70)
          .collect::<String>();
 
-      println!("[{:3}] {} - {}", i + 1, &commit.hash[..8], summary);
+      println!("[{:3}] {} - {}", i + 1, style::dim(&commit.hash[..8]), summary);
    }
 
-   println!("\nRun without --rewrite-preview to regenerate commits");
+   println!("\n{}", style::dim("Run without --rewrite-preview to regenerate commits"));
 }
 
 /// Print conversion results comparison
 fn print_conversion_results(commits: &[CommitMetadata], new_messages: &[String]) {
-   println!("\n✓ Processed {} commits\n", commits.len());
+   println!("\n{} Processed {} commits\n", style::success("✓"), style::bold(&commits.len().to_string()));
 
    // Show first 3 examples
    let show_count = 3.min(commits.len());
    if show_count > 0 {
-      println!("=== Sample conversions ===\n");
+      println!("{}\n", style::section_header("Sample conversions", 50));
       for i in 0..show_count {
          let old = commits[i].message.lines().next().unwrap_or("");
          let new = new_messages[i].lines().next().unwrap_or("");
 
-         println!("[{}] {}", i + 1, &commits[i].hash[..8]);
-         println!("  - {}", TruncStr(old, 70));
-         println!("  + {}", TruncStr(new, 70));
+         println!("[{}] {}", i + 1, style::dim(&commits[i].hash[..8]));
+         println!("  {} {}", style::error("-"), style::dim(&TruncStr(old, 70).to_string()));
+         println!("  {} {}", style::success("+"), TruncStr(new, 70));
          println!();
       }
    }

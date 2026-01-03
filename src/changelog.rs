@@ -63,12 +63,12 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
    }
 
    // Detect boundaries
-   let boundaries = detect_boundaries(&non_changelog_files, &changelogs, &args.dir)?;
+   let boundaries = detect_boundaries(&non_changelog_files, &changelogs, &args.dir);
    if boundaries.is_empty() {
       return Ok(());
    }
 
-   println!("Updating {} changelog(s)...", boundaries.len());
+   println!("{}", crate::style::info(&format!("Updating {} changelog(s)...", boundaries.len())));
 
    let mut modified_changelogs = Vec::new();
 
@@ -100,7 +100,8 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
          Ok(u) => u,
          Err(CommitGenError::NoUnreleasedSection { path }) => {
             eprintln!(
-               "Warning: No [Unreleased] section in {}, skipping changelog update",
+               "{} No [Unreleased] section in {}, skipping changelog update",
+               crate::style::icons::WARNING,
                path
             );
             continue;
@@ -128,7 +129,7 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
       ) {
          Ok(entries) => entries,
          Err(e) => {
-            eprintln!("Warning: Failed to generate changelog entries: {e}");
+            eprintln!("{}", crate::style::warning(&format!("Failed to generate changelog entries: {e}")));
             continue;
          },
       };
@@ -138,7 +139,7 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
       }
 
       // Write entries to changelog
-      let updated = write_entries(&changelog_content, &unreleased, &new_entries)?;
+      let updated = write_entries(&changelog_content, &unreleased, &new_entries);
       std::fs::write(&boundary.changelog_path, updated).map_err(|e| {
          CommitGenError::ChangelogParseError {
             path:   boundary.changelog_path.display().to_string(),
@@ -149,7 +150,8 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
       let entry_count: usize = new_entries.values().map(|v| v.len()).sum();
       modified_changelogs.push(boundary.changelog_path.display().to_string());
       println!(
-         "  Added {} entries to {}",
+         "{}  Added {} entries to {}",
+         crate::style::icons::SUCCESS,
          entry_count,
          boundary.changelog_path.display()
       );
@@ -238,7 +240,7 @@ fn call_changelog_api(prompt: &str, config: &CommitConfig) -> Result<ChangelogRe
       if status.is_server_error() {
          if attempt < config.max_retries {
             let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
-            eprintln!("Server error {status}, retry {attempt}/{} after {backoff_ms}ms...", config.max_retries);
+            eprintln!("{}", crate::style::warning(&format!("Server error {status}, retry {attempt}/{} after {backoff_ms}ms...", config.max_retries)));
             thread::sleep(Duration::from_millis(backoff_ms));
             continue;
          }
@@ -288,7 +290,7 @@ fn extract_json_from_content(content: &str) -> String {
    if let Some(start) = trimmed.find("```") {
       let after_marker = &trimmed[start + 3..];
       // Skip optional language identifier
-      let content_start = after_marker.find('\n').map(|i| i + 1).unwrap_or(0);
+      let content_start = after_marker.find('\n').map_or(0, |i| i + 1);
       let after_newline = &after_marker[content_start..];
       if let Some(end) = after_newline.find("```") {
          return after_newline[..end].trim().to_string();
@@ -296,11 +298,10 @@ fn extract_json_from_content(content: &str) -> String {
    }
 
    // Try to find raw JSON object
-   if let Some(start) = trimmed.find('{') {
-      if let Some(end) = trimmed.rfind('}') {
+   if let Some(start) = trimmed.find('{')
+      && let Some(end) = trimmed.rfind('}') {
          return trimmed[start..=end].to_string();
       }
-   }
 
    trimmed.to_string()
 }
@@ -379,7 +380,7 @@ fn detect_boundaries(
    files: &[String],
    changelogs: &[PathBuf],
    dir: &str,
-) -> Result<Vec<ChangelogBoundary>> {
+) -> Vec<ChangelogBoundary> {
    let mut file_to_changelog: HashMap<String, PathBuf> = HashMap::new();
 
    // Build a map of directory path (relative) -> changelog
@@ -427,12 +428,11 @@ fn detect_boundaries(
       }
 
       // Fallback to root changelog
-      if !found {
-         if let Some(ref root) = root_changelog {
+      if !found
+         && let Some(ref root) = root_changelog {
             file_to_changelog.insert(file.clone(), root.clone());
          }
          // If no root changelog, file is skipped
-      }
    }
 
    // Group files by changelog
@@ -455,7 +455,7 @@ fn detect_boundaries(
       })
       .collect();
 
-   Ok(boundaries)
+   boundaries
 }
 
 /// Get diff for specific files
@@ -514,10 +514,9 @@ fn parse_unreleased_section(content: &str, path: &Path) -> Result<UnreleasedSect
          // Look for version headers like ## [1.0.0] or ## 1.0.0
          trimmed.starts_with("## [") && trimmed.contains(']')
             || (trimmed.starts_with("## ")
-               && trimmed.chars().skip(3).next().is_some_and(|c| c.is_ascii_digit()))
+               && trimmed.chars().nth(3).is_some_and(|c| c.is_ascii_digit()))
       })
-      .map(|pos| header_line + 1 + pos)
-      .unwrap_or(lines.len());
+      .map_or(lines.len(), |pos| header_line + 1 + pos);
 
    // Parse existing entries
    let mut entries: HashMap<ChangelogCategory, Vec<String>> = HashMap::new();
@@ -559,7 +558,7 @@ fn write_entries(
    content: &str,
    unreleased: &UnreleasedSection,
    new_entries: &HashMap<ChangelogCategory, Vec<String>>,
-) -> Result<String> {
+) -> String {
    let lines: Vec<&str> = content.lines().collect();
 
    // Build new content
@@ -615,7 +614,7 @@ fn write_entries(
       result.extend(lines[unreleased.end_line..].iter().map(|s| s.to_string()));
    }
 
-   Ok(result.join("\n"))
+   result.join("\n")
 }
 
 #[cfg(test)]
@@ -653,7 +652,7 @@ That's all!"#;
 
    #[test]
    fn test_parse_unreleased_section() {
-      let content = r#"# Changelog
+      let content = r"# Changelog
 
 ## [Unreleased]
 
@@ -671,7 +670,7 @@ That's all!"#;
 ### Added
 
 - Initial release
-"#;
+";
 
       let section = parse_unreleased_section(content, Path::new("CHANGELOG.md")).unwrap();
       assert_eq!(section.header_line, 2);

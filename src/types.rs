@@ -212,15 +212,15 @@ pub fn default_types() -> IndexMap<String, TypeConfig> {
 
 /// Default global hint for cross-type disambiguation
 pub fn default_classifier_hint() -> String {
-   r#"CRITICAL - feat vs refactor:
+   r"CRITICAL - feat vs refactor:
 - feat: ANY observable behavior change OR new public API
 - refactor: ONLY when provably unchanged (same tests, same API)
-When in doubt, prefer feat over refactor."#
+When in doubt, prefer feat over refactor."
       .to_string()
 }
 
 /// Default categories matching current hardcoded behavior
-/// Order defines render order; body_contains checked before types
+/// Order defines render order; `body_contains` checked before types
 pub fn default_categories() -> Vec<CategoryConfig> {
    vec![
       CategoryConfig {
@@ -296,7 +296,7 @@ pub enum ChangelogCategory {
 
 impl ChangelogCategory {
    /// Display name for changelog section headers
-   pub fn as_str(&self) -> &'static str {
+   pub const fn as_str(&self) -> &'static str {
       match self {
          Self::Added => "Added",
          Self::Changed => "Changed",
@@ -346,7 +346,7 @@ impl ChangelogCategory {
    }
 
    /// Order for rendering in changelog (Breaking first, then standard order)
-   pub fn render_order() -> &'static [Self] {
+   pub const fn render_order() -> &'static [Self] {
       &[
          Self::Breaking,
          Self::Added,
@@ -554,14 +554,14 @@ impl CommitSummary {
          if let Some(first_char) = s.chars().next()
             && first_char.is_uppercase()
          {
-            eprintln!("⚠ warning: commit summary should start with lowercase: {s}");
+            eprintln!("{} commit summary should start with lowercase: {s}", crate::style::icons::WARNING);
          }
 
          // Warning-only: should NOT end with period (conventional commits style)
          if s.trim_end().ends_with('.') {
             eprintln!(
-               "⚠ warning: commit summary should NOT end with period (conventional commits \
-                style): {s}"
+               "{} commit summary should NOT end with period (conventional commits style): {s}",
+               crate::style::icons::WARNING
             );
          }
       }

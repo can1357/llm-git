@@ -4,6 +4,7 @@ pub use self::git_push as push;
 use crate::{
    config::CommitConfig,
    error::{CommitGenError, Result},
+   style,
    types::{CommitMetadata, Mode},
 };
 
@@ -236,12 +237,10 @@ pub fn git_commit(
    skip_hooks: bool,
 ) -> Result<()> {
    if dry_run {
-      println!("\n{}", "=".repeat(60));
-      println!("DRY RUN - Would execute:");
       let sign_flag = if sign { " -S" } else { "" };
       let hooks_flag = if skip_hooks { " --no-verify" } else { "" };
-      println!("git commit{sign_flag}{hooks_flag} -m \"{}\"", message.replace('\n', "\\n"));
-      println!("{}", "=".repeat(60));
+      let command = format!("git commit{sign_flag}{hooks_flag} -m \"{}\"", message.replace('\n', "\\n"));
+      println!("\n{}", style::boxed_message("DRY RUN", &command, 60));
       return Ok(());
    }
 
@@ -271,14 +270,14 @@ pub fn git_commit(
 
    let stdout = String::from_utf8_lossy(&output.stdout);
    println!("\n{stdout}");
-   println!("✓ Successfully committed!");
+   println!("{} {}", style::success(style::icons::SUCCESS), style::success("Successfully committed!"));
 
    Ok(())
 }
 
 /// Execute git push
 pub fn git_push(dir: &str) -> Result<()> {
-   println!("\nPushing changes...");
+   println!("\n{}", style::info("Pushing changes..."));
 
    let output = Command::new("git")
       .args(["push"])
@@ -302,7 +301,7 @@ pub fn git_push(dir: &str) -> Result<()> {
    if !stderr.is_empty() {
       println!("{stderr}");
    }
-   println!("✓ Successfully pushed!");
+   println!("{} {}", style::success(style::icons::SUCCESS), style::success("Successfully pushed!"));
 
    Ok(())
 }

@@ -12,7 +12,7 @@ use error::{CommitGenError, Result};
 use git::{
    get_common_scopes, get_git_diff, get_git_stat, get_recent_commits, git_commit, git_push,
 };
-use llm_git::*;
+use llm_git::{*, style};
 use normalization::{format_commit_message, post_process_commit_message};
 use types::{Args, ConventionalCommit, Mode, resolve_model_name};
 use validation::{check_type_scope_consistency, validate_commit_message};
@@ -85,12 +85,23 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
    let diff = get_git_diff(&args.mode, args.target.as_deref(), &args.dir, config)?;
    let stat = get_git_stat(&args.mode, args.target.as_deref(), &args.dir, config)?;
 
-   println!("Using analysis model: {} (temp: {})", config.analysis_model, config.temperature);
-   println!("Using summary model: {}", config.summary_model);
+   println!(
+      "{} {} {} {}",
+      style::dim("›"),
+      style::dim("analysis:"),
+      style::model(&config.analysis_model),
+      style::dim(&format!("(temp: {})", config.temperature))
+   );
+   println!(
+      "{} {} {}",
+      style::dim("›"),
+      style::dim("summary:"),
+      style::model(&config.summary_model)
+   );
 
    // Smart truncation if needed
    let diff = if diff.len() > config.max_diff_length {
-      println!("Warning: Applying smart truncation (diff size: {} characters)", diff.len());
+      println!("{}", style::warning(&format!("Applying smart truncation (diff size: {} characters)", diff.len())));
       smart_truncate_diff(&diff, config.max_diff_length, config)
    } else {
       diff
@@ -119,7 +130,6 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
    };
 
    // Generate conventional commit analysis
-   println!("Generating conventional commit analysis...");
    let context = if args.context.is_empty() {
       None
    } else {
@@ -132,38 +142,38 @@ fn run_generation(config: &CommitConfig, args: &Args) -> Result<ConventionalComm
       recent_commits: recent_commits_str.as_deref(),
       common_scopes:  common_scopes_str.as_deref(),
    };
-   let analysis = generate_conventional_analysis(
-      &stat,
-      &diff,
-      &config.analysis_model,
-      &scope_candidates_str,
-      &ctx,
-      config,
-   )?;
+   let analysis = style::with_spinner("Generating conventional commit analysis", || {
+      generate_conventional_analysis(
+         &stat,
+         &diff,
+         &config.analysis_model,
+         &scope_candidates_str,
+         &ctx,
+         config,
+      )
+   })?;
 
    // Log scope selection
    if let Some(ref scope) = analysis.scope {
-      println!("Selected scope: {scope}");
+      println!("{} {} {}", style::dim("›"), style::dim("scope:"), style::scope(&scope.to_string()));
    } else {
-      println!("No scope selected (broad change)");
+      println!("{} {}", style::dim("›"), style::dim("scope: (none)"));
    }
 
-   println!("Creating summary...");
    let detail_points = analysis.body.clone();
-   let summary = match generate_summary_from_analysis(
-      &stat,
-      analysis.commit_type.as_str(),
-      analysis.scope.as_ref().map(|s| s.as_str()),
-      &detail_points,
-      context.as_deref(),
-      config,
-   ) {
-      Ok(summary) => summary,
-      Err(err) => {
-         eprintln!("Warning: Failed to create summary with Haiku: {err}");
-         fallback_summary(&stat, &detail_points, analysis.commit_type.as_str(), config)
-      },
-   };
+   let summary = style::with_spinner("Creating summary", || {
+      generate_summary_from_analysis(
+         &stat,
+         analysis.commit_type.as_str(),
+         analysis.scope.as_ref().map(|s| s.as_str()),
+         &detail_points,
+         context.as_deref(),
+         config,
+      )
+   }).unwrap_or_else(|err| {
+      eprintln!("{}", style::warning(&format!("Failed to create summary with Haiku: {err}")));
+      fallback_summary(&stat, &detail_points, analysis.commit_type.as_str(), config)
+   });
 
    let footers = build_footers(args);
 
@@ -332,7 +342,7 @@ fn main() -> Result<()> {
             });
          }
 
-         println!("No staged changes, staging all...");
+         println!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
          let add_output = Command::new("git")
             .args(["add", "-A"])
             .current_dir(&args.dir)
@@ -347,17 +357,16 @@ fn main() -> Result<()> {
    }
 
    // Run changelog maintenance if not disabled (check both CLI flag and config)
-   if !args.no_changelog && config.changelog_enabled {
-      if let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config) {
+   if !args.no_changelog && config.changelog_enabled
+      && let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config) {
          // Don't fail the commit, just warn
          eprintln!("Warning: Changelog update failed: {e}");
       }
-   }
 
-   println!("Analyzing {} changes...", match args.mode {
-      Mode::Staged => "staged",
-      Mode::Commit => "commit",
-      Mode::Unstaged => "unstaged",
+   println!("{} Analyzing {} changes...", style::info("›"), match args.mode {
+      Mode::Staged => style::bold("staged"),
+      Mode::Commit => style::bold("commit"),
+      Mode::Unstaged => style::bold("unstaged"),
       Mode::Compose => unreachable!("compose mode handled separately"),
    });
 
@@ -388,11 +397,7 @@ fn main() -> Result<()> {
    // Format and display
    let formatted_message = format_commit_message(&commit_msg);
 
-   println!("\n{}", "=".repeat(60));
-   println!("Generated Commit Message:");
-   println!("{}", "=".repeat(60));
-   println!("{formatted_message}");
-   println!("{}", "=".repeat(60));
+   println!("\n{}", style::boxed_message("Generated Commit Message", &formatted_message, style::term_width()));
 
    if std::env::var("LLM_GIT_VERBOSE").is_ok() {
       println!("\nJSON Structure:");
@@ -402,7 +407,7 @@ fn main() -> Result<()> {
    // Copy to clipboard if requested
    if args.copy {
       match copy_to_clipboard(&formatted_message) {
-         Ok(()) => println!("\n✓ Copied to clipboard"),
+         Ok(()) => println!("\n{}", style::success("Copied to clipboard")),
          Err(e) => println!("\nNote: Failed to copy to clipboard: {e}"),
       }
    }
@@ -412,15 +417,15 @@ fn main() -> Result<()> {
    if matches!(args.mode, Mode::Staged) {
       if validation_failed.is_some() {
          eprintln!(
-            "\n⚠ Skipping commit due to validation failure. Use --dry-run to test or manually \
-             commit."
+            "\n{}",
+            style::warning("Skipping commit due to validation failure. Use --dry-run to test or manually commit.")
          );
          return Err(CommitGenError::ValidationError(
             "Commit message validation failed".to_string(),
          ));
       }
 
-      println!("\nPreparing to commit...");
+      println!("\n{}", style::info("Preparing to commit..."));
       let sign = args.sign || config.gpg_sign;
       git_commit(&formatted_message, args.dry_run, &args.dir, sign, args.skip_hooks)?;
 

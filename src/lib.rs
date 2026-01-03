@@ -12,6 +12,7 @@ pub mod error;
 pub mod git;
 pub mod normalization;
 pub mod patch;
+pub mod style;
 pub mod templates;
 pub mod types;
 pub mod validation;
