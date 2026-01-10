@@ -9,6 +9,29 @@ use tera::{Context, Tera};
 
 use crate::error::{CommitGenError, Result};
 
+/// Rendered prompt split into system and user parts.
+pub struct PromptParts {
+   pub system: String,
+   pub user:   String,
+}
+
+/// Split a rendered prompt into system and user parts based on separator.
+fn split_prompt_parts(rendered: &str) -> PromptParts {
+   const SEPARATOR: &str = "--------------------";
+   if let Some(pos) = rendered.find(SEPARATOR) {
+      PromptParts {
+         system: rendered[..pos].trim().to_string(),
+         user:   rendered[pos + SEPARATOR.len()..].trim().to_string(),
+      }
+   } else {
+      // No separator - treat entire content as user message
+      PromptParts {
+         system: String::new(),
+         user:   rendered.trim().to_string(),
+      }
+   }
+}
+
 /// Parameters for rendering the analysis prompt template.
 #[derive(Default)]
 pub struct AnalysisParams<'a> {
@@ -255,7 +278,7 @@ fn load_template_file(category: &str, variant: &str) -> Result<String> {
 }
 
 /// Render analysis prompt template
-pub fn render_analysis_prompt(p: &AnalysisParams<'_>) -> Result<String> {
+pub fn render_analysis_prompt(p: &AnalysisParams<'_>) -> Result<PromptParts> {
    // Try to load template dynamically (supports user-added templates)
    let template_content = load_template_file("analysis", p.variant)?;
 
@@ -280,12 +303,13 @@ pub fn render_analysis_prompt(p: &AnalysisParams<'_>) -> Result<String> {
    // Render using render_str for dynamic templates
    let mut tera = TERA.lock();
 
-   tera.render_str(&template_content, &context).map_err(|e| {
+   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
       CommitGenError::Other(format!(
          "Failed to render analysis prompt template '{}': {e}",
          p.variant
       ))
-   })
+   })?;
+   Ok(split_prompt_parts(&rendered))
 }
 
 /// Render summary prompt template
@@ -297,7 +321,7 @@ pub fn render_summary_prompt(
    details: &str,
    stat: &str,
    user_context: Option<&str>,
-) -> Result<String> {
+) -> Result<PromptParts> {
    // Try to load template dynamically (supports user-added templates)
    let template_content = load_template_file("summary", variant)?;
 
@@ -314,9 +338,10 @@ pub fn render_summary_prompt(
 
    // Render using render_str for dynamic templates
    let mut tera = TERA.lock();
-   tera.render_str(&template_content, &context).map_err(|e| {
+   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
       CommitGenError::Other(format!("Failed to render summary prompt template '{variant}': {e}"))
-   })
+   })?;
+   Ok(split_prompt_parts(&rendered))
 }
 
 /// Render changelog prompt template
@@ -327,7 +352,7 @@ pub fn render_changelog_prompt(
    stat: &str,
    diff: &str,
    existing_entries: Option<&str>,
-) -> Result<String> {
+) -> Result<PromptParts> {
    // Try to load template dynamically (supports user-added templates)
    let template_content = load_template_file("changelog", variant)?;
 
@@ -343,9 +368,10 @@ pub fn render_changelog_prompt(
 
    // Render using render_str for dynamic templates
    let mut tera = TERA.lock();
-   tera.render_str(&template_content, &context).map_err(|e| {
+   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
       CommitGenError::Other(format!("Failed to render changelog prompt template '{variant}': {e}"))
-   })
+   })?;
+   Ok(split_prompt_parts(&rendered))
 }
 
 /// Render map prompt template (per-file observation extraction)
@@ -354,7 +380,7 @@ pub fn render_map_prompt(
    filename: &str,
    diff: &str,
    context_header: &str,
-) -> Result<String> {
+) -> Result<PromptParts> {
    let template_content = load_template_file("map", variant)?;
 
    let mut context = Context::new();
@@ -365,9 +391,10 @@ pub fn render_map_prompt(
    }
 
    let mut tera = TERA.lock();
-   tera.render_str(&template_content, &context).map_err(|e| {
+   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
       CommitGenError::Other(format!("Failed to render map prompt template '{variant}': {e}"))
-   })
+   })?;
+   Ok(split_prompt_parts(&rendered))
 }
 
 /// Render reduce prompt template (synthesis from observations)
@@ -377,7 +404,7 @@ pub fn render_reduce_prompt(
    stat: &str,
    scope_candidates: &str,
    types_description: Option<&str>,
-) -> Result<String> {
+) -> Result<PromptParts> {
    let template_content = load_template_file("reduce", variant)?;
 
    let mut context = Context::new();
@@ -389,7 +416,8 @@ pub fn render_reduce_prompt(
    }
 
    let mut tera = TERA.lock();
-   tera.render_str(&template_content, &context).map_err(|e| {
+   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
       CommitGenError::Other(format!("Failed to render reduce prompt template '{variant}': {e}"))
-   })
+   })?;
+   Ok(split_prompt_parts(&rendered))
 }

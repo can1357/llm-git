@@ -220,12 +220,13 @@ fn map_single_file(
 
       let tool = build_observation_tool();
 
-      let prompt = templates::render_map_prompt("default", filename, file_diff, context_header)?;
+      let parts = templates::render_map_prompt("default", filename, file_diff, context_header)?;
       let mode = config.resolved_api_mode(model_name);
 
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
-            let request = build_api_request(model_name, config.temperature, vec![tool], &prompt);
+            let request =
+               build_api_request(model_name, config.temperature, vec![tool], &parts.system, &parts.user);
 
             let mut request_builder = client
                .post(format!("{}/chat/completions", config.api_base_url))
@@ -266,6 +267,7 @@ fn map_single_file(
                model:       model_name.to_string(),
                max_tokens:  600,
                temperature: config.temperature,
+               system:      if parts.system.is_empty() { None } else { Some(parts.system.clone()) },
                tools:       vec![AnthropicTool {
                   name:         "create_file_observation".to_string(),
                   description:  "Extract observations from a single file's changes".to_string(),
@@ -289,7 +291,7 @@ fn map_single_file(
                   role:    "user".to_string(),
                   content: vec![AnthropicContent {
                      content_type: "text".to_string(),
-                     text:         prompt,
+                     text:         parts.user.clone(),
                   }],
                }],
             };
@@ -489,7 +491,7 @@ pub fn reduce_phase(
          serde_json::to_string_pretty(observations).unwrap_or_else(|_| "[]".to_string());
 
       let types_description = crate::api::format_types_description(config);
-      let prompt = templates::render_reduce_prompt(
+      let parts = templates::render_reduce_prompt(
          "default",
          &observations_json,
          stat,
@@ -500,7 +502,8 @@ pub fn reduce_phase(
 
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
-            let request = build_api_request(model_name, config.temperature, vec![tool], &prompt);
+            let request =
+               build_api_request(model_name, config.temperature, vec![tool], &parts.system, &parts.user);
 
             let mut request_builder = client
                .post(format!("{}/chat/completions", config.api_base_url))
@@ -541,6 +544,7 @@ pub fn reduce_phase(
                model:       model_name.to_string(),
                max_tokens:  1000,
                temperature: config.temperature,
+               system:      if parts.system.is_empty() { None } else { Some(parts.system.clone()) },
                tools:       vec![AnthropicTool {
                   name:         "create_conventional_analysis".to_string(),
                   description:  "Analyze changes and classify as conventional commit with type, scope, details, and metadata".to_string(),
@@ -598,7 +602,7 @@ pub fn reduce_phase(
                   role:    "user".to_string(),
                   content: vec![AnthropicContent {
                      content_type: "text".to_string(),
-                     text:         prompt,
+                     text:         parts.user.clone(),
                   }],
                }],
             };
@@ -891,6 +895,8 @@ struct AnthropicRequest {
    model:       String,
    max_tokens:  u32,
    temperature: f32,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   system:      Option<String>,
    tools:       Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice: Option<AnthropicToolChoice>,
@@ -1036,8 +1042,20 @@ fn build_analysis_tool(type_enum: &[&str]) -> Tool {
    }
 }
 
-fn build_api_request(model: &str, temperature: f32, tools: Vec<Tool>, prompt: &str) -> ApiRequest {
+fn build_api_request(
+   model: &str,
+   temperature: f32,
+   tools: Vec<Tool>,
+   system: &str,
+   user: &str,
+) -> ApiRequest {
    let tool_name = tools.first().map(|t| t.function.name.clone());
+
+   let mut messages = Vec::new();
+   if !system.is_empty() {
+      messages.push(Message { role: "system".to_string(), content: system.to_string() });
+   }
+   messages.push(Message { role: "user".to_string(), content: user.to_string() });
 
    ApiRequest {
       model: model.to_string(),
@@ -1046,7 +1064,7 @@ fn build_api_request(model: &str, temperature: f32, tools: Vec<Tool>, prompt: &s
       tool_choice: tool_name
          .map(|name| serde_json::json!({ "type": "function", "function": { "name": name } })),
       tools,
-      messages: vec![Message { role: "user".to_string(), content: prompt.to_string() }],
+      messages,
    }
 }
 

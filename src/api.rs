@@ -160,6 +160,8 @@ struct AnthropicRequest {
    model:       String,
    max_tokens:  u32,
    temperature: f32,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   system:      Option<String>,
    tools:       Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice: Option<AnthropicToolChoice>,
@@ -389,6 +391,24 @@ pub fn generate_conventional_analysis<'a>(
 
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
+            let types_desc = format_types_description(config);
+            let parts = templates::render_analysis_prompt(&templates::AnalysisParams {
+               variant: &config.analysis_prompt_variant,
+               stat,
+               diff,
+               scope_candidates: scope_candidates_str,
+               recent_commits: ctx.recent_commits,
+               common_scopes: ctx.common_scopes,
+               types_description: Some(&types_desc),
+               project_context: ctx.project_context,
+            })?;
+
+            let user_content = if let Some(user_ctx) = ctx.user_context {
+               format!("ADDITIONAL CONTEXT FROM USER:\n{user_ctx}\n\n{}", parts.user)
+            } else {
+               parts.user
+            };
+
             let request = ApiRequest {
                model:       model_name.to_string(),
                max_tokens:  1000,
@@ -397,28 +417,16 @@ pub fn generate_conventional_analysis<'a>(
                tool_choice: Some(
                   serde_json::json!({ "type": "function", "function": { "name": "create_conventional_analysis" } }),
                ),
-               messages:    vec![Message {
-                  role:    "user".to_string(),
-                  content: {
-                     let types_desc = format_types_description(config);
-                     let mut prompt = templates::render_analysis_prompt(&templates::AnalysisParams {
-                        variant: &config.analysis_prompt_variant,
-                        stat,
-                        diff,
-                        scope_candidates: scope_candidates_str,
-                        recent_commits: ctx.recent_commits,
-                        common_scopes: ctx.common_scopes,
-                        types_description: Some(&types_desc),
-                        project_context: ctx.project_context,
-                     })?;
-
-                     if let Some(user_ctx) = ctx.user_context {
-                        prompt = format!("ADDITIONAL CONTEXT FROM USER:\n{user_ctx}\n\n{prompt}");
-                     }
-
-                     prompt
+               messages:    vec![
+                  Message {
+                     role:    "system".to_string(),
+                     content: parts.system,
                   },
-               }],
+                  Message {
+                     role:    "user".to_string(),
+                     content: user_content,
+                  },
+               ],
             };
 
             if debug_dir.is_some() {
@@ -474,10 +482,29 @@ pub fn generate_conventional_analysis<'a>(
             response_text
          },
          ResolvedApiMode::AnthropicMessages => {
+            let types_desc = format_types_description(config);
+            let parts = templates::render_analysis_prompt(&templates::AnalysisParams {
+               variant: &config.analysis_prompt_variant,
+               stat,
+               diff,
+               scope_candidates: scope_candidates_str,
+               recent_commits: ctx.recent_commits,
+               common_scopes: ctx.common_scopes,
+               types_description: Some(&types_desc),
+               project_context: ctx.project_context,
+            })?;
+
+            let user_content = if let Some(user_ctx) = ctx.user_context {
+               format!("ADDITIONAL CONTEXT FROM USER:\n{user_ctx}\n\n{}", parts.user)
+            } else {
+               parts.user
+            };
+
             let request = AnthropicRequest {
                model:       model_name.to_string(),
                max_tokens:  1000,
                temperature: config.temperature,
+               system:      Some(parts.system).filter(|s| !s.is_empty()),
                tools:       vec![AnthropicTool {
                   name:         "create_conventional_analysis".to_string(),
                   description:  "Analyze changes and classify as conventional commit with type, scope, details, and metadata".to_string(),
@@ -535,28 +562,7 @@ pub fn generate_conventional_analysis<'a>(
                   role:    "user".to_string(),
                   content: vec![AnthropicContent {
                      content_type: "text".to_string(),
-                     text: {
-                        let types_desc = format_types_description(config);
-                        let mut prompt = templates::render_analysis_prompt(
-                           &templates::AnalysisParams {
-                              variant: &config.analysis_prompt_variant,
-                              stat,
-                              diff,
-                              scope_candidates: scope_candidates_str,
-                              recent_commits: ctx.recent_commits,
-                              common_scopes: ctx.common_scopes,
-                              types_description: Some(&types_desc),
-                              project_context: ctx.project_context,
-                           },
-                        )?;
-
-                        if let Some(user_ctx) = ctx.user_context {
-                           prompt =
-                              format!("ADDITIONAL CONTEXT FROM USER:\n{user_ctx}\n\n{prompt}");
-                        }
-
-                        prompt
-                     },
+                     text:         user_content,
                   }],
                }],
             };
@@ -889,6 +895,24 @@ pub fn generate_summary_from_analysis<'a>(
 
          let response_text = match mode {
             ResolvedApiMode::ChatCompletions => {
+               let details_str = if bullet_points.is_empty() {
+                  "None (no supporting detail points were generated)."
+               } else {
+                  bullet_points.as_str()
+               };
+
+               let parts = templates::render_summary_prompt(
+                  &config.summary_prompt_variant,
+                  commit_type,
+                  scope_str,
+                  &max_summary_len.to_string(),
+                  details_str,
+                  stat.trim(),
+                  user_context,
+               )?;
+
+               let user_content = format!("{}{additional_constraint}", parts.user);
+
                let request = ApiRequest {
                   model:       config.model.clone(),
                   max_tokens:  200,
@@ -898,28 +922,16 @@ pub fn generate_summary_from_analysis<'a>(
                      "type": "function",
                      "function": { "name": "create_commit_summary" }
                   })),
-                  messages:    vec![Message {
-                     role:    "user".to_string(),
-                     content: {
-                        let details_str = if bullet_points.is_empty() {
-                           "None (no supporting detail points were generated)."
-                        } else {
-                           bullet_points.as_str()
-                        };
-
-                        let base_prompt = templates::render_summary_prompt(
-                           &config.summary_prompt_variant,
-                           commit_type,
-                           scope_str,
-                           &max_summary_len.to_string(),
-                           details_str,
-                           stat.trim(),
-                           user_context,
-                        )?;
-
-                        format!("{base_prompt}{additional_constraint}")
+                  messages:    vec![
+                     Message {
+                        role:    "system".to_string(),
+                        content: parts.system,
                      },
-                  }],
+                     Message {
+                        role:    "user".to_string(),
+                        content: user_content,
+                     },
+                  ],
                };
 
                if debug_dir.is_some() {
@@ -975,10 +987,29 @@ pub fn generate_summary_from_analysis<'a>(
                response_text
             },
             ResolvedApiMode::AnthropicMessages => {
+               let details_str = if bullet_points.is_empty() {
+                  "None (no supporting detail points were generated)."
+               } else {
+                  bullet_points.as_str()
+               };
+
+               let parts = templates::render_summary_prompt(
+                  &config.summary_prompt_variant,
+                  commit_type,
+                  scope_str,
+                  &max_summary_len.to_string(),
+                  details_str,
+                  stat.trim(),
+                  user_context,
+               )?;
+
+               let user_content = format!("{}{additional_constraint}", parts.user);
+
                let request = AnthropicRequest {
                   model:       config.model.clone(),
                   max_tokens:  200,
                   temperature: config.temperature,
+                  system:      Some(parts.system).filter(|s| !s.is_empty()),
                   tools:       vec![AnthropicTool {
                      name:         "create_commit_summary".to_string(),
                      description:  "Compose a git commit summary line from detail statements"
@@ -1003,25 +1034,7 @@ pub fn generate_summary_from_analysis<'a>(
                      role:    "user".to_string(),
                      content: vec![AnthropicContent {
                         content_type: "text".to_string(),
-                        text: {
-                           let details_str = if bullet_points.is_empty() {
-                              "None (no supporting detail points were generated)."
-                           } else {
-                              bullet_points.as_str()
-                           };
-
-                           let base_prompt = templates::render_summary_prompt(
-                              &config.summary_prompt_variant,
-                              commit_type,
-                              scope_str,
-                              &max_summary_len.to_string(),
-                              details_str,
-                              stat.trim(),
-                              user_context,
-                           )?;
-
-                           format!("{base_prompt}{additional_constraint}")
-                        },
+                        text:         user_content,
                      }],
                   }],
                };

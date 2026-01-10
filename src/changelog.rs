@@ -193,7 +193,7 @@ fn generate_changelog_entries(
    existing_entries: Option<&str>,
    config: &CommitConfig,
 ) -> Result<HashMap<ChangelogCategory, Vec<String>>> {
-   let prompt = templates::render_changelog_prompt(
+   let parts = templates::render_changelog_prompt(
       "default",
       &changelog_path.display().to_string(),
       is_package_changelog,
@@ -202,7 +202,7 @@ fn generate_changelog_entries(
       existing_entries,
    )?;
 
-   let response = call_changelog_api(&prompt, config)?;
+   let response = call_changelog_api(&parts, config)?;
 
    // Convert string keys to ChangelogCategory
    let mut result = HashMap::new();
@@ -218,7 +218,10 @@ fn generate_changelog_entries(
 }
 
 /// Call the LLM API for changelog generation
-fn call_changelog_api(prompt: &str, config: &CommitConfig) -> Result<ChangelogResponse> {
+fn call_changelog_api(
+   parts: &templates::PromptParts,
+   config: &CommitConfig,
+) -> Result<ChangelogResponse> {
    let client = reqwest::blocking::Client::builder()
       .timeout(Duration::from_secs(config.request_timeout_secs))
       .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
@@ -231,14 +234,23 @@ fn call_changelog_api(prompt: &str, config: &CommitConfig) -> Result<ChangelogRe
    loop {
       attempt += 1;
 
+      let mut messages = Vec::new();
+      if !parts.system.is_empty() {
+         messages.push(serde_json::json!({
+            "role": "system",
+            "content": parts.system
+         }));
+      }
+      messages.push(serde_json::json!({
+         "role": "user",
+         "content": parts.user
+      }));
+
       let request_body = serde_json::json!({
          "model": model,
          "max_tokens": 2000,
          "temperature": config.temperature,
-         "messages": [{
-            "role": "user",
-            "content": prompt
-         }]
+         "messages": messages
       });
 
       let mut request_builder = client
