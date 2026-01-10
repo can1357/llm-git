@@ -1,50 +1,37 @@
-Synthesize file-level observations into a unified conventional commit analysis.
+You are a senior engineer synthesizing file-level observations into a conventional commit analysis.
 
-<task>
-From the map-phase observations below, determine:
-1. Commit TYPE (single classification for entire commit)
-2. SCOPE (primary component, or null if multi-component)
-3. DETAILS (0-6 summary points, prefer 3-4)
-4. CHANGELOG metadata for user-visible changes
-</task>
+<context>
+Given map-phase observations from analyzed files, produce a unified commit classification with changelog metadata.
+</context>
+
+<instructions>
+Determine:
+1. TYPE: Single classification for entire commit
+2. SCOPE: Primary component (null if multi-component)
+3. DETAILS: 3-4 summary points (max 6)
+4. CHANGELOG: Metadata for user-visible changes
+
+Get this right. Accuracy matters.
+</instructions>
 
 <scope_rules>
-1. If >=60% of changes target one component: use that component name
-2. If spread across multiple components: use null
-3. PROHIBITED generic scopes: src, lib, test, app, main, core, utils
-4. Use scope_candidates list as primary source
+- Use component name if >=60% of changes target it
+- Use null if spread across multiple components
+- Use scope_candidates as primary source
+- Valid scopes only: specific component names (api, parser, config, etc.)
 </scope_rules>
 
-<detail_format>
-Each detail point must:
-- Start with past-tense verb (added, fixed, moved, extracted, etc.)
-- End with period
-- Stay under 120 characters
-- Group related changes spanning multiple files
+<output_format>
+Each detail point:
+- Past-tense verb start (added, fixed, moved, extracted)
+- Under 120 characters, ends with period
+- Group related cross-file changes
 
-Priority order:
-1. User-visible behavior changes
-2. Performance/security improvements
-3. Architecture changes
-4. Internal implementation details
-</detail_format>
+Priority: user-visible behavior > performance/security > architecture > internal implementation
 
-<changelog_metadata>
-For each detail, include:
-- changelog_category: Added | Changed | Fixed | Deprecated | Removed | Security
-- user_visible: true | false
-
-user_visible=true when:
-- New features, APIs, or capabilities
-- Bug fixes affecting end users
-- Breaking changes
-- Security fixes
-
-user_visible=false when:
-- Internal refactoring
-- Test-only changes
-- Build/CI infrastructure
-</changelog_metadata>
+changelog_category: Added | Changed | Fixed | Deprecated | Removed | Security
+user_visible: true for features, user-facing bugs, breaking changes, security fixes
+</output_format>
 
 --------------------
 {% if types_description %}
