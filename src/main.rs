@@ -411,7 +411,10 @@ fn run_generation(
       )
    })
    .unwrap_or_else(|err| {
-      eprintln!("{}", style::warning(&format!("Failed to create summary with Haiku: {err}")));
+      eprintln!(
+         "{}",
+         style::warning(&format!("Failed to create summary with {}: {err}", config.model))
+      );
       fallback_summary(&stat, &detail_points, analysis.commit_type.as_str(), config)
    });
 

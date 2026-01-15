@@ -418,14 +418,8 @@ pub fn generate_conventional_analysis<'a>(
                   serde_json::json!({ "type": "function", "function": { "name": "create_conventional_analysis" } }),
                ),
                messages:    vec![
-                  Message {
-                     role:    "system".to_string(),
-                     content: parts.system,
-                  },
-                  Message {
-                     role:    "user".to_string(),
-                     content: user_content,
-                  },
+                  Message { role: "system".to_string(), content: parts.system },
+                  Message { role: "user".to_string(), content: user_content },
                ],
             };
 
@@ -507,7 +501,9 @@ pub fn generate_conventional_analysis<'a>(
                system:      Some(parts.system).filter(|s| !s.is_empty()),
                tools:       vec![AnthropicTool {
                   name:         "create_conventional_analysis".to_string(),
-                  description:  "Analyze changes and classify as conventional commit with type, scope, details, and metadata".to_string(),
+                  description:  "Analyze changes and classify as conventional commit with type, \
+                                 scope, details, and metadata"
+                     .to_string(),
                   input_schema: serde_json::json!({
                      "type": "object",
                      "properties": {
@@ -705,8 +701,8 @@ pub fn generate_conventional_analysis<'a>(
                return Ok((true, None));
             }
 
-            let analysis: ConventionalAnalysis =
-               serde_json::from_str(text_content.trim()).map_err(|e| {
+            let analysis: ConventionalAnalysis = serde_json::from_str(text_content.trim())
+               .map_err(|e| {
                   CommitGenError::Other(format!(
                      "Failed to parse analysis content JSON: {e}. Content: {}",
                      response_snippet(&text_content, 500)
@@ -923,14 +919,8 @@ pub fn generate_summary_from_analysis<'a>(
                      "function": { "name": "create_commit_summary" }
                   })),
                   messages:    vec![
-                     Message {
-                        role:    "system".to_string(),
-                        content: parts.system,
-                     },
-                     Message {
-                        role:    "user".to_string(),
-                        content: user_content,
-                     },
+                     Message { role: "system".to_string(), content: parts.system },
+                     Message { role: "user".to_string(), content: user_content },
                   ],
                };
 
@@ -1099,12 +1089,13 @@ pub fn generate_summary_from_analysis<'a>(
 
          match mode {
             ResolvedApiMode::ChatCompletions => {
-               let api_response: ApiResponse = serde_json::from_str(&response_text).map_err(|e| {
-                  CommitGenError::Other(format!(
-                     "Failed to parse summary response JSON: {e}. Response body: {}",
-                     response_snippet(&response_text, 500)
-                  ))
-               })?;
+               let api_response: ApiResponse =
+                  serde_json::from_str(&response_text).map_err(|e| {
+                     CommitGenError::Other(format!(
+                        "Failed to parse summary response JSON: {e}. Response body: {}",
+                        response_snippet(&response_text, 500)
+                     ))
+                  })?;
 
                if api_response.choices.is_empty() {
                   return Err(CommitGenError::Other(
@@ -1120,8 +1111,8 @@ pub fn generate_summary_from_analysis<'a>(
                      let args = &tool_call.function.arguments;
                      if args.is_empty() {
                         crate::style::warn(
-                           "Model returned empty function arguments for summary. Model may not support \
-                            function calling.",
+                           "Model returned empty function arguments for summary. Model may not \
+                            support function calling.",
                         );
                         return Err(CommitGenError::Other(
                            "Model returned empty summary arguments - try using a Claude model \
@@ -1139,10 +1130,10 @@ pub fn generate_summary_from_analysis<'a>(
                      // Strip type prefix if LLM included it (e.g., "feat(scope): summary" ->
                      // "summary")
                      let cleaned = strip_type_prefix(&summary.summary, commit_type, scope);
-                     return Ok((false, Some(CommitSummary::new(
-                        cleaned,
-                        config.summary_hard_limit,
-                     )?)));
+                     return Ok((
+                        false,
+                        Some(CommitSummary::new(cleaned, config.summary_hard_limit)?),
+                     ));
                   }
                }
 
@@ -1151,19 +1142,28 @@ pub fn generate_summary_from_analysis<'a>(
                      crate::style::warn("Model returned empty content for summary; retrying.");
                      return Ok((true, None));
                   }
-                  let summary: SummaryOutput =
-                     serde_json::from_str(content.trim()).map_err(|e| {
-                        CommitGenError::Other(format!(
-                           "Failed to parse summary content JSON: {e}. Content: {}",
-                           response_snippet(content, 500)
-                        ))
-                     })?;
+                  // Try JSON first, fall back to plain text (for models without function calling)
+                  let trimmed = content.trim();
+                  let summary_text = match serde_json::from_str::<SummaryOutput>(trimmed) {
+                     Ok(summary) => summary.summary,
+                     Err(e) => {
+                        // Only use plain text if it doesn't look like JSON
+                        if trimmed.starts_with('{') {
+                           return Err(CommitGenError::Other(format!(
+                              "Failed to parse summary JSON: {e}. Content: {}",
+                              response_snippet(trimmed, 500)
+                           )));
+                        }
+                        // Model returned plain text instead of JSON - use it directly
+                        trimmed.to_string()
+                     },
+                  };
                   // Strip type prefix if LLM included it
-                  let cleaned = strip_type_prefix(&summary.summary, commit_type, scope);
-                  return Ok((false, Some(CommitSummary::new(
-                     cleaned,
-                     config.summary_hard_limit,
-                  )?)));
+                  let cleaned = strip_type_prefix(&summary_text, commit_type, scope);
+                  return Ok((
+                     false,
+                     Some(CommitSummary::new(cleaned, config.summary_hard_limit)?),
+                  ));
                }
 
                Err(CommitGenError::Other(
@@ -1182,10 +1182,10 @@ pub fn generate_summary_from_analysis<'a>(
                      ))
                   })?;
                   let cleaned = strip_type_prefix(&summary.summary, commit_type, scope);
-                  return Ok((false, Some(CommitSummary::new(
-                     cleaned,
-                     config.summary_hard_limit,
-                  )?)));
+                  return Ok((
+                     false,
+                     Some(CommitSummary::new(cleaned, config.summary_hard_limit)?),
+                  ));
                }
 
                if text_content.trim().is_empty() {
@@ -1193,18 +1193,24 @@ pub fn generate_summary_from_analysis<'a>(
                   return Ok((true, None));
                }
 
-               let summary: SummaryOutput =
-                  serde_json::from_str(text_content.trim()).map_err(|e| {
-                     CommitGenError::Other(format!(
-                        "Failed to parse summary content JSON: {e}. Content: {}",
-                        response_snippet(&text_content, 500)
-                     ))
-                  })?;
-               let cleaned = strip_type_prefix(&summary.summary, commit_type, scope);
-               Ok((false, Some(CommitSummary::new(
-                  cleaned,
-                  config.summary_hard_limit,
-               )?)))
+               // Try JSON first, fall back to plain text (for models without function calling)
+               let trimmed = text_content.trim();
+               let summary_text = match serde_json::from_str::<SummaryOutput>(trimmed) {
+                  Ok(summary) => summary.summary,
+                  Err(e) => {
+                     // Only use plain text if it doesn't look like JSON
+                     if trimmed.starts_with('{') {
+                        return Err(CommitGenError::Other(format!(
+                           "Failed to parse summary JSON: {e}. Content: {}",
+                           response_snippet(trimmed, 500)
+                        )));
+                     }
+                     // Model returned plain text instead of JSON - use it directly
+                     trimmed.to_string()
+                  },
+               };
+               let cleaned = strip_type_prefix(&summary_text, commit_type, scope);
+               Ok((false, Some(CommitSummary::new(cleaned, config.summary_hard_limit)?)))
             },
          }
       });

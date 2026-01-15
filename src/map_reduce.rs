@@ -225,8 +225,13 @@ fn map_single_file(
 
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
-            let request =
-               build_api_request(model_name, config.temperature, vec![tool], &parts.system, &parts.user);
+            let request = build_api_request(
+               model_name,
+               config.temperature,
+               vec![tool],
+               &parts.system,
+               &parts.user,
+            );
 
             let mut request_builder = client
                .post(format!("{}/chat/completions", config.api_base_url))
@@ -267,7 +272,11 @@ fn map_single_file(
                model:       model_name.to_string(),
                max_tokens:  1500,
                temperature: config.temperature,
-               system:      if parts.system.is_empty() { None } else { Some(parts.system.clone()) },
+               system:      if parts.system.is_empty() {
+                  None
+               } else {
+                  Some(parts.system.clone())
+               },
                tools:       vec![AnthropicTool {
                   name:         "create_file_observation".to_string(),
                   description:  "Extract observations from a single file's changes".to_string(),
@@ -291,7 +300,7 @@ fn map_single_file(
                   role:    "user".to_string(),
                   content: vec![AnthropicContent {
                      content_type: "text".to_string(),
-                     text:         parts.user.clone(),
+                     text:         parts.user,
                   }],
                }],
             };
@@ -427,7 +436,8 @@ fn map_single_file(
                      observations = text_observations;
                   } else if stop_reason.as_deref() == Some("max_tokens") {
                      crate::style::warn(
-                        "Anthropic stopped at max_tokens with empty observations; using fallback observation.",
+                        "Anthropic stopped at max_tokens with empty observations; using fallback \
+                         observation.",
                      );
                      let fallback_target = Path::new(filename)
                         .file_name()
@@ -436,7 +446,8 @@ fn map_single_file(
                      observations = vec![format!("Updated {fallback_target}.")];
                   } else {
                      crate::style::warn(
-                        "Model returned empty observation tool input; continuing with no observations.",
+                        "Model returned empty observation tool input; continuing with no \
+                         observations.",
                      );
                   }
                }
@@ -444,10 +455,10 @@ fn map_single_file(
                return Ok((
                   false,
                   Some(FileObservation {
-                     file:         filename.to_string(),
+                     file: filename.to_string(),
                      observations,
-                     additions:    0,
-                     deletions:    0,
+                     additions: 0,
+                     deletions: 0,
                   }),
                ));
             }
@@ -509,8 +520,13 @@ pub fn reduce_phase(
 
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
-            let request =
-               build_api_request(model_name, config.temperature, vec![tool], &parts.system, &parts.user);
+            let request = build_api_request(
+               model_name,
+               config.temperature,
+               vec![tool],
+               &parts.system,
+               &parts.user,
+            );
 
             let mut request_builder = client
                .post(format!("{}/chat/completions", config.api_base_url))
@@ -551,10 +567,16 @@ pub fn reduce_phase(
                model:       model_name.to_string(),
                max_tokens:  1500,
                temperature: config.temperature,
-               system:      if parts.system.is_empty() { None } else { Some(parts.system.clone()) },
+               system:      if parts.system.is_empty() {
+                  None
+               } else {
+                  Some(parts.system.clone())
+               },
                tools:       vec![AnthropicTool {
                   name:         "create_conventional_analysis".to_string(),
-                  description:  "Analyze changes and classify as conventional commit with type, scope, details, and metadata".to_string(),
+                  description:  "Analyze changes and classify as conventional commit with type, \
+                                 scope, details, and metadata"
+                     .to_string(),
                   input_schema: serde_json::json!({
                      "type": "object",
                      "properties": {
@@ -609,7 +631,7 @@ pub fn reduce_phase(
                   role:    "user".to_string(),
                   content: vec![AnthropicContent {
                      content_type: "text".to_string(),
-                     text:         parts.user.clone(),
+                     text:         parts.user,
                   }],
                }],
             };
@@ -724,15 +746,17 @@ pub fn reduce_phase(
 
             if text_content.trim().is_empty() {
                if stop_reason.as_deref() == Some("max_tokens") {
-                  crate::style::warn("Anthropic stopped at max_tokens with empty synthesis; retrying.");
+                  crate::style::warn(
+                     "Anthropic stopped at max_tokens with empty synthesis; retrying.",
+                  );
                   return Ok((true, None));
                }
                crate::style::warn("Model returned empty content for synthesis; retrying.");
                return Ok((true, None));
             }
 
-            let analysis: ConventionalAnalysis =
-               serde_json::from_str(text_content.trim()).map_err(|e| {
+            let analysis: ConventionalAnalysis = serde_json::from_str(text_content.trim())
+               .map_err(|e| {
                   CommitGenError::Other(format!(
                      "Failed to parse synthesis content JSON: {e}. Content: {}",
                      response_snippet(&text_content, 500)
@@ -820,7 +844,8 @@ fn parse_observations_from_text(text: &str) -> Vec<String> {
       .map(str::trim)
       .filter(|line| !line.is_empty())
       .map(|line| {
-         line.strip_prefix("- ")
+         line
+            .strip_prefix("- ")
             .or_else(|| line.strip_prefix("* "))
             .unwrap_or(line)
             .trim()

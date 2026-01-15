@@ -25,10 +25,7 @@ fn split_prompt_parts(rendered: &str) -> PromptParts {
       }
    } else {
       // No separator - treat entire content as user message
-      PromptParts {
-         system: String::new(),
-         user:   rendered.trim().to_string(),
-      }
+      PromptParts { system: String::new(), user: rendered.trim().to_string() }
    }
 }
 
