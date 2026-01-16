@@ -14,7 +14,7 @@ use std::{
    time::Duration,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
    config::CommitConfig,
@@ -23,13 +23,60 @@ use crate::{
    patch::stage_files,
    templates,
    tokens::create_token_counter,
-   types::{ChangelogBoundary, ChangelogCategory, UnreleasedSection},
+   types::{ChangelogBoundary, ChangelogCategory, Function, FunctionParameters, Tool, UnreleasedSection},
 };
 
 /// Response from the changelog generation LLM call
 #[derive(Debug, Deserialize)]
 struct ChangelogResponse {
    entries: HashMap<String, Vec<String>>,
+}
+
+// OpenAI-style API request/response types
+#[derive(Debug, Serialize)]
+struct ApiRequest {
+   model:       String,
+   max_tokens:  u32,
+   temperature: f32,
+   tools:       Vec<Tool>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   tool_choice: Option<serde_json::Value>,
+   messages:    Vec<Message>,
+}
+
+#[derive(Debug, Serialize)]
+struct Message {
+   role:    String,
+   content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResponse {
+   choices: Vec<Choice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Choice {
+   message: ResponseMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseMessage {
+   #[serde(default)]
+   tool_calls: Vec<ToolCall>,
+   #[serde(default)]
+   content:    Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolCall {
+   function: FunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionCall {
+   name:      String,
+   arguments: String,
 }
 
 /// Run the changelog maintenance flow
@@ -230,28 +277,83 @@ fn call_changelog_api(
 
    let model = config.model.clone();
 
+   // Define the changelog entries tool with proper schema
+   let tool = Tool {
+      tool_type: "function".to_string(),
+      function:  Function {
+         name:        "create_changelog_entries".to_string(),
+         description: "Generate changelog entries grouped by category".to_string(),
+         parameters:  FunctionParameters {
+            param_type: "object".to_string(),
+            properties: serde_json::json!({
+               "entries": {
+                  "type": "object",
+                  "description": "Changelog entries grouped by category",
+                  "properties": {
+                     "Added": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "New features or capabilities"
+                     },
+                     "Changed": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Changes to existing functionality"
+                     },
+                     "Fixed": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Bug fixes"
+                     },
+                     "Deprecated": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Features marked for removal"
+                     },
+                     "Removed": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Removed features"
+                     },
+                     "Security": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Security-related changes"
+                     },
+                     "Breaking Changes": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Breaking API or behavior changes"
+                     }
+                  },
+                  "additionalProperties": false
+               }
+            }),
+            required:   vec!["entries".to_string()],
+         },
+      },
+   };
+
    let mut attempt = 0;
    loop {
       attempt += 1;
 
       let mut messages = Vec::new();
       if !parts.system.is_empty() {
-         messages.push(serde_json::json!({
-            "role": "system",
-            "content": parts.system
-         }));
+         messages.push(Message { role: "system".to_string(), content: parts.system.clone() });
       }
-      messages.push(serde_json::json!({
-         "role": "user",
-         "content": parts.user
-      }));
+      messages.push(Message { role: "user".to_string(), content: parts.user.clone() });
 
-      let request_body = serde_json::json!({
-         "model": model,
-         "max_tokens": 2000,
-         "temperature": config.temperature,
-         "messages": messages
-      });
+      let request = ApiRequest {
+         model:       model.clone(),
+         max_tokens:  2000,
+         temperature: config.temperature,
+         tools:       vec![tool.clone()],
+         tool_choice: Some(
+            serde_json::json!({ "type": "function", "function": { "name": "create_changelog_entries" } }),
+         ),
+         messages,
+      };
 
       let mut request_builder = client
          .post(format!("{}/chat/completions", config.api_base_url))
@@ -262,7 +364,7 @@ fn call_changelog_api(
       }
 
       let response = request_builder
-         .json(&request_body)
+         .json(&request)
          .send()
          .map_err(CommitGenError::HttpError)?;
 
@@ -294,16 +396,43 @@ fn call_changelog_api(
          return Err(CommitGenError::ApiError { status: status.as_u16(), body: error_text });
       }
 
-      let api_response: serde_json::Value = response.json().map_err(CommitGenError::HttpError)?;
+      let response_text = response.text().map_err(CommitGenError::HttpError)?;
 
-      // Extract content from response
-      let content = api_response["choices"][0]["message"]["content"]
-         .as_str()
-         .ok_or_else(|| CommitGenError::Other("No content in API response".to_string()))?;
+      // Try to parse as structured tool call response first
+      if let Ok(api_response) = serde_json::from_str::<ApiResponse>(&response_text) {
+         let message = &api_response.choices[0].message;
 
-      // Parse JSON from content (may be wrapped in markdown code blocks)
-      let json_str = extract_json_from_content(content);
+         // Check for tool calls (OpenAI format)
+         if !message.tool_calls.is_empty() {
+            let tool_call = &message.tool_calls[0];
+            if tool_call.function.name == "create_changelog_entries" {
+               let changelog_response: ChangelogResponse =
+                  serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
+                     CommitGenError::Other(format!(
+                        "Failed to parse changelog tool arguments: {e}. Args: {}",
+                        tool_call.function.arguments.chars().take(500).collect::<String>()
+                     ))
+                  })?;
+               return Ok(changelog_response);
+            }
+         }
 
+         // Fallback: try content field (for models that don't support function calling)
+         if let Some(content) = &message.content {
+            let json_str = extract_json_from_content(content);
+            let changelog_response: ChangelogResponse =
+               serde_json::from_str(&json_str).map_err(|e| {
+                  CommitGenError::Other(format!(
+                     "Failed to parse changelog response from content: {e}. Content: {}",
+                     json_str.chars().take(500).collect::<String>()
+                  ))
+               })?;
+            return Ok(changelog_response);
+         }
+      }
+
+      // Last resort: try to extract JSON from raw response
+      let json_str = extract_json_from_content(&response_text);
       let changelog_response: ChangelogResponse = serde_json::from_str(&json_str).map_err(|e| {
          CommitGenError::Other(format!(
             "Failed to parse changelog response: {e}. Content was: {}",

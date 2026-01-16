@@ -878,7 +878,7 @@ pub struct Message {
    pub content: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
 pub struct FunctionParameters {
    #[serde(rename = "type")]
@@ -887,7 +887,7 @@ pub struct FunctionParameters {
    pub required:   Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
 pub struct Function {
    pub name:        String,
@@ -895,7 +895,7 @@ pub struct Function {
    pub parameters:  FunctionParameters,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code, reason = "Used by src/api/mod.rs in binary but not in tests")]
 pub struct Tool {
    #[serde(rename = "type")]
