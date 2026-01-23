@@ -184,15 +184,41 @@ impl Default for CommitConfig {
          temperature:             0.2, // Low temperature for consistent structured output
          model:                   "claude-opus-4.5".to_string(),
          excluded_files:          vec![
+           // Rust
             "Cargo.lock".to_string(),
+           // JavaScript/Node
             "package-lock.json".to_string(),
+           "npm-shrinkwrap.json".to_string(),
             "yarn.lock".to_string(),
             "pnpm-lock.yaml".to_string(),
+           "shrinkwrap.yaml".to_string(),
+            "bun.lock".to_string(),
+            "bun.lockb".to_string(),
+           "deno.lock".to_string(),
+           // PHP
             "composer.lock".to_string(),
+           // Ruby
             "Gemfile.lock".to_string(),
+           // Python
             "poetry.lock".to_string(),
+           "Pipfile.lock".to_string(),
+           "pdm.lock".to_string(),
+           "uv.lock".to_string(),
+           // Go
+           "go.sum".to_string(),
+           // Nix
             "flake.lock".to_string(),
-            ".gitignore".to_string(),
+           // Dart/Flutter
+           "pubspec.lock".to_string(),
+           // iOS/macOS
+           "Podfile.lock".to_string(),
+           "Packages.resolved".to_string(),
+           // Elixir
+           "mix.lock".to_string(),
+           // .NET
+           "packages.lock.json".to_string(),
+           // Gradle
+           "gradle.lockfile".to_string(),
          ],
          low_priority_extensions: vec![
             ".lock".to_string(),
