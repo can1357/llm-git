@@ -8,6 +8,33 @@ use crate::{
    types::{CommitMetadata, Mode},
 };
 
+/// Ensure the provided directory is inside a git work tree.
+///
+/// # Errors
+/// Returns an error when the directory is not part of a git repository.
+pub fn ensure_git_repo(dir: &str) -> Result<()> {
+   let output = Command::new("git")
+      .args(["rev-parse", "--show-toplevel"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::GitError(format!("Failed to run git rev-parse: {e}")))?;
+
+   if output.status.success() {
+      return Ok(());
+   }
+
+   let stderr = String::from_utf8_lossy(&output.stderr);
+   if stderr.contains("not a git repository") {
+      return Err(CommitGenError::GitError(
+         "Not a git repository (or any of the parent directories): .git".to_string(),
+      ));
+   }
+
+   Err(CommitGenError::GitError(format!(
+      "Failed to detect git repository: {stderr}"
+   )))
+}
+
 /// Get git diff based on the specified mode
 pub fn get_git_diff(
    mode: &Mode,

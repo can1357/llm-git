@@ -12,7 +12,8 @@ use config::CommitConfig;
 use diff::smart_truncate_diff;
 use error::{CommitGenError, Result};
 use git::{
-   get_common_scopes, get_git_diff, get_git_stat, get_recent_commits, git_commit, git_push,
+   ensure_git_repo, get_common_scopes, get_git_diff, get_git_stat, get_recent_commits, git_commit,
+   git_push,
 };
 use llm_git::{style, tokens::create_token_counter, *};
 use normalization::{format_commit_message, post_process_commit_message};
@@ -551,6 +552,10 @@ fn main() -> Result<()> {
 
    // Create token counter from final config
    let token_counter = create_token_counter(&config);
+
+   if !args.test || args.test_add.is_some() {
+      ensure_git_repo(&args.dir)?;
+   }
 
    // Route to compose mode if --compose flag is present
    if args.compose {
