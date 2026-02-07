@@ -30,11 +30,11 @@ pub fn create_patch_for_files(files: &[String], dir: &str) -> Result<String> {
       .args(files)
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to create patch: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to create patch: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git diff failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git diff failed: {stderr}")));
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -49,22 +49,22 @@ pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
       .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::piped())
       .spawn()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to spawn git apply: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to spawn git apply: {e}")))?;
 
    if let Some(mut stdin) = child.stdin.take() {
       use std::io::Write;
       stdin
          .write_all(patch.as_bytes())
-         .map_err(|e| CommitGenError::GitError(format!("Failed to write patch: {e}")))?;
+         .map_err(|e| CommitGenError::git(format!("Failed to write patch: {e}")))?;
    }
 
    let output = child
       .wait_with_output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to wait for git apply: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to wait for git apply: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git apply --cached failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git apply --cached failed: {stderr}")));
    }
 
    Ok(())
@@ -82,11 +82,11 @@ pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
       .args(files)
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to stage files: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to stage files: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git add failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git add failed: {stderr}")));
    }
 
    Ok(())
@@ -98,11 +98,11 @@ pub fn reset_staging(dir: &str) -> Result<()> {
       .args(["reset", "HEAD"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to reset staging: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to reset staging: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git reset HEAD failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git reset HEAD failed: {stderr}")));
    }
 
    Ok(())

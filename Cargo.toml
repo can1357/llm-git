@@ -1,6 +1,6 @@
 [package]
 name = "llm-git"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2024"
 authors = ["can1357 <me@can.ac>"]
 license = "MIT"
@@ -38,6 +38,7 @@ owo-colors = "4.2"
 supports-color = "3"
 terminal_size = "0.4"
 tiktoken-rs = "0.9"
+miette = { version = "7.6.0", features = ["fancy"] }
 
 [build-dependencies]
 serde_json = "1.0"

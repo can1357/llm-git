@@ -543,7 +543,7 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
    Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> miette::Result<()> {
    let args = Args::parse();
 
    // Load config and apply CLI overrides
@@ -559,17 +559,17 @@ fn main() -> Result<()> {
 
    // Route to compose mode if --compose flag is present
    if args.compose {
-      return run_compose_mode(&args, &config);
+      return Ok(run_compose_mode(&args, &config)?);
    }
 
    // Route to rewrite mode if --rewrite flag is present
    if args.rewrite {
-      return rewrite::run_rewrite_mode(&args, &config);
+      return Ok(rewrite::run_rewrite_mode(&args, &config)?);
    }
 
    // Route to test mode if --test flag is present
    if args.test {
-      return run_test_mode(&args, &config);
+      return Ok(run_test_mode(&args, &config)?);
    }
 
    // Auto-stage all changes if nothing staged in commit mode
@@ -579,7 +579,7 @@ fn main() -> Result<()> {
          .args(["diff", "--cached", "--quiet"])
          .current_dir(&args.dir)
          .status()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to check staged changes: {e}")))?;
+         .map_err(|e| CommitGenError::git(format!("Failed to check staged changes: {e}")))?;
 
       // exit code 1 = changes exist, 0 = no changes
       if staged_check.success() {
@@ -589,7 +589,7 @@ fn main() -> Result<()> {
             .current_dir(&args.dir)
             .status()
             .map_err(|e| {
-               CommitGenError::GitError(format!("Failed to check unstaged changes: {e}"))
+               CommitGenError::git(format!("Failed to check unstaged changes: {e}"))
             })?;
 
          // Check for untracked files
@@ -598,16 +598,16 @@ fn main() -> Result<()> {
             .current_dir(&args.dir)
             .output()
             .map_err(|e| {
-               CommitGenError::GitError(format!("Failed to check untracked files: {e}"))
+               CommitGenError::git(format!("Failed to check untracked files: {e}"))
             })?;
 
          let has_untracked = !untracked_output.stdout.is_empty();
 
          // If no unstaged changes AND no untracked files, working directory is clean
          if unstaged_check.success() && !has_untracked {
-            return Err(CommitGenError::NoChanges {
+            return Err((CommitGenError::NoChanges {
                mode: "working directory (nothing to commit)".to_string(),
-            });
+            }).into());
          }
 
          println!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
@@ -615,11 +615,11 @@ fn main() -> Result<()> {
             .args(["add", "-A"])
             .current_dir(&args.dir)
             .output()
-            .map_err(|e| CommitGenError::GitError(format!("Failed to stage changes: {e}")))?;
+            .map_err(|e| CommitGenError::git(format!("Failed to stage changes: {e}")))?;
 
          if !add_output.status.success() {
             let stderr = String::from_utf8_lossy(&add_output.stderr);
-            return Err(CommitGenError::GitError(format!("git add -A failed: {stderr}")));
+            return Err(CommitGenError::git(format!("git add -A failed: {stderr}")).into());
          }
       }
    }
@@ -670,7 +670,8 @@ fn main() -> Result<()> {
    // Save final commit message if debug output requested
    if let Some(debug_dir) = &args.debug_output {
       save_debug_output(debug_dir, "final.txt", &formatted_message)?;
-      let commit_json = serde_json::to_string_pretty(&commit_msg)?;
+      let commit_json =
+         serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?;
       save_debug_output(debug_dir, "commit.json", &commit_json)?;
    }
 
@@ -681,7 +682,10 @@ fn main() -> Result<()> {
 
    if std::env::var("LLM_GIT_VERBOSE").is_ok() {
       println!("\nJSON Structure:");
-      println!("{}", serde_json::to_string_pretty(&commit_msg)?);
+      println!(
+         "{}",
+         serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?
+      );
    }
 
    // Copy to clipboard if requested
@@ -705,7 +709,7 @@ fn main() -> Result<()> {
          );
          return Err(CommitGenError::ValidationError(
             "Commit message validation failed".to_string(),
-         ));
+         ).into());
       }
 
       println!("\n{}", style::info("Preparing to commit..."));

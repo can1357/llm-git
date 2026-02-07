@@ -529,11 +529,11 @@ fn get_staged_files(dir: &str) -> Result<Vec<String>> {
       .args(["diff", "--cached", "--name-only"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get staged files: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get staged files: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!(
+      return Err(CommitGenError::git(format!(
          "git diff --cached --name-only failed: {stderr}"
       )));
    }
@@ -553,7 +553,7 @@ fn find_changelogs(dir: &str) -> Result<Vec<PathBuf>> {
       .args(["ls-files", "--full-name", "**/CHANGELOG.md", "CHANGELOG.md"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to find changelogs: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to find changelogs: {e}")))?;
 
    // git ls-files returns empty if no matches, which is fine
    let files: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
@@ -657,7 +657,7 @@ fn get_diff_for_files(files: &[String], dir: &str) -> Result<String> {
       .args(files)
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get diff for files: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get diff for files: {e}")))?;
 
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -673,7 +673,7 @@ fn get_stat_for_files(files: &[String], dir: &str) -> Result<String> {
       .args(files)
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get stat for files: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get stat for files: {e}")))?;
 
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }

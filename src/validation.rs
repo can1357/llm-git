@@ -52,17 +52,17 @@ fn get_repository_name() -> Result<String> {
    let output = Command::new("git")
       .args(["rev-parse", "--show-toplevel"])
       .output()
-      .map_err(|e| CommitGenError::GitError(e.to_string()))?;
+      .map_err(|e| CommitGenError::git(e.to_string()))?;
 
    if !output.status.success() {
-      return Err(CommitGenError::GitError("Failed to get repository root".to_string()));
+      return Err(CommitGenError::git("Failed to get repository root".to_string()));
    }
 
    let path = String::from_utf8_lossy(&output.stdout);
    let repo_name = std::path::Path::new(path.trim())
       .file_name()
       .and_then(|n| n.to_str())
-      .ok_or_else(|| CommitGenError::GitError("Could not extract repository name".to_string()))?;
+      .ok_or_else(|| CommitGenError::git("Could not extract repository name".to_string()))?;
 
    Ok(repo_name.to_string())
 }

@@ -372,7 +372,7 @@ pub fn extract_scope_candidates(
          .current_dir(dir)
          .output()
          .map_err(|e| {
-            CommitGenError::GitError(format!("Failed to run git diff --cached --numstat: {e}"))
+            CommitGenError::git(format!("Failed to run git diff --cached --numstat: {e}"))
          })?,
       Mode::Commit => {
          let target = target.ok_or_else(|| {
@@ -383,19 +383,19 @@ pub fn extract_scope_candidates(
             .current_dir(dir)
             .output()
             .map_err(|e| {
-               CommitGenError::GitError(format!("Failed to run git show --numstat: {e}"))
+               CommitGenError::git(format!("Failed to run git show --numstat: {e}"))
             })?
       },
       Mode::Unstaged => Command::new("git")
          .args(["diff", "--numstat"])
          .current_dir(dir)
          .output()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to run git diff --numstat: {e}")))?,
+         .map_err(|e| CommitGenError::git(format!("Failed to run git diff --numstat: {e}")))?,
       Mode::Compose => unreachable!("compose mode handled separately"),
    };
 
    if !output.status.success() {
-      return Err(CommitGenError::GitError("git diff --numstat failed".to_string()));
+      return Err(CommitGenError::git("git diff --numstat failed".to_string()));
    }
 
    let numstat = String::from_utf8_lossy(&output.stdout);

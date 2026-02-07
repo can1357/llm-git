@@ -1,4 +1,4 @@
-use std::{collections::HashMap, process::Command};
+use std::{collections::HashMap, path::PathBuf, process::Command};
 
 pub use self::git_push as push;
 use crate::{
@@ -7,6 +7,28 @@ use crate::{
    style,
    types::{CommitMetadata, Mode},
 };
+
+/// Detect a stale `index.lock` from git stderr and return a
+/// [`CommitGenError::GitIndexLocked`] with the resolved path if found.
+fn check_index_lock(stderr: &str, dir: &str) -> Option<CommitGenError> {
+   if !stderr.contains("index.lock") {
+      return None;
+   }
+
+   // Try to extract the exact lock path from the error message.
+   // Git says: "Unable to create '/path/to/.git/index.lock': File exists."
+   let lock_path = stderr
+      .lines()
+      .find_map(|line| {
+         let start = line.find('\'')?;
+         let end = line[start + 1..].find('\'')?;
+         let path = &line[start + 1..start + 1 + end];
+         if path.ends_with("index.lock") { Some(PathBuf::from(path)) } else { None }
+      })
+      .unwrap_or_else(|| PathBuf::from(dir).join(".git/index.lock"));
+
+   Some(CommitGenError::GitIndexLocked { lock_path })
+}
 
 /// Ensure the provided directory is inside a git work tree.
 ///
@@ -17,7 +39,7 @@ pub fn ensure_git_repo(dir: &str) -> Result<()> {
       .args(["rev-parse", "--show-toplevel"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git rev-parse: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git rev-parse: {e}")))?;
 
    if output.status.success() {
       return Ok(());
@@ -25,12 +47,12 @@ pub fn ensure_git_repo(dir: &str) -> Result<()> {
 
    let stderr = String::from_utf8_lossy(&output.stderr);
    if stderr.contains("not a git repository") {
-      return Err(CommitGenError::GitError(
+      return Err(CommitGenError::git(
          "Not a git repository (or any of the parent directories): .git".to_string(),
       ));
    }
 
-   Err(CommitGenError::GitError(format!(
+   Err(CommitGenError::git(format!(
       "Failed to detect git repository: {stderr}"
    )))
 }
@@ -47,7 +69,7 @@ pub fn get_git_diff(
          .args(["diff", "--cached"])
          .current_dir(dir)
          .output()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to run git diff --cached: {e}")))?,
+         .map_err(|e| CommitGenError::git(format!("Failed to run git diff --cached: {e}")))?,
       Mode::Commit => {
          let target = target.ok_or_else(|| {
             CommitGenError::ValidationError("--target required for commit mode".to_string())
@@ -60,7 +82,7 @@ pub fn get_git_diff(
          cmd.arg(target)
             .current_dir(dir)
             .output()
-            .map_err(|e| CommitGenError::GitError(format!("Failed to run git show: {e}")))?
+            .map_err(|e| CommitGenError::git(format!("Failed to run git show: {e}")))?
       },
       Mode::Unstaged => {
          // Get diff for tracked files
@@ -68,11 +90,11 @@ pub fn get_git_diff(
             .args(["diff"])
             .current_dir(dir)
             .output()
-            .map_err(|e| CommitGenError::GitError(format!("Failed to run git diff: {e}")))?;
+            .map_err(|e| CommitGenError::git(format!("Failed to run git diff: {e}")))?;
 
          if !tracked_output.status.success() {
             let stderr = String::from_utf8_lossy(&tracked_output.stderr);
-            return Err(CommitGenError::GitError(format!("git diff failed: {stderr}")));
+            return Err(CommitGenError::git(format!("git diff failed: {stderr}")));
          }
 
          let tracked_diff = String::from_utf8_lossy(&tracked_output.stdout).to_string();
@@ -83,12 +105,12 @@ pub fn get_git_diff(
             .current_dir(dir)
             .output()
             .map_err(|e| {
-               CommitGenError::GitError(format!("Failed to list untracked files: {e}"))
+               CommitGenError::git(format!("Failed to list untracked files: {e}"))
             })?;
 
          if !untracked_output.status.success() {
             let stderr = String::from_utf8_lossy(&untracked_output.stderr);
-            return Err(CommitGenError::GitError(format!("git ls-files failed: {stderr}")));
+            return Err(CommitGenError::git(format!("git ls-files failed: {stderr}")));
          }
 
          let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
@@ -107,7 +129,7 @@ pub fn get_git_diff(
                .current_dir(dir)
                .output()
                .map_err(|e| {
-                  CommitGenError::GitError(format!("Failed to diff untracked file {file}: {e}"))
+                  CommitGenError::git(format!("Failed to diff untracked file {file}: {e}"))
                })?;
 
             // git diff --no-index exits with 1 when files differ (expected)
@@ -141,7 +163,7 @@ pub fn get_git_diff(
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("Git command failed: {stderr}")));
+      return Err(CommitGenError::git(format!("Git command failed: {stderr}")));
    }
 
    let diff = String::from_utf8_lossy(&output.stdout).to_string();
@@ -172,7 +194,7 @@ pub fn get_git_stat(
          .current_dir(dir)
          .output()
          .map_err(|e| {
-            CommitGenError::GitError(format!("Failed to run git diff --cached --stat: {e}"))
+            CommitGenError::git(format!("Failed to run git diff --cached --stat: {e}"))
          })?,
       Mode::Commit => {
          let target = target.ok_or_else(|| {
@@ -187,7 +209,7 @@ pub fn get_git_stat(
             .arg(target)
             .current_dir(dir)
             .output()
-            .map_err(|e| CommitGenError::GitError(format!("Failed to run git show --stat: {e}")))?
+            .map_err(|e| CommitGenError::git(format!("Failed to run git show --stat: {e}")))?
       },
       Mode::Unstaged => {
          // Get stat for tracked files
@@ -195,11 +217,11 @@ pub fn get_git_stat(
             .args(["diff", "--stat"])
             .current_dir(dir)
             .output()
-            .map_err(|e| CommitGenError::GitError(format!("Failed to run git diff --stat: {e}")))?;
+            .map_err(|e| CommitGenError::git(format!("Failed to run git diff --stat: {e}")))?;
 
          if !tracked_output.status.success() {
             let stderr = String::from_utf8_lossy(&tracked_output.stderr);
-            return Err(CommitGenError::GitError(format!("git diff --stat failed: {stderr}")));
+            return Err(CommitGenError::git(format!("git diff --stat failed: {stderr}")));
          }
 
          let mut stat = String::from_utf8_lossy(&tracked_output.stdout).to_string();
@@ -210,12 +232,12 @@ pub fn get_git_stat(
             .current_dir(dir)
             .output()
             .map_err(|e| {
-               CommitGenError::GitError(format!("Failed to list untracked files: {e}"))
+               CommitGenError::git(format!("Failed to list untracked files: {e}"))
             })?;
 
          if !untracked_output.status.success() {
             let stderr = String::from_utf8_lossy(&untracked_output.stderr);
-            return Err(CommitGenError::GitError(format!("git ls-files failed: {stderr}")));
+            return Err(CommitGenError::git(format!("git ls-files failed: {stderr}")));
          }
 
          let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
@@ -249,7 +271,7 @@ pub fn get_git_stat(
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("Git stat command failed: {stderr}")));
+      return Err(CommitGenError::git(format!("Git stat command failed: {stderr}")));
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -294,14 +316,15 @@ pub fn git_commit(
       .args(&args)
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git commit: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git commit: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
       let stdout = String::from_utf8_lossy(&output.stdout);
-      return Err(CommitGenError::GitError(format!(
-         "Git commit failed:\nstderr: {stderr}\nstdout: {stdout}"
-      )));
+      if let Some(err) = check_index_lock(&stderr, dir) {
+         return Err(err);
+      }
+      return Err(CommitGenError::git(format!("git commit failed: {stderr}{stdout}")));
    }
 
    let stdout = String::from_utf8_lossy(&output.stdout);
@@ -323,12 +346,12 @@ pub fn git_push(dir: &str) -> Result<()> {
       .args(["push"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git push: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git push: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
       let stdout = String::from_utf8_lossy(&output.stdout);
-      return Err(CommitGenError::GitError(format!(
+      return Err(CommitGenError::git(format!(
          "Git push failed:\nstderr: {stderr}\nstdout: {stdout}"
       )));
    }
@@ -352,11 +375,11 @@ pub fn get_head_hash(dir: &str) -> Result<String> {
       .args(["rev-parse", "HEAD"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get HEAD hash: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get HEAD hash: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git rev-parse HEAD failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git rev-parse HEAD failed: {stderr}")));
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -379,11 +402,11 @@ pub fn get_commit_list(start_ref: Option<&str>, dir: &str) -> Result<Vec<String>
       .args(&args)
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git rev-list: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git rev-list: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git rev-list failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git rev-list failed: {stderr}")));
    }
 
    let stdout = String::from_utf8_lossy(&output.stdout);
@@ -400,18 +423,18 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
       .args(["show", "-s", &format!("--format={format_str}"), hash])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git show: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git show: {e}")))?;
 
    if !info_output.status.success() {
       let stderr = String::from_utf8_lossy(&info_output.stderr);
-      return Err(CommitGenError::GitError(format!("git show failed for {hash}: {stderr}")));
+      return Err(CommitGenError::git(format!("git show failed for {hash}: {stderr}")));
    }
 
    let info = String::from_utf8_lossy(&info_output.stdout);
    let parts: Vec<&str> = info.splitn(7, '\0').collect();
 
    if parts.len() < 7 {
-      return Err(CommitGenError::GitError(format!("Failed to parse commit metadata for {hash}")));
+      return Err(CommitGenError::git(format!("Failed to parse commit metadata for {hash}")));
    }
 
    // Get tree hash
@@ -419,7 +442,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
       .args(["rev-parse", &format!("{hash}^{{tree}}")])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get tree hash: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get tree hash: {e}")))?;
    let tree_hash = String::from_utf8_lossy(&tree_output.stdout)
       .trim()
       .to_string();
@@ -429,7 +452,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
       .args(["rev-list", "--parents", "-n", "1", hash])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get parent hashes: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get parent hashes: {e}")))?;
    let parents_line = String::from_utf8_lossy(&parents_output.stdout);
    let parent_hashes: Vec<String> = parents_line
       .split_whitespace()
@@ -457,7 +480,7 @@ pub fn check_working_tree_clean(dir: &str) -> Result<bool> {
       .args(["status", "--porcelain"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to check working tree: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to check working tree: {e}")))?;
 
    Ok(output.stdout.is_empty())
 }
@@ -473,11 +496,11 @@ pub fn create_backup_branch(dir: &str) -> Result<String> {
       .args(["branch", &backup_name])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to create backup branch: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to create backup branch: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git branch failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git branch failed: {stderr}")));
    }
 
    Ok(backup_name)
@@ -489,11 +512,11 @@ pub fn get_recent_commits(dir: &str, count: usize) -> Result<Vec<String>> {
       .args(["log", &format!("-{count}"), "--pretty=format:%s"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git log: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git log: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git log failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git log failed: {stderr}")));
    }
 
    let stdout = String::from_utf8_lossy(&output.stdout);
@@ -506,11 +529,11 @@ pub fn get_common_scopes(dir: &str, limit: usize) -> Result<Vec<(String, usize)>
       .args(["log", &format!("-{limit}"), "--pretty=format:%s"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to run git log: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to run git log: {e}")))?;
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::GitError(format!("git log failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git log failed: {stderr}")));
    }
 
    let stdout = String::from_utf8_lossy(&output.stdout);
@@ -697,7 +720,7 @@ pub fn rewrite_history(
       .args(["rev-parse", "--abbrev-ref", "HEAD"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get current branch: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get current branch: {e}")))?;
    let current_branch = String::from_utf8_lossy(&branch_output.stdout)
       .trim()
       .to_string();
@@ -741,11 +764,11 @@ pub fn rewrite_history(
 
       let output = cmd
          .output()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to run git commit-tree: {e}")))?;
+         .map_err(|e| CommitGenError::git(format!("Failed to run git commit-tree: {e}")))?;
 
       if !output.status.success() {
          let stderr = String::from_utf8_lossy(&output.stderr);
-         return Err(CommitGenError::GitError(format!(
+         return Err(CommitGenError::git(format!(
             "commit-tree failed for {}: {}",
             commit.hash, stderr
          )));
@@ -768,22 +791,22 @@ pub fn rewrite_history(
          .args(["update-ref", &format!("refs/heads/{current_branch}"), &head])
          .current_dir(dir)
          .output()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to update ref: {e}")))?;
+         .map_err(|e| CommitGenError::git(format!("Failed to update ref: {e}")))?;
 
       if !update_output.status.success() {
          let stderr = String::from_utf8_lossy(&update_output.stderr);
-         return Err(CommitGenError::GitError(format!("git update-ref failed: {stderr}")));
+         return Err(CommitGenError::git(format!("git update-ref failed: {stderr}")));
       }
 
       let reset_output = Command::new("git")
          .args(["reset", "--hard", &head])
          .current_dir(dir)
          .output()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to reset: {e}")))?;
+         .map_err(|e| CommitGenError::git(format!("Failed to reset: {e}")))?;
 
       if !reset_output.status.success() {
          let stderr = String::from_utf8_lossy(&reset_output.stderr);
-         return Err(CommitGenError::GitError(format!("git reset failed: {stderr}")));
+         return Err(CommitGenError::git(format!("git reset failed: {stderr}")));
       }
    }
 

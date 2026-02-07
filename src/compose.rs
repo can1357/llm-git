@@ -704,11 +704,11 @@ pub fn execute_compose(
       .args(["diff", "HEAD"])
       .current_dir(dir)
       .output()
-      .map_err(|e| CommitGenError::GitError(format!("Failed to get baseline diff: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to get baseline diff: {e}")))?;
 
    if !baseline_diff_output.status.success() {
       let stderr = String::from_utf8_lossy(&baseline_diff_output.stderr);
-      return Err(CommitGenError::GitError(format!("git diff HEAD failed: {stderr}")));
+      return Err(CommitGenError::git(format!("git diff HEAD failed: {stderr}")));
    }
 
    let baseline_diff = String::from_utf8_lossy(&baseline_diff_output.stdout).to_string();
@@ -868,7 +868,7 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
          .args(["diff", "HEAD"])
          .current_dir(&args.dir)
          .output()
-         .map_err(|e| CommitGenError::GitError(format!("Failed to check remaining diff: {e}")))?;
+         .map_err(|e| CommitGenError::git(format!("Failed to check remaining diff: {e}")))?;
 
       if !remaining_diff_output.status.success() {
          continue;
