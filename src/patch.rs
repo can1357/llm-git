@@ -328,7 +328,7 @@ fn extract_hunks_for_file(
    let mut result = String::new();
    let mut in_header = true;
    let mut current_hunk = String::new();
-   let mut current_hunk_header = String::new();
+   let mut current_hunk_header;
    let mut include_current = false;
 
    for line in file_diff.lines() {

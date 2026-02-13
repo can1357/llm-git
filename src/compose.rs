@@ -190,7 +190,7 @@ fn parse_compose_groups_from_content(content: &str) -> Result<Vec<ChangeGroup>> 
          let mut lines = block.lines();
          let first_line = lines.next().unwrap_or_default();
 
-         let mut owned_candidate: Option<String> = None;
+         let rest_owned: String;
          let json_candidate = if first_line.trim_start().starts_with('{') {
             block
          } else {
@@ -199,8 +199,8 @@ fn parse_compose_groups_from_content(content: &str) -> Result<Vec<ChangeGroup>> 
             if trimmed_rest.is_empty() {
                block
             } else {
-               owned_candidate = Some(trimmed_rest.to_string());
-               owned_candidate.as_deref().unwrap()
+               rest_owned = trimmed_rest.to_string();
+               &rest_owned
             }
          };
 

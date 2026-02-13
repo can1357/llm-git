@@ -20,6 +20,17 @@ use normalization::{format_commit_message, post_process_commit_message};
 use types::{Args, ConventionalCommit, Mode, resolve_model_name};
 use validation::{check_type_scope_consistency, validate_commit_message};
 
+/// Print status messages to stderr in pipe mode, stdout otherwise.
+macro_rules! status {
+   ($($arg:tt)*) => {
+      if llm_git::style::pipe_mode() {
+         eprintln!($($arg)*);
+      } else {
+         println!($($arg)*);
+      }
+   };
+}
+
 /// Save debug output to the specified directory
 fn save_debug_output(dir: &Path, filename: &str, content: &str) -> Result<()> {
    std::fs::create_dir_all(dir)?;
@@ -299,7 +310,7 @@ fn run_generation(
       save_debug_output(debug_dir, "stat.txt", &stat)?;
    }
 
-   println!(
+   status!(
       "{} {} {} {}",
       style::dim("›"),
       style::dim("model:"),
@@ -393,9 +404,9 @@ fn run_generation(
 
    // Log scope selection
    if let Some(scope) = &analysis.scope {
-      println!("{} {} {}", style::dim("›"), style::dim("scope:"), style::scope(&scope.to_string()));
+      status!("{} {} {}", style::dim("›"), style::dim("scope:"), style::scope(&scope.to_string()));
    } else {
-      println!("{} {}", style::dim("›"), style::dim("scope: (none)"));
+      status!("{} {}", style::dim("›"), style::dim("scope: (none)"));
    }
 
    let detail_points = analysis.body_texts();
@@ -512,9 +523,7 @@ fn validate_and_process(
                      break;
                   },
                   Err(e2) => {
-                     let message2 = e2.to_string();
-                     eprintln!("Validation failed after scope removal: {message2}");
-                     validation_error = Some(message2);
+                     eprintln!("Validation failed after scope removal: {e2}");
                      // Fall through to normal retry logic
                   },
                }
@@ -610,7 +619,7 @@ fn main() -> miette::Result<()> {
             }).into());
          }
 
-         println!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
+         status!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
          let add_output = Command::new("git")
             .args(["add", "-A"])
             .current_dir(&args.dir)
@@ -633,7 +642,7 @@ fn main() -> miette::Result<()> {
       eprintln!("Warning: Changelog update failed: {e}");
    }
 
-   println!("{} Analyzing {} changes...", style::info("›"), match args.mode {
+   status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
       Mode::Staged => style::bold("staged"),
       Mode::Commit => style::bold("commit"),
       Mode::Unstaged => style::bold("unstaged"),
@@ -675,51 +684,56 @@ fn main() -> miette::Result<()> {
       save_debug_output(debug_dir, "commit.json", &commit_json)?;
    }
 
-   println!(
-      "\n{}",
-      style::boxed_message("Generated Commit Message", &formatted_message, style::term_width())
-   );
-
-   if std::env::var("LLM_GIT_VERBOSE").is_ok() {
-      println!("\nJSON Structure:");
+   if style::pipe_mode() {
+      // Pipe mode: raw commit message to stdout, skip interactive features
+      print!("{formatted_message}");
+   } else {
       println!(
-         "{}",
-         serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?
+         "\n{}",
+         style::boxed_message("Generated Commit Message", &formatted_message, style::term_width())
       );
-   }
 
-   // Copy to clipboard if requested
-   if args.copy {
-      match copy_to_clipboard(&formatted_message) {
-         Ok(()) => println!("\n{}", style::success("Copied to clipboard")),
-         Err(e) => println!("\nNote: Failed to copy to clipboard: {e}"),
-      }
-   }
-
-   // Auto-commit for staged mode (unless dry-run)
-   // Don't commit if validation failed
-   if matches!(args.mode, Mode::Staged) {
-      if validation_failed.is_some() {
-         eprintln!(
-            "\n{}",
-            style::warning(
-               "Skipping commit due to validation failure. Use --dry-run to test or manually \
-                commit."
-            )
+      if std::env::var("LLM_GIT_VERBOSE").is_ok() {
+         println!("\nJSON Structure:");
+         println!(
+            "{}",
+            serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?
          );
-         return Err(CommitGenError::ValidationError(
-            "Commit message validation failed".to_string(),
-         ).into());
       }
 
-      println!("\n{}", style::info("Preparing to commit..."));
-      let sign = args.sign || config.gpg_sign;
-      let signoff = args.signoff || config.signoff;
-      git_commit(&formatted_message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks)?;
+      // Copy to clipboard if requested
+      if args.copy {
+         match copy_to_clipboard(&formatted_message) {
+            Ok(()) => println!("\n{}", style::success("Copied to clipboard")),
+            Err(e) => println!("\nNote: Failed to copy to clipboard: {e}"),
+         }
+      }
 
-      // Auto-push if requested (only if not dry-run)
-      if args.push && !args.dry_run {
-         git_push(&args.dir)?;
+      // Auto-commit for staged mode (unless dry-run)
+      // Don't commit if validation failed
+      if matches!(args.mode, Mode::Staged) {
+         if validation_failed.is_some() {
+            eprintln!(
+               "\n{}",
+               style::warning(
+                  "Skipping commit due to validation failure. Use --dry-run to test or manually \
+                   commit."
+               )
+            );
+            return Err(CommitGenError::ValidationError(
+               "Commit message validation failed".to_string(),
+            ).into());
+         }
+
+         println!("\n{}", style::info("Preparing to commit..."));
+         let sign = args.sign || config.gpg_sign;
+         let signoff = args.signoff || config.signoff;
+         git_commit(&formatted_message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks)?;
+
+         // Auto-push if requested (only if not dry-run)
+         if args.push && !args.dry_run {
+            git_push(&args.dir)?;
+         }
       }
    }
 

@@ -14,6 +14,9 @@ use owo_colors::OwoColorize;
 /// Whether color output is enabled (cached on first call).
 static COLOR_ENABLED: OnceLock<bool> = OnceLock::new();
 
+/// Whether stdout is piped (not a terminal), cached on first call.
+static PIPE_MODE: OnceLock<bool> = OnceLock::new();
+
 /// Check if colors should be used.
 pub fn colors_enabled() -> bool {
    *COLOR_ENABLED.get_or_init(|| {
@@ -23,6 +26,17 @@ pub fn colors_enabled() -> bool {
       }
       // Check if stdout is a terminal and supports color
       supports_color::on(supports_color::Stream::Stdout).is_some_and(|level| level.has_basic)
+   })
+}
+
+/// Check if stdout is piped (not a terminal).
+///
+/// When true, only the raw commit message should go to stdout;
+/// all progress/status output should go to stderr.
+pub fn pipe_mode() -> bool {
+   *PIPE_MODE.get_or_init(|| {
+      use std::io::IsTerminal;
+      !std::io::stdout().is_terminal()
    })
 }
 
@@ -70,9 +84,11 @@ pub fn info(s: &str) -> String {
 /// active, by writing a carriage return + clear-line escape sequence before the
 /// message.
 pub fn warn(msg: &str) {
-   // Clear current line in case spinner is active (stdout, not stderr)
-   print!("\r\x1b[K");
-   io::stdout().flush().ok();
+   if !pipe_mode() {
+      // Clear current line in case spinner is active (stdout, not stderr)
+      print!("\r\x1b[K");
+      io::stdout().flush().ok();
+   }
    eprintln!("{} {}", warning(icons::WARNING), warning(msg));
 }
 
@@ -285,7 +301,7 @@ where
 {
    // No spinner if not a TTY or colors disabled
    if !colors_enabled() {
-      println!("{message}");
+      eprintln!("{message}");
       return f();
    }
 
@@ -320,7 +336,7 @@ where
    F: FnOnce() -> Result<T, E>,
 {
    if !colors_enabled() {
-      println!("{message}");
+      eprintln!("{message}");
       return f();
    }
 
