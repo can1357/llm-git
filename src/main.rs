@@ -597,26 +597,25 @@ fn main() -> miette::Result<()> {
             .args(["diff", "--quiet"])
             .current_dir(&args.dir)
             .status()
-            .map_err(|e| {
-               CommitGenError::git(format!("Failed to check unstaged changes: {e}"))
-            })?;
+            .map_err(|e| CommitGenError::git(format!("Failed to check unstaged changes: {e}")))?;
 
          // Check for untracked files
          let untracked_output = Command::new("git")
             .args(["ls-files", "--others", "--exclude-standard"])
             .current_dir(&args.dir)
             .output()
-            .map_err(|e| {
-               CommitGenError::git(format!("Failed to check untracked files: {e}"))
-            })?;
+            .map_err(|e| CommitGenError::git(format!("Failed to check untracked files: {e}")))?;
 
          let has_untracked = !untracked_output.stdout.is_empty();
 
          // If no unstaged changes AND no untracked files, working directory is clean
          if unstaged_check.success() && !has_untracked {
-            return Err((CommitGenError::NoChanges {
-               mode: "working directory (nothing to commit)".to_string(),
-            }).into());
+            return Err(
+               (CommitGenError::NoChanges {
+                  mode: "working directory (nothing to commit)".to_string(),
+               })
+               .into(),
+            );
          }
 
          status!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
@@ -679,8 +678,7 @@ fn main() -> miette::Result<()> {
    // Save final commit message if debug output requested
    if let Some(debug_dir) = &args.debug_output {
       save_debug_output(debug_dir, "final.txt", &formatted_message)?;
-      let commit_json =
-         serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?;
+      let commit_json = serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?;
       save_debug_output(debug_dir, "commit.json", &commit_json)?;
    }
 
@@ -695,10 +693,7 @@ fn main() -> miette::Result<()> {
 
       if std::env::var("LLM_GIT_VERBOSE").is_ok() {
          println!("\nJSON Structure:");
-         println!(
-            "{}",
-            serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?
-         );
+         println!("{}", serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?);
       }
 
       // Copy to clipboard if requested
@@ -720,9 +715,10 @@ fn main() -> miette::Result<()> {
                    commit."
                )
             );
-            return Err(CommitGenError::ValidationError(
-               "Commit message validation failed".to_string(),
-            ).into());
+            return Err(
+               CommitGenError::ValidationError("Commit message validation failed".to_string())
+                  .into(),
+            );
          }
 
          println!("\n{}", style::info("Preparing to commit..."));

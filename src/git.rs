@@ -23,7 +23,11 @@ fn check_index_lock(stderr: &str, dir: &str) -> Option<CommitGenError> {
          let start = line.find('\'')?;
          let end = line[start + 1..].find('\'')?;
          let path = &line[start + 1..start + 1 + end];
-         if path.ends_with("index.lock") { Some(PathBuf::from(path)) } else { None }
+         if path.ends_with("index.lock") {
+            Some(PathBuf::from(path))
+         } else {
+            None
+         }
       })
       .unwrap_or_else(|| PathBuf::from(dir).join(".git/index.lock"));
 
@@ -52,9 +56,7 @@ pub fn ensure_git_repo(dir: &str) -> Result<()> {
       ));
    }
 
-   Err(CommitGenError::git(format!(
-      "Failed to detect git repository: {stderr}"
-   )))
+   Err(CommitGenError::git(format!("Failed to detect git repository: {stderr}")))
 }
 
 /// Get git diff based on the specified mode
@@ -104,9 +106,7 @@ pub fn get_git_diff(
             .args(["ls-files", "--others", "--exclude-standard"])
             .current_dir(dir)
             .output()
-            .map_err(|e| {
-               CommitGenError::git(format!("Failed to list untracked files: {e}"))
-            })?;
+            .map_err(|e| CommitGenError::git(format!("Failed to list untracked files: {e}")))?;
 
          if !untracked_output.status.success() {
             let stderr = String::from_utf8_lossy(&untracked_output.stderr);
@@ -231,9 +231,7 @@ pub fn get_git_stat(
             .args(["ls-files", "--others", "--exclude-standard"])
             .current_dir(dir)
             .output()
-            .map_err(|e| {
-               CommitGenError::git(format!("Failed to list untracked files: {e}"))
-            })?;
+            .map_err(|e| CommitGenError::git(format!("Failed to list untracked files: {e}")))?;
 
          if !untracked_output.status.success() {
             let stderr = String::from_utf8_lossy(&untracked_output.stderr);

@@ -21,9 +21,7 @@ pub enum CommitGenError {
       code(lgit::git::index_locked),
       help("Another git process may be running in this repository.\nRemove the lock file to continue:\n  rm {}", lock_path.display()),
    )]
-   GitIndexLocked {
-      lock_path: PathBuf,
-   },
+   GitIndexLocked { lock_path: PathBuf },
 
    #[error("API request failed (HTTP {status}): {body}")]
    #[diagnostic(code(lgit::api))]
@@ -32,7 +30,10 @@ pub enum CommitGenError {
    #[error("API call failed after {retries} retries")]
    #[diagnostic(
       code(lgit::api::retry_exhausted),
-      help("Check that your LiteLLM server is running and reachable.\nYou can increase max_retries in ~/.config/llm-git/config.toml"),
+      help(
+         "Check that your LiteLLM server is running and reachable.\nYou can increase max_retries \
+          in ~/.config/llm-git/config.toml"
+      )
    )]
    ApiRetryExhausted {
       retries: u32,
@@ -47,7 +48,7 @@ pub enum CommitGenError {
    #[error("No changes found in {mode} mode")]
    #[diagnostic(
       code(lgit::git::no_changes),
-      help("Stage changes with `git add` or use --mode=unstaged to analyze working tree changes"),
+      help("Stage changes with `git add` or use --mode=unstaged to analyze working tree changes")
    )]
    NoChanges { mode: String },
 
@@ -59,14 +60,14 @@ pub enum CommitGenError {
    #[error("Invalid commit type: {0}")]
    #[diagnostic(
       code(lgit::types::commit_type),
-      help("Valid types: feat, fix, refactor, docs, test, chore, style, perf, build, ci, revert"),
+      help("Valid types: feat, fix, refactor, docs, test, chore, style, perf, build, ci, revert")
    )]
    InvalidCommitType(String),
 
    #[error("Invalid scope format: {0}")]
    #[diagnostic(
       code(lgit::types::scope),
-      help("Scopes must be lowercase alphanumeric with at most 2 segments (e.g. api/client)"),
+      help("Scopes must be lowercase alphanumeric with at most 2 segments (e.g. api/client)")
    )]
    InvalidScope(String),
 
@@ -100,7 +101,7 @@ pub enum CommitGenError {
    #[error("No [Unreleased] section found in {path}")]
    #[diagnostic(
       code(lgit::changelog::no_unreleased),
-      help("Add an ## [Unreleased] section to the changelog file"),
+      help("Add an ## [Unreleased] section to the changelog file")
    )]
    NoUnreleasedSection { path: String },
 }
