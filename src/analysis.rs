@@ -382,9 +382,7 @@ pub fn extract_scope_candidates(
             .args(["show", "--numstat", target])
             .current_dir(dir)
             .output()
-            .map_err(|e| {
-               CommitGenError::git(format!("Failed to run git show --numstat: {e}"))
-            })?
+            .map_err(|e| CommitGenError::git(format!("Failed to run git show --numstat: {e}")))?
       },
       Mode::Unstaged => Command::new("git")
          .args(["diff", "--numstat"])

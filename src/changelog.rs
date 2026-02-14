@@ -533,9 +533,7 @@ fn get_staged_files(dir: &str) -> Result<Vec<String>> {
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::git(format!(
-         "git diff --cached --name-only failed: {stderr}"
-      )));
+      return Err(CommitGenError::git(format!("git diff --cached --name-only failed: {stderr}")));
    }
 
    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
