@@ -295,7 +295,11 @@ pub fn git_commit(
          "git commit{sign_flag}{signoff_flag}{hooks_flag}{amend_flag} -m \"{}\"",
          message.replace('\n', "\\n")
       );
-      println!("\n{}", style::boxed_message("DRY RUN", &command, 60));
+      if style::pipe_mode() {
+         eprintln!("\n{}", style::boxed_message("DRY RUN", &command, 60));
+      } else {
+         println!("\n{}", style::boxed_message("DRY RUN", &command, 60));
+      }
       return Ok(());
    }
 
@@ -331,19 +335,32 @@ pub fn git_commit(
    }
 
    let stdout = String::from_utf8_lossy(&output.stdout);
-   println!("\n{stdout}");
-   println!(
-      "{} {}",
-      style::success(style::icons::SUCCESS),
-      style::success("Successfully committed!")
-   );
+   if style::pipe_mode() {
+      eprintln!("\n{stdout}");
+      eprintln!(
+         "{} {}",
+         style::success(style::icons::SUCCESS),
+         style::success("Successfully committed!")
+      );
+   } else {
+      println!("\n{stdout}");
+      println!(
+         "{} {}",
+         style::success(style::icons::SUCCESS),
+         style::success("Successfully committed!")
+      );
+   }
 
    Ok(())
 }
 
 /// Execute git push
 pub fn git_push(dir: &str) -> Result<()> {
-   println!("\n{}", style::info("Pushing changes..."));
+   if style::pipe_mode() {
+      eprintln!("\n{}", style::info("Pushing changes..."));
+   } else {
+      println!("\n{}", style::info("Pushing changes..."));
+   }
 
    let output = Command::new("git")
       .args(["push"])
@@ -361,13 +378,31 @@ pub fn git_push(dir: &str) -> Result<()> {
 
    let stdout = String::from_utf8_lossy(&output.stdout);
    let stderr = String::from_utf8_lossy(&output.stderr);
-   if !stdout.is_empty() {
-      println!("{stdout}");
+   if style::pipe_mode() {
+      if !stdout.is_empty() {
+         eprintln!("{stdout}");
+      }
+      if !stderr.is_empty() {
+         eprintln!("{stderr}");
+      }
+      eprintln!(
+         "{} {}",
+         style::success(style::icons::SUCCESS),
+         style::success("Successfully pushed!")
+      );
+   } else {
+      if !stdout.is_empty() {
+         println!("{stdout}");
+      }
+      if !stderr.is_empty() {
+         println!("{stderr}");
+      }
+      println!(
+         "{} {}",
+         style::success(style::icons::SUCCESS),
+         style::success("Successfully pushed!")
+      );
    }
-   if !stderr.is_empty() {
-      println!("{stderr}");
-   }
-   println!("{} {}", style::success(style::icons::SUCCESS), style::success("Successfully pushed!"));
 
    Ok(())
 }

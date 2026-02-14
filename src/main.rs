@@ -682,8 +682,8 @@ fn main() -> miette::Result<()> {
       save_debug_output(debug_dir, "commit.json", &commit_json)?;
    }
 
+   // Display: pipe mode outputs raw message, TTY mode shows boxed format
    if style::pipe_mode() {
-      // Pipe mode: raw commit message to stdout, skip interactive features
       print!("{formatted_message}");
    } else {
       println!(
@@ -695,41 +695,48 @@ fn main() -> miette::Result<()> {
          println!("\nJSON Structure:");
          println!("{}", serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?);
       }
+   }
 
-      // Copy to clipboard if requested
-      if args.copy {
-         match copy_to_clipboard(&formatted_message) {
-            Ok(()) => println!("\n{}", style::success("Copied to clipboard")),
-            Err(e) => println!("\nNote: Failed to copy to clipboard: {e}"),
-         }
+   // Copy to clipboard if requested
+   if args.copy {
+      match copy_to_clipboard(&formatted_message) {
+         Ok(()) => status!("\n{}", style::success("Copied to clipboard")),
+         Err(e) => status!("\nNote: Failed to copy to clipboard: {e}"),
+      }
+   }
+
+   // Auto-commit for staged mode (unless dry-run)
+   // Don't commit if validation failed
+   if matches!(args.mode, Mode::Staged) {
+      if validation_failed.is_some() {
+         eprintln!(
+            "\n{}",
+            style::warning(
+               "Skipping commit due to validation failure. Use --dry-run to test or manually \
+                commit."
+            )
+         );
+         return Err(
+            CommitGenError::ValidationError("Commit message validation failed".to_string()).into(),
+         );
       }
 
-      // Auto-commit for staged mode (unless dry-run)
-      // Don't commit if validation failed
-      if matches!(args.mode, Mode::Staged) {
-         if validation_failed.is_some() {
-            eprintln!(
-               "\n{}",
-               style::warning(
-                  "Skipping commit due to validation failure. Use --dry-run to test or manually \
-                   commit."
-               )
-            );
-            return Err(
-               CommitGenError::ValidationError("Commit message validation failed".to_string())
-                  .into(),
-            );
-         }
+      status!("\n{}", style::info("Preparing to commit..."));
+      let sign = args.sign || config.gpg_sign;
+      let signoff = args.signoff || config.signoff;
+      git_commit(
+         &formatted_message,
+         args.dry_run,
+         &args.dir,
+         sign,
+         signoff,
+         args.skip_hooks,
+         args.amend,
+      )?;
 
-         println!("\n{}", style::info("Preparing to commit..."));
-         let sign = args.sign || config.gpg_sign;
-         let signoff = args.signoff || config.signoff;
-         git_commit(&formatted_message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks, args.amend)?;
-
-         // Auto-push if requested (only if not dry-run)
-         if args.push && !args.dry_run {
-            git_push(&args.dir)?;
-         }
+      // Auto-push if requested (only if not dry-run)
+      if args.push && !args.dry_run {
+         git_push(&args.dir)?;
       }
    }
 

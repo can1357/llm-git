@@ -59,7 +59,8 @@ lgit -p                             # Commit and push
 lgit -S                             # GPG sign the commit
 lgit -s                             # Add Signed-off-by trailer
 lgit --amend                        # Amend the previous commit
-lgit | git commit -F -              # Pipe mode (auto-detected, for SSH/headless)
+lgit > msg.txt                      # Save raw message to file (auto-detected pipe mode)
+lgit --dry-run | git commit -F -    # Generate message and commit with custom git flags
 
 # Modes
 lgit --mode=unstaged                # Preview unstaged changes (no commit)
