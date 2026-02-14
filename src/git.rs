@@ -284,13 +284,15 @@ pub fn git_commit(
    sign: bool,
    signoff: bool,
    skip_hooks: bool,
+   amend: bool,
 ) -> Result<()> {
    if dry_run {
       let sign_flag = if sign { " -S" } else { "" };
       let signoff_flag = if signoff { " -s" } else { "" };
       let hooks_flag = if skip_hooks { " --no-verify" } else { "" };
+      let amend_flag = if amend { " --amend" } else { "" };
       let command = format!(
-         "git commit{sign_flag}{signoff_flag}{hooks_flag} -m \"{}\"",
+         "git commit{sign_flag}{signoff_flag}{hooks_flag}{amend_flag} -m \"{}\"",
          message.replace('\n', "\\n")
       );
       println!("\n{}", style::boxed_message("DRY RUN", &command, 60));
@@ -306,6 +308,9 @@ pub fn git_commit(
    }
    if skip_hooks {
       args.push("--no-verify");
+   }
+   if amend {
+      args.push("--amend");
    }
    args.push("-m");
    args.push(message);

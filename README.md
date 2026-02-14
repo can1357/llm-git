@@ -58,6 +58,7 @@ lgit --copy                         # Copy message to clipboard
 lgit -p                             # Commit and push
 lgit -S                             # GPG sign the commit
 lgit -s                             # Add Signed-off-by trailer
+lgit --amend                        # Amend the previous commit
 lgit | git commit -F -              # Pipe mode (auto-detected, for SSH/headless)
 
 # Modes

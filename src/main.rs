@@ -724,7 +724,7 @@ fn main() -> miette::Result<()> {
          println!("\n{}", style::info("Preparing to commit..."));
          let sign = args.sign || config.gpg_sign;
          let signoff = args.signoff || config.signoff;
-         git_commit(&formatted_message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks)?;
+         git_commit(&formatted_message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks, args.amend)?;
 
          // Auto-push if requested (only if not dry-run)
          if args.push && !args.dry_run {

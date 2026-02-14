@@ -815,7 +815,7 @@ pub fn execute_compose(
       if !args.compose_preview {
          let sign = args.sign || config.gpg_sign;
          let signoff = args.signoff || config.signoff;
-         git_commit(&formatted_message, false, dir, sign, signoff, args.skip_hooks)?;
+         git_commit(&formatted_message, false, dir, sign, signoff, args.skip_hooks, false)?;
          let hash = get_head_hash(dir)?;
          commit_hashes.push(hash);
 
