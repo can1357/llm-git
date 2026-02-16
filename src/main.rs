@@ -393,8 +393,10 @@ async fn run_generation(
          &ctx,
          config,
          token_counter,
-      ).await
-   }).await?;
+      )
+      .await
+   })
+   .await?;
 
    // Save analysis debug output
    if let Some(debug_dir) = &args.debug_output {
@@ -420,8 +422,10 @@ async fn run_generation(
          config,
          args.debug_output.as_deref(),
          None,
-      ).await
-   }).await
+      )
+      .await
+   })
+   .await
    .unwrap_or_else(|err| {
       eprintln!(
          "{}",
@@ -486,7 +490,9 @@ async fn validate_and_process(
                config,
                None,
                None,
-            ).await {
+            )
+            .await
+            {
                Ok(new_summary) => {
                   commit_msg.summary = new_summary;
                   continue; // Retry validation loop
@@ -663,7 +669,8 @@ async fn main() -> miette::Result<()> {
 
    // Validate and process
    let validation_failed =
-      validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config).await;
+      validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config)
+         .await;
 
    if let Some(err) = &validation_failed {
       eprintln!("Warning: Generated message failed validation even after retry: {err}");

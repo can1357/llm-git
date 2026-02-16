@@ -790,7 +790,6 @@ pub async fn run_map_reduce(
 // API types (duplicated from api.rs to avoid circular deps)
 // ============================================================================
 
-
 fn response_snippet(body: &str, limit: usize) -> String {
    if body.is_empty() {
       return "<empty response body>".to_string();

@@ -16,7 +16,6 @@ use crate::{
    validation::validate_commit_message,
 };
 
-
 #[derive(Debug, Serialize)]
 struct Message {
    role:    String,

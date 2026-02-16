@@ -116,31 +116,21 @@ async fn generate_messages_parallel(
    let mut results = vec![String::new(); commits.len()];
    let mut errors = Vec::new();
 
-   let outputs: Vec<(usize, std::result::Result<String, CommitGenError>)> =
-      stream::iter(commits.iter().enumerate())
-         .map(|(idx, commit)| async move {
-            (idx, generate_for_commit(commit, config, &args.dir).await)
-         })
-         .buffer_unordered(args.rewrite_parallel)
-         .collect()
-         .await;
+   let outputs: Vec<(usize, std::result::Result<String, CommitGenError>)> = stream::iter(
+      commits.iter().enumerate(),
+   )
+   .map(|(idx, commit)| async move { (idx, generate_for_commit(commit, config, &args.dir).await) })
+   .buffer_unordered(args.rewrite_parallel)
+   .collect()
+   .await;
 
    for (idx, result) in outputs {
       match result {
          Ok(new_msg) => {
             let old = commits[idx].message.lines().next().unwrap_or("");
             let new = new_msg.lines().next().unwrap_or("");
-            println!(
-               "[{:3}/{:3}] {}",
-               idx + 1,
-               commits.len(),
-               style::dim(&commits[idx].hash[..8])
-            );
-            println!(
-               "  {} {}",
-               style::error("-"),
-               style::dim(&TruncStr(old, 60).to_string())
-            );
+            println!("[{:3}/{:3}] {}", idx + 1, commits.len(), style::dim(&commits[idx].hash[..8]));
+            println!("  {} {}", style::error("-"), style::dim(&TruncStr(old, 60).to_string()));
             println!("  {} {}", style::success("+"), TruncStr(new, 60));
             println!();
             results[idx].clone_from(&new_msg);

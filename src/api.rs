@@ -30,7 +30,10 @@ pub async fn timed_send(
    let trace = trace_enabled();
    let start = std::time::Instant::now();
 
-   let response = request_builder.send().await.map_err(CommitGenError::HttpError)?;
+   let response = request_builder
+      .send()
+      .await
+      .map_err(CommitGenError::HttpError)?;
 
    let ttft = start.elapsed();
    let status = response.status();
@@ -40,15 +43,18 @@ pub async fn timed_send(
    let total = start.elapsed();
 
    if trace {
-      let size_info = content_length
-         .map_or_else(|| format!("{}B", body.len()), |cl| format!("{}B (content-length: {cl})", body.len()));
+      let size_info = content_length.map_or_else(
+         || format!("{}B", body.len()),
+         |cl| format!("{}B (content-length: {cl})", body.len()),
+      );
       // Clear spinner line before printing (spinner writes \r to stdout)
       if !crate::style::pipe_mode() {
          print!("\r\x1b[K");
          std::io::Write::flush(&mut std::io::stdout()).ok();
       }
       eprintln!(
-         "[TRACE] {label} model={model} status={status} ttft={ttft:.0?} total={total:.0?} body={size_info}"
+         "[TRACE] {label} model={model} status={status} ttft={ttft:.0?} total={total:.0?} \
+          body={size_info}"
       );
    }
 
@@ -283,8 +289,10 @@ struct SummaryOutput {
 }
 
 /// Retry an API call with exponential backoff
-pub async fn retry_api_call<T>(config: &CommitConfig, mut f: impl AsyncFnMut() -> Result<(bool, Option<T>)>) -> Result<T>
-{
+pub async fn retry_api_call<T>(
+   config: &CommitConfig,
+   mut f: impl AsyncFnMut() -> Result<(bool, Option<T>)>,
+) -> Result<T> {
    let mut attempt = 0;
 
    loop {
@@ -1465,7 +1473,8 @@ pub async fn generate_analysis_with_map_reduce<'a>(
       ));
       run_map_reduce(diff, stat, scope_candidates_str, model_name, config, counter).await
    } else {
-      generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config).await
+      generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config)
+         .await
    }
 }
 

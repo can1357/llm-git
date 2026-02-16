@@ -112,7 +112,8 @@ impl TestRunner {
          &ctx,
          &self.config,
          &token_counter,
-      ).await?;
+      )
+      .await?;
 
       // Get summary
       let detail_points = analysis.body_texts();
@@ -125,7 +126,8 @@ impl TestRunner {
          &self.config,
          None,
          None,
-      ).await
+      )
+      .await
       .unwrap_or_else(|_| {
          crate::api::fallback_summary(
             &fixture.input.stat,

@@ -385,7 +385,6 @@ async fn call_changelog_api(
          return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
       }
 
-
       // Try to parse as structured tool call response first
       if let Ok(api_response) = serde_json::from_str::<ApiResponse>(&response_text) {
          let message = &api_response.choices[0].message;
