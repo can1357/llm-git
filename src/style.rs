@@ -293,18 +293,14 @@ const SPINNER_FRAMES: &[char] = &[
    '\u{2807}', '\u{280F}',
 ];
 
-/// Run a function with a spinner animation. Falls back to static text if not a
-/// TTY.
-pub fn with_spinner<F, T>(message: &str, f: F) -> T
-where
-   F: FnOnce() -> T,
-{
+/// Run an async operation with a spinner animation. Falls back to static text
+/// if not a TTY.
+pub async fn with_spinner<F: Future<Output = T>, T>(message: &str, f: F) -> T {
    // No spinner if not a TTY or colors disabled
    if !colors_enabled() {
       eprintln!("{message}");
-      return f();
+      return f.await;
    }
-
    let (tx, rx) = std::sync::mpsc::channel::<()>();
    let msg = message.to_string();
 
@@ -324,22 +320,21 @@ where
       }
    });
 
-   let result = f();
+   let result = f.await;
    tx.send(()).ok();
    spinner.join().ok();
    result
 }
 
-/// Run a function with a spinner, but show error on failure.
-pub fn with_spinner_result<F, T, E>(message: &str, f: F) -> Result<T, E>
-where
-   F: FnOnce() -> Result<T, E>,
-{
+/// Run an async operation with a spinner, but show error on failure.
+pub async fn with_spinner_result<F: Future<Output = Result<T, E>>, T, E>(
+   message: &str,
+   f: F,
+) -> Result<T, E> {
    if !colors_enabled() {
       eprintln!("{message}");
-      return f();
+      return f.await;
    }
-
    let (tx, rx) = std::sync::mpsc::channel::<bool>();
    let msg = message.to_string();
 
@@ -367,7 +362,7 @@ where
       }
    });
 
-   let result = f();
+   let result = f.await;
    tx.send(result.is_ok()).ok();
    spinner.join().ok();
    result

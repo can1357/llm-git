@@ -40,7 +40,7 @@ fn save_debug_output(dir: &Path, filename: &str, content: &str) -> Result<()> {
 }
 
 /// Run test mode for fixture-based testing
-fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+async fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    use llm_git::testing::{self, TestRunner, TestSummary};
 
    let fixtures_dir = args
@@ -77,7 +77,7 @@ fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
          TestRunner::new(&fixtures_dir, config.clone()).with_filter(args.test_filter.clone());
 
       println!("Updating golden files...");
-      let updated = runner.update_all()?;
+      let updated = runner.update_all().await?;
       println!("Updated {} fixtures:", updated.len());
       for name in &updated {
          println!("  ✓ {name}");
@@ -91,7 +91,7 @@ fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
    println!("Running fixture tests from {}...\n", fixtures_dir.display());
 
-   let results = runner.run_all()?;
+   let results = runner.run_all().await?;
 
    if results.is_empty() {
       println!("No fixtures found.");
@@ -296,7 +296,7 @@ fn build_footers(args: &Args) -> Vec<String> {
 
 /// Main generation pipeline: get diff/stat → truncate → analyze → summarize →
 /// build commit
-fn run_generation(
+async fn run_generation(
    config: &CommitConfig,
    args: &Args,
    token_counter: &tokens::TokenCounter,
@@ -384,7 +384,7 @@ fn run_generation(
       debug_output:    args.debug_output.as_deref(),
       debug_prefix:    None,
    };
-   let analysis = style::with_spinner("Generating conventional commit analysis", || {
+   let analysis = style::with_spinner("Generating conventional commit analysis", async {
       generate_analysis_with_map_reduce(
          &stat,
          &diff,
@@ -393,8 +393,8 @@ fn run_generation(
          &ctx,
          config,
          token_counter,
-      )
-   })?;
+      ).await
+   }).await?;
 
    // Save analysis debug output
    if let Some(debug_dir) = &args.debug_output {
@@ -410,7 +410,7 @@ fn run_generation(
    }
 
    let detail_points = analysis.body_texts();
-   let summary = style::with_spinner("Creating summary", || {
+   let summary = style::with_spinner("Creating summary", async {
       generate_summary_from_analysis(
          &stat,
          analysis.commit_type.as_str(),
@@ -420,8 +420,8 @@ fn run_generation(
          config,
          args.debug_output.as_deref(),
          None,
-      )
-   })
+      ).await
+   }).await
    .unwrap_or_else(|err| {
       eprintln!(
          "{}",
@@ -452,7 +452,7 @@ fn run_generation(
 }
 
 /// Post-process, validate, retry with fallback. Returns validation error if any
-fn validate_and_process(
+async fn validate_and_process(
    commit_msg: &mut ConventionalCommit,
    stat: &str,
    detail_points: &[String],
@@ -486,7 +486,7 @@ fn validate_and_process(
                config,
                None,
                None,
-            ) {
+            ).await {
                Ok(new_summary) => {
                   commit_msg.summary = new_summary;
                   continue; // Retry validation loop
@@ -552,7 +552,8 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
    Ok(())
 }
 
-fn main() -> miette::Result<()> {
+#[tokio::main]
+async fn main() -> miette::Result<()> {
    let args = Args::parse();
 
    // Load config and apply CLI overrides
@@ -568,17 +569,17 @@ fn main() -> miette::Result<()> {
 
    // Route to compose mode if --compose flag is present
    if args.compose {
-      return Ok(run_compose_mode(&args, &config)?);
+      return Ok(run_compose_mode(&args, &config).await?);
    }
 
    // Route to rewrite mode if --rewrite flag is present
    if args.rewrite {
-      return Ok(rewrite::run_rewrite_mode(&args, &config)?);
+      return Ok(rewrite::run_rewrite_mode(&args, &config).await?);
    }
 
    // Route to test mode if --test flag is present
    if args.test {
-      return Ok(run_test_mode(&args, &config)?);
+      return Ok(run_test_mode(&args, &config).await?);
    }
 
    // Auto-stage all changes if nothing staged in commit mode
@@ -635,7 +636,7 @@ fn main() -> miette::Result<()> {
    // Run changelog maintenance if not disabled (check both CLI flag and config)
    if !args.no_changelog
       && config.changelog_enabled
-      && let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config)
+      && let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config).await
    {
       // Don't fail the commit, just warn
       eprintln!("Warning: Changelog update failed: {e}");
@@ -649,7 +650,7 @@ fn main() -> miette::Result<()> {
    });
 
    // Run generation pipeline
-   let mut commit_msg = run_generation(&config, &args, &token_counter)?;
+   let mut commit_msg = run_generation(&config, &args, &token_counter).await?;
 
    // Get stat and detail points for validation retry
    let stat = get_git_stat(&args.mode, args.target.as_deref(), &args.dir, &config)?;
@@ -662,7 +663,7 @@ fn main() -> miette::Result<()> {
 
    // Validate and process
    let validation_failed =
-      validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config);
+      validate_and_process(&mut commit_msg, &stat, &detail_points, context.as_deref(), &config).await;
 
    if let Some(err) = &validation_failed {
       eprintln!("Warning: Generated message failed validation even after retry: {err}");

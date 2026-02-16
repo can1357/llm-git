@@ -1,4 +1,4 @@
-use std::{path::Path, sync::OnceLock, time::Duration};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,17 +16,6 @@ use crate::{
    validation::validate_commit_message,
 };
 
-static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-
-fn get_client() -> &'static reqwest::blocking::Client {
-   CLIENT.get_or_init(|| {
-      reqwest::blocking::Client::builder()
-         .timeout(Duration::from_secs(120))
-         .connect_timeout(Duration::from_secs(30))
-         .build()
-         .expect("Failed to build HTTP client")
-   })
-}
 
 #[derive(Debug, Serialize)]
 struct Message {
@@ -282,13 +271,13 @@ fn is_dependency_manifest(path: &str) -> bool {
 }
 
 /// Call AI to analyze and group changes for compose mode
-pub fn analyze_for_compose(
+pub async fn analyze_for_compose(
    diff: &str,
    stat: &str,
    config: &CommitConfig,
    max_commits: usize,
 ) -> Result<ComposeAnalysis> {
-   let client = get_client();
+   let client = crate::api::get_client(config);
 
    let tool = Tool {
       tool_type: "function".to_string(),
@@ -379,22 +368,18 @@ pub fn analyze_for_compose(
       messages:    vec![Message { role: "user".to_string(), content: prompt }],
    };
 
-   let response = client
+   let request_builder = client
       .post(format!("{}/chat/completions", config.api_base_url))
-      .header("content-type", "application/json")
-      .json(&request)
-      .send()
-      .map_err(CommitGenError::HttpError)?;
+      .header("content-type", "application/json");
 
-   let status = response.status();
+   let (status, response_text) =
+      crate::api::timed_send(request_builder.json(&request), "compose", &config.model).await?;
    if !status.is_success() {
-      let error_text = response
-         .text()
-         .unwrap_or_else(|_| "Unknown error".to_string());
-      return Err(CommitGenError::ApiError { status: status.as_u16(), body: error_text });
+      return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
    }
 
-   let api_response: ApiResponse = response.json().map_err(CommitGenError::HttpError)?;
+   let api_response: ApiResponse =
+      serde_json::from_str(&response_text).map_err(CommitGenError::JsonError)?;
 
    if api_response.choices.is_empty() {
       return Err(CommitGenError::Other(
@@ -686,7 +671,7 @@ fn validate_compose_groups(groups: &[ChangeGroup], full_diff: &str) -> Result<()
 }
 
 /// Execute compose: stage groups, generate messages, create commits
-pub fn execute_compose(
+pub async fn execute_compose(
    analysis: &ComposeAnalysis,
    config: &CommitConfig,
    args: &Args,
@@ -762,7 +747,7 @@ pub fn execute_compose(
          debug_prefix:    Some(&debug_prefix),
       };
       let message_analysis =
-         generate_conventional_analysis(&stat, &diff, &config.model, "", &ctx, config)?;
+         generate_conventional_analysis(&stat, &diff, &config.model, "", &ctx, config).await?;
 
       let analysis_body = message_analysis.body_texts();
 
@@ -775,7 +760,8 @@ pub fn execute_compose(
          config,
          args.debug_output.as_deref(),
          Some(&debug_prefix),
-      )?;
+      )
+      .await?;
 
       let final_commit_type = if dependency_only {
          CommitType::new("build")?
@@ -843,7 +829,7 @@ pub fn execute_compose(
 }
 
 /// Main entry point for compose mode
-pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+pub async fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    let max_rounds = config.compose_max_rounds;
 
    for round in 1..=max_rounds {
@@ -857,7 +843,7 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
       }
       println!("{}\n", style::info("Analyzing all changes for intelligent splitting..."));
 
-      run_compose_round(args, config, round)?;
+      run_compose_round(args, config, round).await?;
 
       // Check if there are remaining changes
       if args.compose_preview {
@@ -923,7 +909,7 @@ pub fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 }
 
 /// Run a single round of compose
-fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result<()> {
+async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result<()> {
    let token_counter = create_token_counter(config);
 
    // Get combined diff (staged + unstaged)
@@ -974,7 +960,7 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
    let max_commits = args.compose_max_commits.unwrap_or(3);
 
    println!("{}", style::info(&format!("Analyzing changes (max {max_commits} commits)...")));
-   let analysis = analyze_for_compose(&diff, &combined_stat, config, max_commits)?;
+   let analysis = analyze_for_compose(&diff, &combined_stat, config, max_commits).await?;
 
    // Validate groups for exhaustiveness and correctness
    println!("{}", style::info("Validating groups..."));
@@ -1043,7 +1029,7 @@ fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result
    }
 
    println!("\n{}", style::info(&format!("Executing compose (round {round})...")));
-   let hashes = execute_compose(&analysis, config, args)?;
+   let hashes = execute_compose(&analysis, config, args).await?;
 
    println!(
       "{}",

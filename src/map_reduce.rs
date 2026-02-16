@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use rayon::prelude::*;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -161,16 +161,15 @@ fn infer_file_description(filename: &str, content: &str) -> &'static str {
 }
 
 /// Map phase: analyze each file individually and extract observations
-fn map_phase(
+async fn map_phase(
    files: &[FileDiff],
    model_name: &str,
    config: &CommitConfig,
    counter: &TokenCounter,
 ) -> Result<Vec<FileObservation>> {
-   // Process files in parallel using rayon
-   let observations: Vec<Result<FileObservation>> = files
-      .par_iter()
-      .map(|file| {
+   // Process files concurrently using futures stream
+   let observations: Vec<Result<FileObservation>> = stream::iter(files.iter())
+      .map(|file| async {
          if file.is_binary {
             return Ok(FileObservation {
                file:         file.filename.clone(),
@@ -181,7 +180,6 @@ fn map_phase(
          }
 
          let context_header = generate_context_header(files, &file.filename);
-
          // Truncate large files to fit API limits
          let mut file_clone = file.clone();
          let file_tokens = file_clone.token_estimate(counter);
@@ -189,7 +187,7 @@ fn map_phase(
             let target_size = MAX_FILE_TOKENS * 4; // Convert tokens to chars
             file_clone.truncate(target_size);
             eprintln!(
-               "  {} truncated {} ({} → {} tokens)",
+               "  {} truncated {} ({} \u{2192} {} tokens)",
                crate::style::icons::WARNING,
                file.filename,
                file_tokens,
@@ -199,24 +197,26 @@ fn map_phase(
 
          let file_diff = reconstruct_diff(&[file_clone]);
 
-         map_single_file(&file.filename, &file_diff, &context_header, model_name, config)
+         map_single_file(&file.filename, &file_diff, &context_header, model_name, config).await
       })
-      .collect();
+      .buffer_unordered(8)
+      .collect()
+      .await;
 
    // Collect results, failing fast on first error
    observations.into_iter().collect()
 }
 
 /// Analyze a single file and extract observations
-fn map_single_file(
+async fn map_single_file(
    filename: &str,
    file_diff: &str,
    context_header: &str,
    model_name: &str,
    config: &CommitConfig,
 ) -> Result<FileObservation> {
-   retry_api_call(config, || {
-      let client = build_client(config);
+   retry_api_call(config, async move || {
+      let client = crate::api::get_client(config);
 
       let tool = build_observation_tool();
 
@@ -242,13 +242,8 @@ fn map_single_file(
                   request_builder.header("Authorization", format!("Bearer {api_key}"));
             }
 
-            let response = request_builder
-               .json(&request)
-               .send()
-               .map_err(CommitGenError::HttpError)?;
-
-            let status = response.status();
-            let response_text = response.text().map_err(CommitGenError::HttpError)?;
+            let (status, response_text) =
+               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name).await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -314,13 +309,8 @@ fn map_single_file(
                request_builder = request_builder.header("x-api-key", api_key);
             }
 
-            let response = request_builder
-               .json(&request)
-               .send()
-               .map_err(CommitGenError::HttpError)?;
-
-            let status = response.status();
-            let response_text = response.text().map_err(CommitGenError::HttpError)?;
+            let (status, response_text) =
+               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name).await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -485,19 +475,19 @@ fn map_single_file(
             ))
          },
       }
-   })
+   }).await
 }
 
 /// Reduce phase: synthesize all observations into final analysis
-pub fn reduce_phase(
+pub async fn reduce_phase(
    observations: &[FileObservation],
    stat: &str,
    scope_candidates: &str,
    model_name: &str,
    config: &CommitConfig,
 ) -> Result<ConventionalAnalysis> {
-   retry_api_call(config, || {
-      let client = build_client(config);
+   retry_api_call(config, async move || {
+      let client = crate::api::get_client(config);
 
       // Build type enum from config
       let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
@@ -536,13 +526,8 @@ pub fn reduce_phase(
                   request_builder.header("Authorization", format!("Bearer {api_key}"));
             }
 
-            let response = request_builder
-               .json(&request)
-               .send()
-               .map_err(CommitGenError::HttpError)?;
-
-            let status = response.status();
-            let response_text = response.text().map_err(CommitGenError::HttpError)?;
+            let (status, response_text) =
+               crate::api::timed_send(request_builder.json(&request), "map-reduce/reduce", model_name).await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -644,13 +629,8 @@ pub fn reduce_phase(
                request_builder = request_builder.header("x-api-key", api_key);
             }
 
-            let response = request_builder
-               .json(&request)
-               .send()
-               .map_err(CommitGenError::HttpError)?;
-
-            let status = response.status();
-            let response_text = response.text().map_err(CommitGenError::HttpError)?;
+            let (status, response_text) =
+               crate::api::timed_send(request_builder.json(&request), "map-reduce/reduce", model_name).await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -768,11 +748,11 @@ pub fn reduce_phase(
             Ok((false, Some(analysis)))
          },
       }
-   })
+   }).await
 }
 
 /// Run full map-reduce pipeline for large diffs
-pub fn run_map_reduce(
+pub async fn run_map_reduce(
    diff: &str,
    stat: &str,
    scope_candidates: &str,
@@ -800,25 +780,16 @@ pub fn run_map_reduce(
    crate::style::print_info(&format!("Running map-reduce on {file_count} files..."));
 
    // Map phase
-   let observations = map_phase(&files, model_name, config, counter)?;
+   let observations = map_phase(&files, model_name, config, counter).await?;
 
    // Reduce phase
-   reduce_phase(&observations, stat, scope_candidates, model_name, config)
+   reduce_phase(&observations, stat, scope_candidates, model_name, config).await
 }
 
 // ============================================================================
 // API types (duplicated from api.rs to avoid circular deps)
 // ============================================================================
 
-use std::time::Duration;
-
-fn build_client(config: &CommitConfig) -> reqwest::blocking::Client {
-   reqwest::blocking::Client::builder()
-      .timeout(Duration::from_secs(config.request_timeout_secs))
-      .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-      .build()
-      .expect("Failed to build HTTP client")
-}
 
 fn response_snippet(body: &str, limit: usize) -> String {
    if body.is_empty() {

@@ -1,4 +1,4 @@
-use std::{path::Path, thread, time::Duration};
+use std::{path::Path, sync::OnceLock, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,51 @@ use crate::{
    tokens::TokenCounter,
    types::{CommitSummary, ConventionalAnalysis},
 };
+
+/// Whether API tracing is enabled (`LLM_GIT_TRACE=1`).
+static TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Check if API request tracing is enabled via `LLM_GIT_TRACE` env var.
+fn trace_enabled() -> bool {
+   *TRACE_ENABLED.get_or_init(|| std::env::var("LLM_GIT_TRACE").is_ok())
+}
+
+/// Send an HTTP request with timing instrumentation.
+///
+/// Measures TTFT (time to first byte / headers received) separately from total
+/// response time. Logs to stderr when `LLM_GIT_TRACE=1`.
+pub async fn timed_send(
+   request_builder: reqwest::RequestBuilder,
+   label: &str,
+   model: &str,
+) -> std::result::Result<(reqwest::StatusCode, String), CommitGenError> {
+   let trace = trace_enabled();
+   let start = std::time::Instant::now();
+
+   let response = request_builder.send().await.map_err(CommitGenError::HttpError)?;
+
+   let ttft = start.elapsed();
+   let status = response.status();
+   let content_length = response.content_length();
+
+   let body = response.text().await.map_err(CommitGenError::HttpError)?;
+   let total = start.elapsed();
+
+   if trace {
+      let size_info = content_length
+         .map_or_else(|| format!("{}B", body.len()), |cl| format!("{}B (content-length: {cl})", body.len()));
+      // Clear spinner line before printing (spinner writes \r to stdout)
+      if !crate::style::pipe_mode() {
+         print!("\r\x1b[K");
+         std::io::Write::flush(&mut std::io::stdout()).ok();
+      }
+      eprintln!(
+         "[TRACE] {label} model={model} status={status} ttft={ttft:.0?} total={total:.0?} body={size_info}"
+      );
+   }
+
+   Ok((status, body))
+}
 
 // Prompts now loaded from config instead of compile-time constants
 
@@ -29,13 +74,21 @@ pub struct AnalysisContext<'a> {
    pub debug_prefix:    Option<&'a str>,
 }
 
-/// Build HTTP client with timeouts from config
-fn build_client(config: &CommitConfig) -> reqwest::blocking::Client {
-   reqwest::blocking::Client::builder()
-      .timeout(Duration::from_secs(config.request_timeout_secs))
-      .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-      .build()
-      .expect("Failed to build HTTP client")
+/// Shared HTTP client, lazily initialized on first use.
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Get (or create) the shared HTTP client with timeouts from config.
+///
+/// The first call initializes the client with the given config's timeouts;
+/// subsequent calls reuse the same client regardless of config values.
+pub fn get_client(config: &CommitConfig) -> &'static reqwest::Client {
+   CLIENT.get_or_init(|| {
+      reqwest::Client::builder()
+         .timeout(Duration::from_secs(config.request_timeout_secs))
+         .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+         .build()
+         .expect("Failed to build HTTP client")
+   })
 }
 
 fn debug_filename(prefix: Option<&str>, name: &str) -> String {
@@ -230,16 +283,14 @@ struct SummaryOutput {
 }
 
 /// Retry an API call with exponential backoff
-pub fn retry_api_call<F, T>(config: &CommitConfig, mut f: F) -> Result<T>
-where
-   F: FnMut() -> Result<(bool, Option<T>)>,
+pub async fn retry_api_call<T>(config: &CommitConfig, mut f: impl AsyncFnMut() -> Result<(bool, Option<T>)>) -> Result<T>
 {
    let mut attempt = 0;
 
    loop {
       attempt += 1;
 
-      match f() {
+      match f().await {
          Ok((false, Some(result))) => return Ok(result),
          Ok((false, None)) => {
             return Err(CommitGenError::Other("API call failed without result".to_string()));
@@ -253,7 +304,7 @@ where
                   attempt, config.max_retries, backoff_ms
                ))
             );
-            thread::sleep(Duration::from_millis(backoff_ms));
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
          },
          Ok((true, _last_err)) => {
             return Err(CommitGenError::ApiRetryExhausted {
@@ -271,7 +322,7 @@ where
                      e, attempt, config.max_retries, backoff_ms
                   ))
                );
-               thread::sleep(Duration::from_millis(backoff_ms));
+               tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                continue;
             }
             return Err(e);
@@ -311,7 +362,7 @@ pub fn format_types_description(config: &CommitConfig) -> String {
 }
 
 /// Generate conventional commit analysis using OpenAI-compatible API
-pub fn generate_conventional_analysis<'a>(
+pub async fn generate_conventional_analysis<'a>(
    stat: &'a str,
    diff: &'a str,
    model_name: &'a str,
@@ -319,8 +370,8 @@ pub fn generate_conventional_analysis<'a>(
    ctx: &AnalysisContext<'a>,
    config: &'a CommitConfig,
 ) -> Result<ConventionalAnalysis> {
-   retry_api_call(config, move || {
-      let client = build_client(config);
+   retry_api_call(config, async move || {
+      let client = get_client(config);
 
       // Build type enum from config
       let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
@@ -442,13 +493,8 @@ pub fn generate_conventional_analysis<'a>(
                   request_builder.header("Authorization", format!("Bearer {api_key}"));
             }
 
-            let response = request_builder
-               .json(&request)
-               .send()
-               .map_err(CommitGenError::HttpError)?;
-
-            let status = response.status();
-            let response_text = response.text().map_err(CommitGenError::HttpError)?;
+            let (status, response_text) =
+               timed_send(request_builder.json(&request), "analysis", model_name).await?;
             if debug_dir.is_some() {
                save_debug_output(
                   debug_dir,
@@ -581,13 +627,8 @@ pub fn generate_conventional_analysis<'a>(
                request_builder = request_builder.header("x-api-key", api_key);
             }
 
-            let response = request_builder
-               .json(&request)
-               .send()
-               .map_err(CommitGenError::HttpError)?;
-
-            let status = response.status();
-            let response_text = response.text().map_err(CommitGenError::HttpError)?;
+            let (status, response_text) =
+               timed_send(request_builder.json(&request), "analysis", model_name).await?;
             if debug_dir.is_some() {
                save_debug_output(
                   debug_dir,
@@ -715,7 +756,7 @@ pub fn generate_conventional_analysis<'a>(
             Ok((false, Some(analysis)))
          },
       }
-   })
+   }).await
 }
 
 /// Strip conventional commit type prefix if LLM included it in summary.
@@ -839,7 +880,7 @@ fn validate_summary_quality(
 
 /// Create commit summary using a smaller model focused on detail retention
 #[allow(clippy::too_many_arguments, reason = "summary generation needs debug hooks and context")]
-pub fn generate_summary_from_analysis<'a>(
+pub async fn generate_summary_from_analysis<'a>(
    stat: &'a str,
    commit_type: &'a str,
    scope: Option<&'a str>,
@@ -860,11 +901,11 @@ pub fn generate_summary_from_analysis<'a>(
          String::new()
       };
 
-      let result = retry_api_call(config, move || {
+      let result = retry_api_call(config, async move || {
          // Pass details as plain sentences (no numbering - prevents model parroting)
          let bullet_points = details.join("\n");
 
-         let client = build_client(config);
+         let client = get_client(config);
 
          let tool = Tool {
             tool_type: "function".to_string(),
@@ -947,13 +988,8 @@ pub fn generate_summary_from_analysis<'a>(
                      request_builder.header("Authorization", format!("Bearer {api_key}"));
                }
 
-               let response = request_builder
-                  .json(&request)
-                  .send()
-                  .map_err(CommitGenError::HttpError)?;
-
-               let status = response.status();
-               let response_text = response.text().map_err(CommitGenError::HttpError)?;
+               let (status, response_text) =
+                  timed_send(request_builder.json(&request), "summary", &config.model).await?;
                if debug_dir.is_some() {
                   save_debug_output(
                      debug_dir,
@@ -1051,13 +1087,8 @@ pub fn generate_summary_from_analysis<'a>(
                   request_builder = request_builder.header("x-api-key", api_key);
                }
 
-               let response = request_builder
-                  .json(&request)
-                  .send()
-                  .map_err(CommitGenError::HttpError)?;
-
-               let status = response.status();
-               let response_text = response.text().map_err(CommitGenError::HttpError)?;
+               let (status, response_text) =
+                  timed_send(request_builder.json(&request), "summary", &config.model).await?;
                if debug_dir.is_some() {
                   save_debug_output(
                      debug_dir,
@@ -1217,7 +1248,7 @@ pub fn generate_summary_from_analysis<'a>(
                Ok((false, Some(CommitSummary::new(cleaned, config.summary_hard_limit)?)))
             },
          }
-      });
+      }).await;
 
       match result {
          Ok(summary) => {
@@ -1416,7 +1447,7 @@ pub fn fallback_summary(
 ///
 /// This is the main entry point for analysis. It automatically routes to
 /// map-reduce when the diff exceeds the configured token threshold.
-pub fn generate_analysis_with_map_reduce<'a>(
+pub async fn generate_analysis_with_map_reduce<'a>(
    stat: &'a str,
    diff: &'a str,
    model_name: &'a str,
@@ -1432,9 +1463,9 @@ pub fn generate_analysis_with_map_reduce<'a>(
          "Large diff detected ({} tokens), using map-reduce...",
          counter.count_sync(diff)
       ));
-      run_map_reduce(diff, stat, scope_candidates_str, model_name, config, counter)
+      run_map_reduce(diff, stat, scope_candidates_str, model_name, config, counter).await
    } else {
-      generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config)
+      generate_conventional_analysis(stat, diff, model_name, scope_candidates_str, ctx, config).await
    }
 }
 

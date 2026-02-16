@@ -51,7 +51,7 @@ impl TestRunner {
    }
 
    /// Run all fixtures and return results
-   pub fn run_all(&self) -> Result<Vec<RunResult>> {
+   pub async fn run_all(&self) -> Result<Vec<RunResult>> {
       let fixture_names = discover_fixtures(&self.fixtures_dir)?;
       let mut results = Vec::new();
 
@@ -63,7 +63,7 @@ impl TestRunner {
             continue;
          }
 
-         let result = self.run_fixture(&name);
+         let result = self.run_fixture(&name).await;
          results.push(result);
       }
 
@@ -71,8 +71,8 @@ impl TestRunner {
    }
 
    /// Run a single fixture
-   pub fn run_fixture(&self, name: &str) -> RunResult {
-      match self.run_fixture_inner(name) {
+   pub async fn run_fixture(&self, name: &str) -> RunResult {
+      match self.run_fixture_inner(name).await {
          Ok(result) => result,
          Err(e) => RunResult {
             name:          name.to_string(),
@@ -89,7 +89,7 @@ impl TestRunner {
       }
    }
 
-   fn run_fixture_inner(&self, name: &str) -> Result<RunResult> {
+   async fn run_fixture_inner(&self, name: &str) -> Result<RunResult> {
       let fixture = Fixture::load(&self.fixtures_dir, name)?;
       let token_counter = create_token_counter(&self.config);
 
@@ -112,7 +112,7 @@ impl TestRunner {
          &ctx,
          &self.config,
          &token_counter,
-      )?;
+      ).await?;
 
       // Get summary
       let detail_points = analysis.body_texts();
@@ -125,7 +125,7 @@ impl TestRunner {
          &self.config,
          None,
          None,
-      )
+      ).await
       .unwrap_or_else(|_| {
          crate::api::fallback_summary(
             &fixture.input.stat,
@@ -154,7 +154,7 @@ impl TestRunner {
    }
 
    /// Update golden files for all fixtures
-   pub fn update_all(&self) -> Result<Vec<String>> {
+   pub async fn update_all(&self) -> Result<Vec<String>> {
       let fixture_names = discover_fixtures(&self.fixtures_dir)?;
       let mut updated = Vec::new();
 
@@ -165,7 +165,7 @@ impl TestRunner {
             continue;
          }
 
-         self.update_fixture(&name)?;
+         self.update_fixture(&name).await?;
          updated.push(name);
       }
 
@@ -173,8 +173,8 @@ impl TestRunner {
    }
 
    /// Update golden file for a single fixture
-   pub fn update_fixture(&self, name: &str) -> Result<()> {
-      let result = self.run_fixture(name);
+   pub async fn update_fixture(&self, name: &str) -> Result<()> {
+      let result = self.run_fixture(name).await;
 
       if let Some(err) = result.error {
          return Err(crate::error::CommitGenError::Other(format!(

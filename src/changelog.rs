@@ -10,7 +10,6 @@ use std::{
    collections::HashMap,
    path::{Path, PathBuf},
    process::Command,
-   thread,
    time::Duration,
 };
 
@@ -87,7 +86,7 @@ struct FunctionCall {
 /// 2. Detect changelog boundaries
 /// 3. For each boundary: generate entries via LLM, write to changelog
 /// 4. Stage modified changelogs
-pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> Result<()> {
+pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> Result<()> {
    let token_counter = create_token_counter(config);
 
    // Get list of staged files
@@ -179,7 +178,9 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
          &diff,
          existing_entries.as_deref(),
          config,
-      ) {
+      )
+      .await
+      {
          Ok(entries) => entries,
          Err(e) => {
             eprintln!(
@@ -234,7 +235,7 @@ pub fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig) -> R
 }
 
 /// Generate changelog entries via LLM
-fn generate_changelog_entries(
+async fn generate_changelog_entries(
    changelog_path: &Path,
    is_package_changelog: bool,
    stat: &str,
@@ -251,7 +252,7 @@ fn generate_changelog_entries(
       existing_entries,
    )?;
 
-   let response = call_changelog_api(&parts, config)?;
+   let response = call_changelog_api(&parts, config).await?;
 
    // Convert string keys to ChangelogCategory
    let mut result = HashMap::new();
@@ -267,15 +268,11 @@ fn generate_changelog_entries(
 }
 
 /// Call the LLM API for changelog generation
-fn call_changelog_api(
+async fn call_changelog_api(
    parts: &templates::PromptParts,
    config: &CommitConfig,
 ) -> Result<ChangelogResponse> {
-   let client = reqwest::blocking::Client::builder()
-      .timeout(Duration::from_secs(config.request_timeout_secs))
-      .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-      .build()
-      .expect("Failed to build HTTP client");
+   let client = crate::api::get_client(config);
 
    let model = config.model.clone();
 
@@ -365,12 +362,8 @@ fn call_changelog_api(
          request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
       }
 
-      let response = request_builder
-         .json(&request)
-         .send()
-         .map_err(CommitGenError::HttpError)?;
-
-      let status = response.status();
+      let (status, response_text) =
+         crate::api::timed_send(request_builder.json(&request), "changelog", &model).await?;
 
       if status.is_server_error() {
          if attempt < config.max_retries {
@@ -382,23 +375,16 @@ fn call_changelog_api(
                   config.max_retries
                ))
             );
-            thread::sleep(Duration::from_millis(backoff_ms));
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             continue;
          }
-         let error_text = response
-            .text()
-            .unwrap_or_else(|_| "Unknown error".to_string());
-         return Err(CommitGenError::ApiError { status: status.as_u16(), body: error_text });
+         return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
       }
 
       if !status.is_success() {
-         let error_text = response
-            .text()
-            .unwrap_or_else(|_| "Unknown error".to_string());
-         return Err(CommitGenError::ApiError { status: status.as_u16(), body: error_text });
+         return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
       }
 
-      let response_text = response.text().map_err(CommitGenError::HttpError)?;
 
       // Try to parse as structured tool call response first
       if let Ok(api_response) = serde_json::from_str::<ApiResponse>(&response_text) {

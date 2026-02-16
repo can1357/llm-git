@@ -1,7 +1,6 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
-use parking_lot::Mutex;
-use rayon::prelude::*;
+use futures::stream::{self, StreamExt};
 
 use crate::{
    analysis::extract_scope_candidates,
@@ -21,7 +20,7 @@ use crate::{
 };
 
 /// Run rewrite mode - regenerate all commit messages in history
-pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+pub async fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    // 1. Validate preconditions
    if !args.rewrite_dry_run
       && args.rewrite_preview.is_none()
@@ -72,7 +71,7 @@ pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    let mut rewrite_config = config.clone();
    rewrite_config.exclude_old_message = true;
 
-   let new_messages = generate_messages_parallel(&commits, &rewrite_config, args)?;
+   let new_messages = generate_messages_parallel(&commits, &rewrite_config, args).await?;
 
    // 6. Show results
    print_conversion_results(&commits, &new_messages);
@@ -108,94 +107,88 @@ pub fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    Ok(())
 }
 
-/// Generate new commit messages in parallel
-fn generate_messages_parallel(
+/// Generate new commit messages in parallel using async streams
+async fn generate_messages_parallel(
    commits: &[CommitMetadata],
    config: &CommitConfig,
    args: &Args,
 ) -> Result<Vec<String>> {
-   let new_messages = Arc::new(Mutex::new(vec![String::new(); commits.len()]));
-   let errors = Arc::new(Mutex::new(Vec::new()));
+   let mut results = vec![String::new(); commits.len()];
+   let mut errors = Vec::new();
 
-   rayon::ThreadPoolBuilder::new()
-      .num_threads(args.rewrite_parallel)
-      .build()
-      .map_err(|e| CommitGenError::Other(format!("Failed to create thread pool: {e}")))?
-      .install(|| {
-         commits.par_iter().enumerate().for_each(|(idx, commit)| {
-            match generate_for_commit(commit, config, &args.dir) {
-               Ok(new_msg) => {
-                  new_messages.lock()[idx].clone_from(&new_msg);
+   let outputs: Vec<(usize, std::result::Result<String, CommitGenError>)> =
+      stream::iter(commits.iter().enumerate())
+         .map(|(idx, commit)| async move {
+            (idx, generate_for_commit(commit, config, &args.dir).await)
+         })
+         .buffer_unordered(args.rewrite_parallel)
+         .collect()
+         .await;
 
-                  // Stream output
-                  let old = commit.message.lines().next().unwrap_or("");
-                  let new = new_msg.lines().next().unwrap_or("");
+   for (idx, result) in outputs {
+      match result {
+         Ok(new_msg) => {
+            let old = commits[idx].message.lines().next().unwrap_or("");
+            let new = new_msg.lines().next().unwrap_or("");
+            println!(
+               "[{:3}/{:3}] {}",
+               idx + 1,
+               commits.len(),
+               style::dim(&commits[idx].hash[..8])
+            );
+            println!(
+               "  {} {}",
+               style::error("-"),
+               style::dim(&TruncStr(old, 60).to_string())
+            );
+            println!("  {} {}", style::success("+"), TruncStr(new, 60));
+            println!();
+            results[idx].clone_from(&new_msg);
+         },
+         Err(e) => {
+            eprintln!(
+               "[{:3}/{:3}] {} {} {}",
+               idx + 1,
+               commits.len(),
+               style::dim(&commits[idx].hash[..8]),
+               style::error("❌ ERROR:"),
+               e
+            );
+            results[idx].clone_from(&commits[idx].message);
+            errors.push((idx, e.to_string()));
+         },
+      }
+   }
 
-                  println!("[{:3}/{:3}] {}", idx + 1, commits.len(), style::dim(&commit.hash[..8]));
-                  println!(
-                     "  {} {}",
-                     style::error("-"),
-                     style::dim(&TruncStr(old, 60).to_string())
-                  );
-                  println!("  {} {}", style::success("+"), TruncStr(new, 60));
-                  println!();
-               },
-               Err(e) => {
-                  eprintln!(
-                     "[{:3}/{:3}] {} {} {}",
-                     idx + 1,
-                     commits.len(),
-                     style::dim(&commit.hash[..8]),
-                     style::error("❌ ERROR:"),
-                     e
-                  );
-                  // Fallback to original message
-                  new_messages.lock()[idx].clone_from(&commit.message);
-                  errors.lock().push((idx, e.to_string()));
-               },
-            }
-         });
-      });
-
-   let final_messages = Arc::try_unwrap(new_messages).unwrap().into_inner();
-   let error_list = Arc::try_unwrap(errors).unwrap().into_inner();
-
-   if !error_list.is_empty() {
+   if !errors.is_empty() {
       eprintln!(
          "\n{} {} commits failed, kept original messages",
-         style::warning("⚠️"),
-         style::bold(&error_list.len().to_string())
+         style::warning("⚠\u{fe0f}"),
+         style::bold(&errors.len().to_string())
       );
    }
 
-   Ok(final_messages)
+   Ok(results)
 }
 
 /// Generate conventional commit message for a single commit
-fn generate_for_commit(
+async fn generate_for_commit(
    commit: &CommitMetadata,
    config: &CommitConfig,
    dir: &str,
 ) -> Result<String> {
    let token_counter = create_token_counter(config);
-
-   // Get diff and stat using commit hash as target (exclude old message for
    // rewrite)
    let diff = get_git_diff(&Mode::Commit, Some(&commit.hash), dir, config)?;
    let stat = get_git_stat(&Mode::Commit, Some(&commit.hash), dir, config)?;
-
-   // Truncate if needed
    let diff = if diff.len() > config.max_diff_length {
       smart_truncate_diff(&diff, config.max_diff_length, config, &token_counter)
    } else {
       diff
    };
-
    // Extract scope candidates
    let (scope_candidates_str, _) =
       extract_scope_candidates(&Mode::Commit, Some(&commit.hash), dir, config)?;
-
-   // Phase 1: Analysis
    let ctx = AnalysisContext {
       user_context:    None, // No user context for bulk rewrite
       recent_commits:  None, // No recent commits for rewrite mode
@@ -211,7 +204,8 @@ fn generate_for_commit(
       &scope_candidates_str,
       &ctx,
       config,
-   )?;
+   )
+   .await?;
 
    // Phase 2: Summary
    let body_texts = analysis.body_texts();
@@ -224,8 +218,8 @@ fn generate_for_commit(
       config,
       None,
       None,
-   )?;
-
+   )
+   .await?;
    // Build ConventionalCommit
    // Issue refs are now inlined in body items, so footers are empty (unless added
    // by CLI)
