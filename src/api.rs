@@ -184,7 +184,7 @@ fn supports_openai_prompt_cache_key(config: &CommitConfig) -> bool {
       .contains("api.openai.com")
 }
 
-/// Generate a deterministic cache key for OpenAI prompt-prefix routing.
+/// Generate a deterministic cache key for `OpenAI` prompt-prefix routing.
 pub fn openai_prompt_cache_key(
    config: &CommitConfig,
    model_name: &str,

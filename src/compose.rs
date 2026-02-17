@@ -130,13 +130,13 @@ groups: [
 
 Return groups in dependency order."#;
 
-const COMPOSE_USER_PROMPT: &str = r#"Split this git diff into 1-{MAX_COMMITS} logical, atomic commit groups.
+const COMPOSE_USER_PROMPT: &str = r"Split this git diff into 1-{MAX_COMMITS} logical, atomic commit groups.
 
 ## Git Stat
 {STAT}
 
 ## Git Diff
-{DIFF}"#;
+{DIFF}";
 
 #[derive(Deserialize)]
 struct ComposeResult {
