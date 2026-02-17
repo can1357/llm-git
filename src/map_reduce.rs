@@ -226,11 +226,14 @@ async fn map_single_file(
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
             let request = build_api_request(
+               config,
                model_name,
                config.temperature,
                vec![tool],
                &parts.system,
                &parts.user,
+               "map",
+               "default",
             );
 
             let mut request_builder = client
@@ -263,47 +266,48 @@ async fn map_single_file(
             response_text
          },
          ResolvedApiMode::AnthropicMessages => {
+            let prompt_caching = anthropic_prompt_caching_enabled(config);
+            let mut tools = vec![AnthropicTool {
+               name:         "create_file_observation".to_string(),
+               description:  "Extract observations from a single file's changes".to_string(),
+               input_schema: serde_json::json!({
+                  "type": "object",
+                  "properties": {
+                     "observations": {
+                        "type": "array",
+                        "description": "List of factual observations about what changed in this file",
+                        "items": {"type": "string"}
+                     }
+                  },
+                  "required": ["observations"]
+               }),
+               cache_control: None,
+            }];
+            cache_last_anthropic_tool(&mut tools, prompt_caching);
+
             let request = AnthropicRequest {
                model:       model_name.to_string(),
                max_tokens:  1500,
                temperature: config.temperature,
-               system:      if parts.system.is_empty() {
-                  None
-               } else {
-                  Some(parts.system.clone())
-               },
-               tools:       vec![AnthropicTool {
-                  name:         "create_file_observation".to_string(),
-                  description:  "Extract observations from a single file's changes".to_string(),
-                  input_schema: serde_json::json!({
-                     "type": "object",
-                     "properties": {
-                        "observations": {
-                           "type": "array",
-                           "description": "List of factual observations about what changed in this file",
-                           "items": {"type": "string"}
-                        }
-                     },
-                     "required": ["observations"]
-                  }),
-               }],
+               system:      anthropic_system_content(&parts.system, prompt_caching),
+               tools,
                tool_choice: Some(AnthropicToolChoice {
                   choice_type: "tool".to_string(),
                   name:        "create_file_observation".to_string(),
                }),
                messages:    vec![AnthropicMessage {
                   role:    "user".to_string(),
-                  content: vec![AnthropicContent {
-                     content_type: "text".to_string(),
-                     text:         parts.user,
-                  }],
+                  content: vec![anthropic_text_content(parts.user, false)],
                }],
             };
 
-            let mut request_builder = client
-               .post(anthropic_messages_url(&config.api_base_url))
-               .header("content-type", "application/json")
-               .header("anthropic-version", "2023-06-01");
+            let mut request_builder = append_anthropic_cache_beta_header(
+               client
+                  .post(anthropic_messages_url(&config.api_base_url))
+                  .header("content-type", "application/json")
+                  .header("anthropic-version", "2023-06-01"),
+               prompt_caching,
+            );
 
             if let Some(api_key) = &config.api_key {
                request_builder = request_builder.header("x-api-key", api_key);
@@ -510,11 +514,14 @@ pub async fn reduce_phase(
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
             let request = build_api_request(
+               config,
                model_name,
                config.temperature,
                vec![tool],
                &parts.system,
                &parts.user,
+               "reduce",
+               "default",
             );
 
             let mut request_builder = client
@@ -547,21 +554,13 @@ pub async fn reduce_phase(
             response_text
          },
          ResolvedApiMode::AnthropicMessages => {
-            let request = AnthropicRequest {
-               model:       model_name.to_string(),
-               max_tokens:  1500,
-               temperature: config.temperature,
-               system:      if parts.system.is_empty() {
-                  None
-               } else {
-                  Some(parts.system.clone())
-               },
-               tools:       vec![AnthropicTool {
-                  name:         "create_conventional_analysis".to_string(),
-                  description:  "Analyze changes and classify as conventional commit with type, \
-                                 scope, details, and metadata"
-                     .to_string(),
-                  input_schema: serde_json::json!({
+            let prompt_caching = anthropic_prompt_caching_enabled(config);
+            let mut tools = vec![AnthropicTool {
+               name:         "create_conventional_analysis".to_string(),
+               description:  "Analyze changes and classify as conventional commit with type, \
+                              scope, details, and metadata"
+                  .to_string(),
+               input_schema: serde_json::json!({
                      "type": "object",
                      "properties": {
                         "type": {
@@ -606,24 +605,33 @@ pub async fn reduce_phase(
                      },
                      "required": ["type", "details", "issue_refs"]
                   }),
-               }],
+               cache_control: None,
+            }];
+            cache_last_anthropic_tool(&mut tools, prompt_caching);
+
+            let request = AnthropicRequest {
+               model:       model_name.to_string(),
+               max_tokens:  1500,
+               temperature: config.temperature,
+               system:      anthropic_system_content(&parts.system, prompt_caching),
+               tools,
                tool_choice: Some(AnthropicToolChoice {
                   choice_type: "tool".to_string(),
                   name:        "create_conventional_analysis".to_string(),
                }),
                messages:    vec![AnthropicMessage {
                   role:    "user".to_string(),
-                  content: vec![AnthropicContent {
-                     content_type: "text".to_string(),
-                     text:         parts.user,
-                  }],
+                  content: vec![anthropic_text_content(parts.user, false)],
                }],
             };
 
-            let mut request_builder = client
-               .post(anthropic_messages_url(&config.api_base_url))
-               .header("content-type", "application/json")
-               .header("anthropic-version", "2023-06-01");
+            let mut request_builder = append_anthropic_cache_beta_header(
+               client
+                  .post(anthropic_messages_url(&config.api_base_url))
+                  .header("content-type", "application/json")
+                  .header("anthropic-version", "2023-06-01"),
+               prompt_caching,
+            );
 
             if let Some(api_key) = &config.api_key {
                request_builder = request_builder.header("x-api-key", api_key);
@@ -837,6 +845,47 @@ fn anthropic_messages_url(base_url: &str) -> String {
    }
 }
 
+fn prompt_cache_control() -> PromptCacheControl {
+   PromptCacheControl { control_type: "ephemeral".to_string() }
+}
+
+fn anthropic_prompt_caching_enabled(config: &CommitConfig) -> bool {
+   config.api_base_url.to_lowercase().contains("anthropic.com")
+}
+
+fn append_anthropic_cache_beta_header(
+   request_builder: reqwest::RequestBuilder,
+   enable_cache: bool,
+) -> reqwest::RequestBuilder {
+   if enable_cache {
+      request_builder.header("anthropic-beta", "prompt-caching-2024-07-31")
+   } else {
+      request_builder
+   }
+}
+
+fn anthropic_text_content(text: String, cache: bool) -> AnthropicContent {
+   AnthropicContent {
+      content_type: "text".to_string(),
+      text,
+      cache_control: cache.then(prompt_cache_control),
+   }
+}
+
+fn anthropic_system_content(system_prompt: &str, cache: bool) -> Option<Vec<AnthropicContent>> {
+   if system_prompt.trim().is_empty() {
+      None
+   } else {
+      Some(vec![anthropic_text_content(system_prompt.to_string(), cache)])
+   }
+}
+
+fn cache_last_anthropic_tool(tools: &mut [AnthropicTool], cache: bool) {
+   if cache && let Some(last) = tools.last_mut() {
+      last.cache_control = Some(prompt_cache_control());
+   }
+}
+
 fn extract_anthropic_content(
    response_text: &str,
    tool_name: &str,
@@ -911,13 +960,15 @@ struct Tool {
 
 #[derive(Debug, Serialize)]
 struct ApiRequest {
-   model:       String,
-   max_tokens:  u32,
-   temperature: f32,
-   tools:       Vec<Tool>,
+   model:            String,
+   max_tokens:       u32,
+   temperature:      f32,
+   tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice: Option<serde_json::Value>,
-   messages:    Vec<Message>,
+   tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   prompt_cache_key: Option<String>,
+   messages:         Vec<Message>,
 }
 
 #[derive(Debug, Serialize)]
@@ -926,18 +977,26 @@ struct AnthropicRequest {
    max_tokens:  u32,
    temperature: f32,
    #[serde(skip_serializing_if = "Option::is_none")]
-   system:      Option<String>,
+   system:      Option<Vec<AnthropicContent>>,
    tools:       Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice: Option<AnthropicToolChoice>,
    messages:    Vec<AnthropicMessage>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct PromptCacheControl {
+   #[serde(rename = "type")]
+   control_type: String,
+}
+
 #[derive(Debug, Serialize)]
 struct AnthropicTool {
-   name:         String,
-   description:  String,
-   input_schema: serde_json::Value,
+   name:          String,
+   description:   String,
+   input_schema:  serde_json::Value,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   cache_control: Option<PromptCacheControl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -953,11 +1012,13 @@ struct AnthropicMessage {
    content: Vec<AnthropicContent>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AnthropicContent {
    #[serde(rename = "type")]
-   content_type: String,
-   text:         String,
+   content_type:  String,
+   text:          String,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   cache_control: Option<PromptCacheControl>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1148,11 +1209,14 @@ fn build_analysis_tool(type_enum: &[&str]) -> Tool {
 }
 
 fn build_api_request(
+   config: &CommitConfig,
    model: &str,
    temperature: f32,
    tools: Vec<Tool>,
    system: &str,
    user: &str,
+   prompt_family: &str,
+   prompt_variant: &str,
 ) -> ApiRequest {
    let tool_name = tools.first().map(|t| t.function.name.clone());
 
@@ -1162,12 +1226,16 @@ fn build_api_request(
    }
    messages.push(Message { role: "user".to_string(), content: user.to_string() });
 
+   let prompt_cache_key =
+      crate::api::openai_prompt_cache_key(config, model, prompt_family, prompt_variant, system);
+
    ApiRequest {
       model: model.to_string(),
       max_tokens: 1500,
       temperature,
       tool_choice: tool_name
          .map(|name| serde_json::json!({ "type": "function", "function": { "name": name } })),
+      prompt_cache_key,
       tools,
       messages,
    }

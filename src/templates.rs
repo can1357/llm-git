@@ -15,18 +15,56 @@ pub struct PromptParts {
    pub user:   String,
 }
 
-/// Split a rendered prompt into system and user parts based on separator line.
-fn split_prompt_parts(rendered: &str) -> PromptParts {
-   const SEPARATOR: &str = "\n======USER=======\n";
-   if let Some(pos) = rendered.find(SEPARATOR) {
-      PromptParts {
-         system: rendered[..pos].trim().to_string(),
-         user:   rendered[pos + SEPARATOR.len()..].trim().to_string(),
-      }
+const USER_SEPARATOR: &str = "\n======USER=======\n";
+
+/// Split a prompt template into static system text and templated user content.
+fn split_prompt_template(template_content: &str) -> (Option<&str>, &str) {
+   if let Some(pos) = template_content.find(USER_SEPARATOR) {
+      let system = &template_content[..pos];
+      let user = &template_content[pos + USER_SEPARATOR.len()..];
+      (Some(system), user)
    } else {
-      // No separator - treat entire content as user message
-      PromptParts { system: String::new(), user: rendered.trim().to_string() }
+      (None, template_content)
    }
+}
+
+/// Ensure system prompt does not include Tera interpolation tags.
+fn ensure_static_system_prompt(system_template: &str, template_name: &str) -> Result<()> {
+   let has_template_tags = system_template.contains("{{")
+      || system_template.contains("{%")
+      || system_template.contains("{#");
+
+   if has_template_tags {
+      return Err(CommitGenError::Other(format!(
+         "Template '{template_name}' contains dynamic tags in system section. Move interpolated \
+          content below ======USER=======."
+      )));
+   }
+
+   Ok(())
+}
+
+/// Render a prompt template and enforce static system/user separation.
+fn render_prompt_parts(
+   template_name: &str,
+   template_content: &str,
+   context: &Context,
+) -> Result<PromptParts> {
+   let (system_template, user_template) = split_prompt_template(template_content);
+
+   let system = if let Some(system_template) = system_template {
+      ensure_static_system_prompt(system_template, template_name)?;
+      system_template.trim().to_string()
+   } else {
+      String::new()
+   };
+
+   let mut tera = TERA.lock();
+   let rendered_user = tera.render_str(user_template, context).map_err(|e| {
+      CommitGenError::Other(format!("Failed to render {template_name} prompt template: {e}"))
+   })?;
+
+   Ok(PromptParts { system, user: rendered_user.trim().to_string() })
 }
 
 /// Parameters for rendering the analysis prompt template.
@@ -297,16 +335,7 @@ pub fn render_analysis_prompt(p: &AnalysisParams<'_>) -> Result<PromptParts> {
       context.insert("project_context", ctx);
    }
 
-   // Render using render_str for dynamic templates
-   let mut tera = TERA.lock();
-
-   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
-      CommitGenError::Other(format!(
-         "Failed to render analysis prompt template '{}': {e}",
-         p.variant
-      ))
-   })?;
-   Ok(split_prompt_parts(&rendered))
+   render_prompt_parts(&format!("analysis/{}.md", p.variant), &template_content, &context)
 }
 
 /// Render summary prompt template
@@ -333,12 +362,7 @@ pub fn render_summary_prompt(
       context.insert("user_context", ctx);
    }
 
-   // Render using render_str for dynamic templates
-   let mut tera = TERA.lock();
-   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
-      CommitGenError::Other(format!("Failed to render summary prompt template '{variant}': {e}"))
-   })?;
-   Ok(split_prompt_parts(&rendered))
+   render_prompt_parts(&format!("summary/{variant}.md"), &template_content, &context)
 }
 
 /// Render changelog prompt template
@@ -363,12 +387,7 @@ pub fn render_changelog_prompt(
       context.insert("existing_entries", entries);
    }
 
-   // Render using render_str for dynamic templates
-   let mut tera = TERA.lock();
-   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
-      CommitGenError::Other(format!("Failed to render changelog prompt template '{variant}': {e}"))
-   })?;
-   Ok(split_prompt_parts(&rendered))
+   render_prompt_parts(&format!("changelog/{variant}.md"), &template_content, &context)
 }
 
 /// Render map prompt template (per-file observation extraction)
@@ -387,11 +406,7 @@ pub fn render_map_prompt(
       context.insert("context_header", context_header);
    }
 
-   let mut tera = TERA.lock();
-   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
-      CommitGenError::Other(format!("Failed to render map prompt template '{variant}': {e}"))
-   })?;
-   Ok(split_prompt_parts(&rendered))
+   render_prompt_parts(&format!("map/{variant}.md"), &template_content, &context)
 }
 
 /// Render reduce prompt template (synthesis from observations)
@@ -412,9 +427,5 @@ pub fn render_reduce_prompt(
       context.insert("types_description", types_desc);
    }
 
-   let mut tera = TERA.lock();
-   let rendered = tera.render_str(&template_content, &context).map_err(|e| {
-      CommitGenError::Other(format!("Failed to render reduce prompt template '{variant}': {e}"))
-   })?;
-   Ok(split_prompt_parts(&rendered))
+   render_prompt_parts(&format!("reduce/{variant}.md"), &template_content, &context)
 }

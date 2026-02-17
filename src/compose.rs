@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-   api::{AnalysisContext, generate_conventional_analysis},
+   api::{AnalysisContext, generate_conventional_analysis, openai_prompt_cache_key},
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
@@ -46,13 +46,15 @@ struct Tool {
 
 #[derive(Debug, Serialize)]
 struct ApiRequest {
-   model:       String,
-   max_tokens:  u32,
-   temperature: f32,
-   tools:       Vec<Tool>,
+   model:            String,
+   max_tokens:       u32,
+   temperature:      f32,
+   tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice: Option<serde_json::Value>,
-   messages:    Vec<Message>,
+   tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   prompt_cache_key: Option<String>,
+   messages:         Vec<Message>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -86,16 +88,10 @@ struct ApiResponse {
    choices: Vec<Choice>,
 }
 
-const COMPOSE_PROMPT: &str = r#"Split this git diff into 1-{MAX_COMMITS} logical, atomic commit groups.
-
-## Git Stat
-{STAT}
-
-## Git Diff
-{DIFF}
+const COMPOSE_SYSTEM_PROMPT: &str = r#"You split git diffs into logical, atomic commit groups for compose mode.
 
 ## Rules (CRITICAL)
-1. **EXHAUSTIVENESS**: You MUST account for 100% of changes. Every file and hunk in the diff above must appear in exactly one group.
+1. **EXHAUSTIVENESS**: You MUST account for 100% of changes. Every file and hunk in the provided diff must appear in exactly one group.
 2. **Atomicity**: Each group represents ONE logical change (feat/fix/refactor/etc.) that leaves codebase working.
 3. **Prefer fewer groups**: Default to 1-3 commits. Only split when changes are truly independent/separable.
 4. **Group related**: Implementation + tests go together. Refactoring + usage updates go together.
@@ -133,6 +129,14 @@ groups: [
 ❌ DON'T forget files. If diff shows 5 files, groups must cover all 5.
 
 Return groups in dependency order."#;
+
+const COMPOSE_USER_PROMPT: &str = r#"Split this git diff into 1-{MAX_COMMITS} logical, atomic commit groups.
+
+## Git Stat
+{STAT}
+
+## Git Diff
+{DIFF}"#;
 
 #[derive(Deserialize)]
 struct ComposeResult {
@@ -351,25 +355,35 @@ pub async fn analyze_for_compose(
       },
    };
 
-   let prompt = COMPOSE_PROMPT
+   let user_prompt = COMPOSE_USER_PROMPT
       .replace("{STAT}", stat)
       .replace("{DIFF}", diff)
       .replace("{MAX_COMMITS}", &max_commits.to_string());
+   let prompt_cache_key =
+      openai_prompt_cache_key(config, &config.model, "compose", "default", COMPOSE_SYSTEM_PROMPT);
 
    let request = ApiRequest {
-      model:       config.model.clone(),
-      max_tokens:  8000,
+      model: config.model.clone(),
+      max_tokens: 8000,
       temperature: config.temperature,
-      tools:       vec![tool],
+      tools: vec![tool],
       tool_choice: Some(
          serde_json::json!({ "type": "function", "function": { "name": "create_compose_analysis" } }),
       ),
-      messages:    vec![Message { role: "user".to_string(), content: prompt }],
+      prompt_cache_key,
+      messages: vec![
+         Message { role: "system".to_string(), content: COMPOSE_SYSTEM_PROMPT.to_string() },
+         Message { role: "user".to_string(), content: user_prompt },
+      ],
    };
 
-   let request_builder = client
+   let mut request_builder = client
       .post(format!("{}/chat/completions", config.api_base_url))
       .header("content-type", "application/json");
+
+   if let Some(api_key) = &config.api_key {
+      request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
+   }
 
    let (status, response_text) =
       crate::api::timed_send(request_builder.json(&request), "compose", &config.model).await?;

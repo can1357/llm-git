@@ -36,13 +36,15 @@ struct ChangelogResponse {
 // OpenAI-style API request/response types
 #[derive(Debug, Serialize)]
 struct ApiRequest {
-   model:       String,
-   max_tokens:  u32,
-   temperature: f32,
-   tools:       Vec<Tool>,
+   model:            String,
+   max_tokens:       u32,
+   temperature:      f32,
+   tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice: Option<serde_json::Value>,
-   messages:    Vec<Message>,
+   tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   prompt_cache_key: Option<String>,
+   messages:         Vec<Message>,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,6 +345,8 @@ async fn call_changelog_api(
       }
       messages.push(Message { role: "user".to_string(), content: parts.user.clone() });
 
+      let prompt_cache_key =
+         crate::api::openai_prompt_cache_key(config, &model, "changelog", "default", &parts.system);
       let request = ApiRequest {
          model: model.clone(),
          max_tokens: 2000,
@@ -351,6 +355,7 @@ async fn call_changelog_api(
          tool_choice: Some(
             serde_json::json!({ "type": "function", "function": { "name": "create_changelog_entries" } }),
          ),
+         prompt_cache_key,
          messages,
       };
 
