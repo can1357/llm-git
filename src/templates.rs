@@ -83,6 +83,7 @@ pub struct AnalysisParams<'a> {
 /// Embedded prompts folder (compiled into binary)
 #[derive(RustEmbed)]
 #[folder = "prompts/"]
+#[include = "**/*.md"]
 struct Prompts;
 
 /// Global Tera instance for template rendering (wrapped in Mutex for mutable
