@@ -1916,17 +1916,14 @@ pub async fn generate_fast_commit(
 }
 
 /// Convert a `FastCommitOutput` into a validated `ConventionalCommit`.
-fn build_fast_commit(output: FastCommitOutput, config: &CommitConfig) -> Result<ConventionalCommit> {
+fn build_fast_commit(
+   output: FastCommitOutput,
+   config: &CommitConfig,
+) -> Result<ConventionalCommit> {
    let commit_type = CommitType::new(&output.commit_type)?;
    let scope = output.scope.as_deref().map(Scope::new).transpose()?;
    let summary = CommitSummary::new(&output.summary, config.summary_hard_limit)?;
-   Ok(ConventionalCommit {
-      commit_type,
-      scope,
-      summary,
-      body: output.details,
-      footers: vec![],
-   })
+   Ok(ConventionalCommit { commit_type, scope, summary, body: output.details, footers: vec![] })
 }
 #[cfg(test)]
 mod tests {

@@ -986,7 +986,7 @@ pub struct Args {
    #[arg(trailing_var_arg = true)]
    pub context: Vec<String>,
 
-// === Fast mode args ===
+   // === Fast mode args ===
    /// Fast mode: single-call commit generation (skip changelog)
    #[arg(long, short = 'f', conflicts_with_all = ["compose", "rewrite", "test"])]
    pub fast: bool,

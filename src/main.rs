@@ -673,14 +673,9 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
    // Validate and process (reuse same logic as standard mode)
    let detail_points = commit_msg.body.clone();
-   let validation_failed = validate_and_process(
-      &mut commit_msg,
-      &stat,
-      &detail_points,
-      user_context.as_deref(),
-      config,
-   )
-   .await;
+   let validation_failed =
+      validate_and_process(&mut commit_msg, &stat, &detail_points, user_context.as_deref(), config)
+         .await;
 
    if let Some(err) = &validation_failed {
       eprintln!("Warning: Generated message failed validation even after retry: {err}");
@@ -728,9 +723,9 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
                 commit."
             )
          );
-         return Err(
-            CommitGenError::ValidationError("Commit message validation failed".to_string()),
-         );
+         return Err(CommitGenError::ValidationError(
+            "Commit message validation failed".to_string(),
+         ));
       }
 
       status!("\n{}", style::info("Preparing to commit..."));

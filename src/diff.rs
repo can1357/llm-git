@@ -334,10 +334,11 @@ pub fn reconstruct_diff(files: &[FileDiff]) -> String {
    result
 }
 
-/// Truncate a diff to fit within a line budget, distributing lines across files by priority.
+/// Truncate a diff to fit within a line budget, distributing lines across files
+/// by priority.
 ///
-/// Unlike `smart_truncate_diff` which works on byte budgets, this operates on line counts
-/// for simpler/faster context window management in fast mode.
+/// Unlike `smart_truncate_diff` which works on byte budgets, this operates on
+/// line counts for simpler/faster context window management in fast mode.
 pub fn truncate_diff_by_lines(diff: &str, max_lines: usize, config: &CommitConfig) -> String {
    let files = parse_diff(diff);
 
@@ -369,8 +370,7 @@ pub fn truncate_diff_by_lines(diff: &str, max_lines: usize, config: &CommitConfi
       // Allocate lines proportionally by priority
       #[allow(clippy::cast_sign_loss, reason = "priority and total are positive")]
       #[allow(clippy::cast_possible_truncation, reason = "line count fits in usize")]
-      let allocated =
-         ((max_lines as f64) * (priority as f64) / (total_priority as f64)) as usize;
+      let allocated = ((max_lines as f64) * (priority as f64) / (total_priority as f64)) as usize;
       let allocated = allocated.max(5); // minimum 5 lines per file
 
       if content_lines.len() <= allocated {

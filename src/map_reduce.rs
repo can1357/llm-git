@@ -1208,7 +1208,10 @@ fn build_analysis_tool(type_enum: &[&str]) -> Tool {
    }
 }
 
-#[allow(clippy::too_many_arguments, reason = "needs model/tool/prompt metadata to build deterministic cacheable request")]
+#[allow(
+   clippy::too_many_arguments,
+   reason = "needs model/tool/prompt metadata to build deterministic cacheable request"
+)]
 fn build_api_request(
    config: &CommitConfig,
    model: &str,

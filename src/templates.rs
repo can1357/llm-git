@@ -120,9 +120,7 @@ static TERA: LazyLock<Mutex<Tera>> = LazyLock::new(|| {
       {
          eprintln!("Warning: {e}");
       }
-      if let Err(e) =
-         register_directory_templates(&mut tera, &prompts_dir.join("fast"), "fast")
-      {
+      if let Err(e) = register_directory_templates(&mut tera, &prompts_dir.join("fast"), "fast") {
          eprintln!("Warning: {e}");
       }
    }
