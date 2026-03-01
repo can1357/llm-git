@@ -986,6 +986,11 @@ pub struct Args {
    #[arg(trailing_var_arg = true)]
    pub context: Vec<String>,
 
+// === Fast mode args ===
+   /// Fast mode: single-call commit generation (skip changelog)
+   #[arg(long, short = 'f', conflicts_with_all = ["compose", "rewrite", "test"])]
+   pub fast: bool,
+
    // === Rewrite mode args ===
    /// Rewrite git history to conventional commits
    #[arg(long, conflicts_with_all = ["target", "copy", "dry_run"])]
@@ -1107,6 +1112,7 @@ impl Default for Args {
          rewrite_dry_run:         false,
          rewrite_hide_old_types:  false,
          exclude_old_message:     false,
+         fast:                    false,
          compose:                 false,
          compose_preview:         false,
          compose_max_commits:     None,

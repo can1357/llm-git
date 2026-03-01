@@ -2,14 +2,14 @@ use std::path::Path;
 
 use analysis::extract_scope_candidates;
 use api::{
-   AnalysisContext, fallback_summary, generate_analysis_with_map_reduce,
+   AnalysisContext, fallback_summary, generate_analysis_with_map_reduce, generate_fast_commit,
    generate_summary_from_analysis,
 };
 use arboard::Clipboard;
 use clap::Parser;
 use compose::run_compose_mode;
 use config::CommitConfig;
-use diff::smart_truncate_diff;
+use diff::{smart_truncate_diff, truncate_diff_by_lines};
 use error::{CommitGenError, Result};
 use git::{
    ensure_git_repo, get_common_scopes, get_git_diff, get_git_stat, get_recent_commits, git_commit,
@@ -558,6 +558,202 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
    Ok(())
 }
 
+/// Auto-stage all changes if nothing is staged in the working directory.
+fn auto_stage_if_needed(dir: &str) -> Result<()> {
+   use std::process::Command;
+   let staged_check = Command::new("git")
+      .args(["diff", "--cached", "--quiet"])
+      .current_dir(dir)
+      .status()
+      .map_err(|e| CommitGenError::git(format!("Failed to check staged changes: {e}")))?;
+
+   // exit code 1 = changes exist, 0 = no changes
+   if staged_check.success() {
+      // Check if there are any unstaged changes before staging
+      let unstaged_check = Command::new("git")
+         .args(["diff", "--quiet"])
+         .current_dir(dir)
+         .status()
+         .map_err(|e| CommitGenError::git(format!("Failed to check unstaged changes: {e}")))?;
+
+      // Check for untracked files
+      let untracked_output = Command::new("git")
+         .args(["ls-files", "--others", "--exclude-standard"])
+         .current_dir(dir)
+         .output()
+         .map_err(|e| CommitGenError::git(format!("Failed to check untracked files: {e}")))?;
+
+      let has_untracked = !untracked_output.stdout.is_empty();
+
+      // If no unstaged changes AND no untracked files, working directory is clean
+      if unstaged_check.success() && !has_untracked {
+         return Err(CommitGenError::NoChanges {
+            mode: "working directory (nothing to commit)".to_string(),
+         });
+      }
+
+      status!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
+      let add_output = Command::new("git")
+         .args(["add", "-A"])
+         .current_dir(dir)
+         .output()
+         .map_err(|e| CommitGenError::git(format!("Failed to stage changes: {e}")))?;
+
+      if !add_output.status.success() {
+         let stderr = String::from_utf8_lossy(&add_output.stderr);
+         return Err(CommitGenError::git(format!("git add -A failed: {stderr}")));
+      }
+   }
+
+   Ok(())
+}
+
+/// Fast mode: single API call to generate a complete commit message.
+async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+   // Auto-stage if needed (same as standard mode)
+   if matches!(args.mode, Mode::Staged) {
+      auto_stage_if_needed(&args.dir)?;
+   }
+
+   // Skip changelog entirely in fast mode
+
+   let diff = get_git_diff(&args.mode, args.target.as_deref(), &args.dir, config)?;
+   let stat = get_git_stat(&args.mode, args.target.as_deref(), &args.dir, config)?;
+
+   // Save debug outputs if requested
+   if let Some(debug_dir) = &args.debug_output {
+      save_debug_output(debug_dir, "diff.patch", &diff)?;
+      save_debug_output(debug_dir, "stat.txt", &stat)?;
+   }
+
+   // Line-budget truncation for fast mode (10k lines)
+   let diff = truncate_diff_by_lines(&diff, 10_000, config);
+
+   // Extract scope candidates
+   let (scope_candidates_str, _is_wide) =
+      extract_scope_candidates(&args.mode, args.target.as_deref(), &args.dir, config)?;
+
+   // Resolve model: default to Haiku unless user explicitly specified -m
+   let model = if args.model.is_some() {
+      config.model.clone()
+   } else {
+      resolve_model_name("haiku")
+   };
+
+   let user_context = if args.context.is_empty() {
+      None
+   } else {
+      Some(args.context.join(" "))
+   };
+
+   status!(
+      "{} {} {} {}",
+      style::dim("›"),
+      style::dim("fast mode:"),
+      style::model(&model),
+      style::dim(&format!("(temp: {})", config.temperature))
+   );
+
+   status!("{} Analyzing {} changes...", style::info("›"), style::bold("staged"));
+
+   // Single API call generates the complete commit
+   let mut commit_msg = style::with_spinner("Generating commit (fast mode)", async {
+      generate_fast_commit(
+         &stat,
+         &diff,
+         &model,
+         &scope_candidates_str,
+         user_context.as_deref(),
+         config,
+         args.debug_output.as_deref(),
+      )
+      .await
+   })
+   .await?;
+
+   // Validate and process (reuse same logic as standard mode)
+   let detail_points = commit_msg.body.clone();
+   let validation_failed = validate_and_process(
+      &mut commit_msg,
+      &stat,
+      &detail_points,
+      user_context.as_deref(),
+      config,
+   )
+   .await;
+
+   if let Some(err) = &validation_failed {
+      eprintln!("Warning: Generated message failed validation even after retry: {err}");
+      eprintln!("You may want to manually edit the message before committing.");
+   }
+
+   // Check type-scope consistency
+   check_type_scope_consistency(&commit_msg, &stat);
+
+   // Format and display
+   let formatted_message = format_commit_message(&commit_msg);
+
+   // Save final commit message if debug output requested
+   if let Some(debug_dir) = &args.debug_output {
+      save_debug_output(debug_dir, "final.txt", &formatted_message)?;
+      let commit_json = serde_json::to_string_pretty(&commit_msg).map_err(CommitGenError::from)?;
+      save_debug_output(debug_dir, "commit.json", &commit_json)?;
+   }
+
+   // Display: pipe mode outputs raw message, TTY mode shows boxed format
+   if style::pipe_mode() {
+      print!("{formatted_message}");
+   } else {
+      println!(
+         "\n{}",
+         style::boxed_message("Generated Commit Message", &formatted_message, style::term_width())
+      );
+   }
+
+   // Copy to clipboard if requested
+   if args.copy {
+      match copy_to_clipboard(&formatted_message) {
+         Ok(()) => status!("\n{}", style::success("Copied to clipboard")),
+         Err(e) => status!("\nNote: Failed to copy to clipboard: {e}"),
+      }
+   }
+
+   // Commit for staged mode (unless dry-run)
+   if matches!(args.mode, Mode::Staged) {
+      if validation_failed.is_some() {
+         eprintln!(
+            "\n{}",
+            style::warning(
+               "Skipping commit due to validation failure. Use --dry-run to test or manually \
+                commit."
+            )
+         );
+         return Err(
+            CommitGenError::ValidationError("Commit message validation failed".to_string()),
+         );
+      }
+
+      status!("\n{}", style::info("Preparing to commit..."));
+      let sign = args.sign || config.gpg_sign;
+      let signoff = args.signoff || config.signoff;
+      git_commit(
+         &formatted_message,
+         args.dry_run,
+         &args.dir,
+         sign,
+         signoff,
+         args.skip_hooks,
+         args.amend,
+      )?;
+
+      // Auto-push if requested (only if not dry-run)
+      if args.push && !args.dry_run {
+         git_push(&args.dir)?;
+      }
+   }
+
+   Ok(())
+}
 #[tokio::main]
 async fn main() -> miette::Result<()> {
    let args = Args::parse();
@@ -588,55 +784,14 @@ async fn main() -> miette::Result<()> {
       return Ok(run_test_mode(&args, &config).await?);
    }
 
+   // Route to fast mode if --fast flag is present
+   if args.fast {
+      return Ok(run_fast_mode(&args, &config).await?);
+   }
+
    // Auto-stage all changes if nothing staged in commit mode
    if matches!(args.mode, Mode::Staged) {
-      use std::process::Command;
-      let staged_check = Command::new("git")
-         .args(["diff", "--cached", "--quiet"])
-         .current_dir(&args.dir)
-         .status()
-         .map_err(|e| CommitGenError::git(format!("Failed to check staged changes: {e}")))?;
-
-      // exit code 1 = changes exist, 0 = no changes
-      if staged_check.success() {
-         // Check if there are any unstaged changes before staging
-         let unstaged_check = Command::new("git")
-            .args(["diff", "--quiet"])
-            .current_dir(&args.dir)
-            .status()
-            .map_err(|e| CommitGenError::git(format!("Failed to check unstaged changes: {e}")))?;
-
-         // Check for untracked files
-         let untracked_output = Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard"])
-            .current_dir(&args.dir)
-            .output()
-            .map_err(|e| CommitGenError::git(format!("Failed to check untracked files: {e}")))?;
-
-         let has_untracked = !untracked_output.stdout.is_empty();
-
-         // If no unstaged changes AND no untracked files, working directory is clean
-         if unstaged_check.success() && !has_untracked {
-            return Err(
-               (CommitGenError::NoChanges {
-                  mode: "working directory (nothing to commit)".to_string(),
-               })
-               .into(),
-            );
-         }
-
-         status!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
-         let add_output = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&args.dir)
-            .output()
-            .map_err(|e| CommitGenError::git(format!("Failed to stage changes: {e}")))?;
-
-         if !add_output.status.success() {
-            let stderr = String::from_utf8_lossy(&add_output.stderr);
-            return Err(CommitGenError::git(format!("git add -A failed: {stderr}")).into());
-         }
-      }
+      auto_stage_if_needed(&args.dir)?;
    }
 
    // Run changelog maintenance if not disabled (check both CLI flag and config)

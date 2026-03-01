@@ -120,6 +120,11 @@ static TERA: LazyLock<Mutex<Tera>> = LazyLock::new(|| {
       {
          eprintln!("Warning: {e}");
       }
+      if let Err(e) =
+         register_directory_templates(&mut tera, &prompts_dir.join("fast"), "fast")
+      {
+         eprintln!("Warning: {e}");
+      }
    }
 
    // Register embedded templates that aren't overridden by user-provided files.
@@ -429,4 +434,28 @@ pub fn render_reduce_prompt(
    }
 
    render_prompt_parts(&format!("reduce/{variant}.md"), &template_content, &context)
+}
+
+/// Parameters for rendering the fast mode prompt template.
+pub struct FastPromptParams<'a> {
+   pub variant:          &'a str,
+   pub stat:             &'a str,
+   pub diff:             &'a str,
+   pub scope_candidates: &'a str,
+   pub user_context:     Option<&'a str>,
+}
+
+/// Render fast mode prompt template (single-call commit generation)
+pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
+   let template_content = load_template_file("fast", p.variant)?;
+
+   let mut context = Context::new();
+   context.insert("stat", p.stat);
+   context.insert("diff", p.diff);
+   context.insert("scope_candidates", p.scope_candidates);
+   if let Some(ctx) = p.user_context {
+      context.insert("user_context", ctx);
+   }
+
+   render_prompt_parts(&format!("fast/{}.md", p.variant), &template_content, &context)
 }

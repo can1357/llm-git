@@ -334,6 +334,75 @@ pub fn reconstruct_diff(files: &[FileDiff]) -> String {
    result
 }
 
+/// Truncate a diff to fit within a line budget, distributing lines across files by priority.
+///
+/// Unlike `smart_truncate_diff` which works on byte budgets, this operates on line counts
+/// for simpler/faster context window management in fast mode.
+pub fn truncate_diff_by_lines(diff: &str, max_lines: usize, config: &CommitConfig) -> String {
+   let files = parse_diff(diff);
+
+   // Count total content lines across all files
+   let total_lines: usize = files
+      .iter()
+      .map(|f| f.header.lines().count() + f.content.lines().count())
+      .sum();
+
+   if total_lines <= max_lines {
+      return diff.to_string();
+   }
+
+   // Calculate priority-weighted allocation
+   let total_priority: i32 = files.iter().map(|f| f.priority(config).max(1)).sum();
+
+   let mut result = String::with_capacity(diff.len());
+
+   for file in &files {
+      // Always include the header
+      result.push_str(&file.header);
+      if !file.header.ends_with('\n') {
+         result.push('\n');
+      }
+
+      let content_lines: Vec<&str> = file.content.lines().collect();
+      let priority = file.priority(config).max(1);
+
+      // Allocate lines proportionally by priority
+      #[allow(clippy::cast_sign_loss, reason = "priority and total are positive")]
+      #[allow(clippy::cast_possible_truncation, reason = "line count fits in usize")]
+      let allocated =
+         ((max_lines as f64) * (priority as f64) / (total_priority as f64)) as usize;
+      let allocated = allocated.max(5); // minimum 5 lines per file
+
+      if content_lines.len() <= allocated {
+         result.push_str(&file.content);
+         if !file.content.ends_with('\n') {
+            result.push('\n');
+         }
+      } else {
+         // Keep first half and last half of allocation
+         let keep_start = allocated / 2;
+         let keep_end = allocated - keep_start;
+         let omitted = content_lines.len() - keep_start - keep_end;
+
+         for line in &content_lines[..keep_start] {
+            result.push_str(line);
+            result.push('\n');
+         }
+
+         use std::fmt::Write;
+         writeln!(&mut result, "[... {omitted} lines omitted ...]")
+            .expect("writing to String is infallible");
+
+         for line in &content_lines[content_lines.len() - keep_end..] {
+            result.push_str(line);
+            result.push('\n');
+         }
+      }
+   }
+
+   result
+}
+
 #[cfg(test)]
 mod tests {
    use super::*;

@@ -7,7 +7,7 @@ use crate::{
    error::{CommitGenError, Result},
    templates,
    tokens::TokenCounter,
-   types::{CommitSummary, ConventionalAnalysis},
+   types::{CommitSummary, CommitType, ConventionalAnalysis, ConventionalCommit, Scope},
 };
 
 /// Whether API tracing is enabled (`LLM_GIT_TRACE=1`).
@@ -361,6 +361,16 @@ struct ApiResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SummaryOutput {
    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FastCommitOutput {
+   #[serde(rename = "type")]
+   commit_type: String,
+   scope:       Option<String>,
+   summary:     String,
+   #[serde(default)]
+   details:     Vec<String>,
 }
 
 /// Retry an API call with exponential backoff
@@ -1579,6 +1589,345 @@ pub async fn generate_analysis_with_map_reduce<'a>(
    }
 }
 
+/// Generate a complete commit in a single API call (fast mode).
+///
+/// Returns a `ConventionalCommit` directly — no separate summary phase.
+pub async fn generate_fast_commit(
+   stat: &str,
+   diff: &str,
+   model_name: &str,
+   scope_candidates_str: &str,
+   user_context: Option<&str>,
+   config: &CommitConfig,
+   debug_dir: Option<&Path>,
+) -> Result<ConventionalCommit> {
+   retry_api_call(config, async move || {
+      let client = get_client(config);
+
+      // Build type enum from config
+      let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
+
+      let parts = templates::render_fast_prompt(&templates::FastPromptParams {
+         variant:          "default",
+         stat,
+         diff,
+         scope_candidates: scope_candidates_str,
+         user_context,
+      })?;
+
+      let mode = config.resolved_api_mode(model_name);
+
+      let response_text = match mode {
+         ResolvedApiMode::ChatCompletions => {
+            let tool = Tool {
+               tool_type: "function".to_string(),
+               function:  Function {
+                  name:        "create_fast_commit".to_string(),
+                  description: "Generate a conventional commit from the given diff".to_string(),
+                  parameters:  FunctionParameters {
+                     param_type: "object".to_string(),
+                     properties: serde_json::json!({
+                        "type": {
+                           "type": "string",
+                           "enum": type_enum,
+                           "description": "Conventional commit type"
+                        },
+                        "scope": {
+                           "type": "string",
+                           "description": "Optional scope. Omit if unclear or cross-cutting."
+                        },
+                        "summary": {
+                           "type": "string",
+                           "description": "≤72 char past-tense summary, no type prefix, no trailing period"
+                        },
+                        "details": {
+                           "type": "array",
+                           "items": { "type": "string" },
+                           "description": "0-3 past-tense detail sentences ending with period"
+                        }
+                     }),
+                     required:   vec![
+                        "type".to_string(),
+                        "summary".to_string(),
+                        "details".to_string(),
+                     ],
+                  },
+               },
+            };
+
+            let prompt_cache_key = openai_prompt_cache_key(
+               config,
+               model_name,
+               "fast",
+               "default",
+               &parts.system,
+            );
+            let request = ApiRequest {
+               model:            model_name.to_string(),
+               max_tokens:       500,
+               temperature:      config.temperature,
+               tools:            vec![tool],
+               tool_choice:      Some(
+                  serde_json::json!({ "type": "function", "function": { "name": "create_fast_commit" } }),
+               ),
+               prompt_cache_key,
+               messages:         vec![
+                  Message { role: "system".to_string(), content: parts.system },
+                  Message { role: "user".to_string(), content: parts.user },
+               ],
+            };
+
+            if debug_dir.is_some() {
+               let request_json = serde_json::to_string_pretty(&request)?;
+               save_debug_output(debug_dir, &debug_filename(None, "fast_request.json"), &request_json)?;
+            }
+
+            let mut request_builder = client
+               .post(format!("{}/chat/completions", config.api_base_url))
+               .header("content-type", "application/json");
+
+            if let Some(api_key) = &config.api_key {
+               request_builder =
+                  request_builder.header("Authorization", format!("Bearer {api_key}"));
+            }
+
+            let (status, response_text) =
+               timed_send(request_builder.json(&request), "fast", model_name).await?;
+            if debug_dir.is_some() {
+               save_debug_output(
+                  debug_dir,
+                  &debug_filename(None, "fast_response.json"),
+                  &response_text,
+               )?;
+            }
+
+            if status.is_server_error() {
+               eprintln!(
+                  "{}",
+                  crate::style::error(&format!("Server error {status}: {response_text}"))
+               );
+               return Ok((true, None));
+            }
+
+            if !status.is_success() {
+               return Err(CommitGenError::ApiError {
+                  status: status.as_u16(),
+                  body:   response_text,
+               });
+            }
+
+            response_text
+         },
+         ResolvedApiMode::AnthropicMessages => {
+            let prompt_caching = anthropic_prompt_caching_enabled(config);
+            let mut tools = vec![AnthropicTool {
+               name:         "create_fast_commit".to_string(),
+               description:  "Generate a conventional commit from the given diff".to_string(),
+               input_schema: serde_json::json!({
+                  "type": "object",
+                  "properties": {
+                     "type": {
+                        "type": "string",
+                        "enum": type_enum,
+                        "description": "Conventional commit type"
+                     },
+                     "scope": {
+                        "type": "string",
+                        "description": "Optional scope. Omit if unclear or cross-cutting."
+                     },
+                     "summary": {
+                        "type": "string",
+                        "description": "≤72 char past-tense summary, no type prefix, no trailing period"
+                     },
+                     "details": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "0-3 past-tense detail sentences ending with period"
+                     }
+                  },
+                  "required": ["type", "summary", "details"]
+               }),
+               cache_control: None,
+            }];
+            cache_last_anthropic_tool(&mut tools, prompt_caching);
+
+            let request = AnthropicRequest {
+               model:       model_name.to_string(),
+               max_tokens:  500,
+               temperature: config.temperature,
+               system:      anthropic_system_content(&parts.system, prompt_caching),
+               tools,
+               tool_choice: Some(AnthropicToolChoice {
+                  choice_type: "tool".to_string(),
+                  name:        "create_fast_commit".to_string(),
+               }),
+               messages:    vec![AnthropicMessage {
+                  role:    "user".to_string(),
+                  content: vec![anthropic_text_content(parts.user, false)],
+               }],
+            };
+
+            if debug_dir.is_some() {
+               let request_json = serde_json::to_string_pretty(&request)?;
+               save_debug_output(debug_dir, &debug_filename(None, "fast_request.json"), &request_json)?;
+            }
+
+            let mut request_builder = append_anthropic_cache_beta_header(
+               client
+                  .post(anthropic_messages_url(&config.api_base_url))
+                  .header("content-type", "application/json")
+                  .header("anthropic-version", "2023-06-01"),
+               prompt_caching,
+            );
+
+            if let Some(api_key) = &config.api_key {
+               request_builder = request_builder.header("x-api-key", api_key);
+            }
+
+            let (status, response_text) =
+               timed_send(request_builder.json(&request), "fast", model_name).await?;
+            if debug_dir.is_some() {
+               save_debug_output(
+                  debug_dir,
+                  &debug_filename(None, "fast_response.json"),
+                  &response_text,
+               )?;
+            }
+
+            if status.is_server_error() {
+               eprintln!(
+                  "{}",
+                  crate::style::error(&format!("Server error {status}: {response_text}"))
+               );
+               return Ok((true, None));
+            }
+
+            if !status.is_success() {
+               return Err(CommitGenError::ApiError {
+                  status: status.as_u16(),
+                  body:   response_text,
+               });
+            }
+
+            response_text
+         },
+      };
+
+      if response_text.trim().is_empty() {
+         crate::style::warn("Model returned empty response body for fast commit; retrying.");
+         return Ok((true, None));
+      }
+
+      match mode {
+         ResolvedApiMode::ChatCompletions => {
+            let api_response: ApiResponse = serde_json::from_str(&response_text).map_err(|e| {
+               CommitGenError::Other(format!(
+                  "Failed to parse fast commit response JSON: {e}. Response body: {}",
+                  response_snippet(&response_text, 500)
+               ))
+            })?;
+
+            if api_response.choices.is_empty() {
+               return Err(CommitGenError::Other(
+                  "API returned empty response for fast commit".to_string(),
+               ));
+            }
+
+            let message = &api_response.choices[0].message;
+
+            if !message.tool_calls.is_empty() {
+               let tool_call = &message.tool_calls[0];
+               if tool_call.function.name.ends_with("create_fast_commit") {
+                  let args = &tool_call.function.arguments;
+                  if args.is_empty() {
+                     crate::style::warn(
+                        "Model returned empty function arguments. Model may not support function \
+                         calling properly.",
+                     );
+                     return Err(CommitGenError::Other(
+                        "Model returned empty function arguments - try using a Claude model \
+                         (sonnet/opus/haiku)"
+                           .to_string(),
+                     ));
+                  }
+                  let output: FastCommitOutput = serde_json::from_str(args).map_err(|e| {
+                     CommitGenError::Other(format!(
+                        "Failed to parse fast commit response: {}. Response was: {}",
+                        e,
+                        args.chars().take(200).collect::<String>()
+                     ))
+                  })?;
+                  let commit = build_fast_commit(output, config)?;
+                  return Ok((false, Some(commit)));
+               }
+            }
+
+            if let Some(content) = &message.content {
+               if content.trim().is_empty() {
+                  crate::style::warn("Model returned empty content for fast commit; retrying.");
+                  return Ok((true, None));
+               }
+               let output: FastCommitOutput =
+                  serde_json::from_str(content.trim()).map_err(|e| {
+                     CommitGenError::Other(format!(
+                        "Failed to parse fast commit content JSON: {e}. Content: {}",
+                        response_snippet(content, 500)
+                     ))
+                  })?;
+               let commit = build_fast_commit(output, config)?;
+               return Ok((false, Some(commit)));
+            }
+
+            Err(CommitGenError::Other("No fast commit found in API response".to_string()))
+         },
+         ResolvedApiMode::AnthropicMessages => {
+            let (tool_input, text_content) =
+               extract_anthropic_content(&response_text, "create_fast_commit")?;
+
+            if let Some(input) = tool_input {
+               let output: FastCommitOutput = serde_json::from_value(input).map_err(|e| {
+                  CommitGenError::Other(format!(
+                     "Failed to parse fast commit tool input: {e}. Response body: {}",
+                     response_snippet(&response_text, 500)
+                  ))
+               })?;
+               let commit = build_fast_commit(output, config)?;
+               return Ok((false, Some(commit)));
+            }
+
+            if text_content.trim().is_empty() {
+               crate::style::warn("Model returned empty content for fast commit; retrying.");
+               return Ok((true, None));
+            }
+
+            let output: FastCommitOutput = serde_json::from_str(text_content.trim())
+               .map_err(|e| {
+                  CommitGenError::Other(format!(
+                     "Failed to parse fast commit content JSON: {e}. Content: {}",
+                     response_snippet(&text_content, 500)
+                  ))
+               })?;
+            let commit = build_fast_commit(output, config)?;
+            Ok((false, Some(commit)))
+         },
+      }
+   })
+   .await
+}
+
+/// Convert a `FastCommitOutput` into a validated `ConventionalCommit`.
+fn build_fast_commit(output: FastCommitOutput, config: &CommitConfig) -> Result<ConventionalCommit> {
+   let commit_type = CommitType::new(&output.commit_type)?;
+   let scope = output.scope.as_deref().map(Scope::new).transpose()?;
+   let summary = CommitSummary::new(&output.summary, config.summary_hard_limit)?;
+   Ok(ConventionalCommit {
+      commit_type,
+      scope,
+      summary,
+      body: output.details,
+      footers: vec![],
+   })
+}
 #[cfg(test)]
 mod tests {
    use super::*;
