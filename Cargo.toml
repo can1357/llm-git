@@ -35,7 +35,7 @@ tera = "1.20"
 indexmap = { version = "2", features = ["serde"] }
 rust-embed = { version = "8.11", features = ["include-exclude"] }
 parking_lot = "0.12"
-owo-colors = "4.2"
+owo-colors = "4.3"
 supports-color = "3"
 terminal_size = "0.4"
 tiktoken-rs = "0.9"
