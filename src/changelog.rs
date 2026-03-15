@@ -352,9 +352,7 @@ async fn call_changelog_api(
          max_tokens: 2000,
          temperature: config.temperature,
          tools: vec![tool.clone()],
-         tool_choice: Some(
-            serde_json::json!({ "type": "function", "function": { "name": "create_changelog_entries" } }),
-         ),
+         tool_choice: Some(serde_json::json!("required")),
          prompt_cache_key,
          messages,
       };
