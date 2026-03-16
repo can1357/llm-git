@@ -113,6 +113,11 @@ pub struct CommitConfig {
    #[serde(default = "default_map_reduce_threshold")]
    pub map_reduce_threshold: usize,
 
+   /// Prefer provider-native structured outputs over tool calling when
+   /// supported
+   #[serde(default)]
+   pub structured_outputs: bool,
+
    /// Loaded analysis prompt (not in config file)
    #[serde(skip)]
    pub analysis_prompt: String,
@@ -160,6 +165,14 @@ const fn default_map_reduce_enabled() -> bool {
 
 const fn default_map_reduce_threshold() -> usize {
    30000 // ~30k tokens, roughly 120k characters
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+   match value.trim().to_lowercase().as_str() {
+      "1" | "true" | "yes" | "on" => Some(true),
+      "0" | "false" | "no" | "off" => Some(false),
+      _ => None,
+   }
 }
 
 fn parse_api_mode(value: &str) -> ApiMode {
@@ -255,6 +268,7 @@ impl Default for CommitConfig {
          changelog_enabled:       default_changelog_enabled(),
          map_reduce_enabled:      default_map_reduce_enabled(),
          map_reduce_threshold:    default_map_reduce_threshold(),
+         structured_outputs:      false,
          analysis_prompt:         String::new(),
          summary_prompt:          String::new(),
       }
@@ -262,6 +276,10 @@ impl Default for CommitConfig {
 }
 
 impl CommitConfig {
+   pub const fn structured_outputs_enabled(&self) -> bool {
+      self.structured_outputs
+   }
+
    pub fn resolved_api_mode(&self, _model_name: &str) -> ResolvedApiMode {
       match self.api_mode {
          ApiMode::ChatCompletions => ResolvedApiMode::ChatCompletions,
@@ -283,6 +301,7 @@ impl CommitConfig {
    /// - `LLM_GIT_API_URL` overrides `api_base_url`
    /// - `LLM_GIT_API_KEY` overrides `api_key`
    /// - `LLM_GIT_API_MODE` overrides `api_mode`
+   /// - `LLM_GIT_STRUCTURED_OUTPUTS` overrides `structured_outputs`
    pub fn load() -> Result<Self> {
       let config_path = if let Ok(custom_path) = std::env::var("LLM_GIT_CONFIG") {
          PathBuf::from(custom_path)
@@ -315,6 +334,12 @@ impl CommitConfig {
 
       if let Ok(api_mode) = std::env::var("LLM_GIT_API_MODE") {
          config.api_mode = parse_api_mode(&api_mode);
+      }
+
+      if let Ok(structured_outputs) = std::env::var("LLM_GIT_STRUCTURED_OUTPUTS")
+         && let Some(enabled) = parse_env_bool(&structured_outputs)
+      {
+         config.structured_outputs = enabled;
       }
    }
 
@@ -566,3 +591,27 @@ BEFORE RESPONDING:
 ✓ Aligns with detail points and diff stat
 ✓ Specific (names subsystem/artifact)
 "#;
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn test_parse_env_bool_variants() {
+      assert_eq!(parse_env_bool("1"), Some(true));
+      assert_eq!(parse_env_bool("true"), Some(true));
+      assert_eq!(parse_env_bool("yes"), Some(true));
+      assert_eq!(parse_env_bool("on"), Some(true));
+      assert_eq!(parse_env_bool("0"), Some(false));
+      assert_eq!(parse_env_bool("false"), Some(false));
+      assert_eq!(parse_env_bool("no"), Some(false));
+      assert_eq!(parse_env_bool("off"), Some(false));
+      assert_eq!(parse_env_bool("maybe"), None);
+   }
+
+   #[test]
+   fn test_structured_outputs_disabled_by_default() {
+      let config = CommitConfig::default();
+      assert!(!config.structured_outputs_enabled());
+   }
+}

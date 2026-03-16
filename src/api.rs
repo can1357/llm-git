@@ -199,6 +199,33 @@ pub fn openai_prompt_cache_key(
    Some(format!("llm-git:v1:{model_name}:{prompt_family}:{prompt_variant}"))
 }
 
+pub fn strict_json_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+   serde_json::json!({
+      "type": "object",
+      "properties": properties,
+      "required": required,
+      "additionalProperties": false
+   })
+}
+
+pub fn openai_response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
+   serde_json::json!({
+      "type": "json_schema",
+      "json_schema": {
+         "name": name,
+         "strict": true,
+         "schema": schema
+      }
+   })
+}
+
+pub fn anthropic_output_format(schema: serde_json::Value) -> serde_json::Value {
+   serde_json::json!({
+      "type": "json_schema",
+      "schema": schema
+   })
+}
+
 fn extract_anthropic_content(
    response_text: &str,
    tool_name: &str,
@@ -271,9 +298,12 @@ struct ApiRequest {
    model:            String,
    max_tokens:       u32,
    temperature:      f32,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
    tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   response_format:  Option<serde_json::Value>,
    #[serde(skip_serializing_if = "Option::is_none")]
    prompt_cache_key: Option<String>,
    messages:         Vec<Message>,
@@ -281,15 +311,18 @@ struct ApiRequest {
 
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
-   model:       String,
-   max_tokens:  u32,
-   temperature: f32,
+   model:         String,
+   max_tokens:    u32,
+   temperature:   f32,
    #[serde(skip_serializing_if = "Option::is_none")]
-   system:      Option<Vec<AnthropicContent>>,
-   tools:       Vec<AnthropicTool>,
+   system:        Option<Vec<AnthropicContent>>,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
+   tools:         Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice: Option<AnthropicToolChoice>,
-   messages:    Vec<AnthropicMessage>,
+   tool_choice:   Option<AnthropicToolChoice>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   output_format: Option<serde_json::Value>,
+   messages:      Vec<AnthropicMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -351,6 +384,8 @@ struct ResponseMessage {
    tool_calls: Vec<ToolCall>,
    #[serde(default)]
    content:    Option<String>,
+   #[serde(default)]
+   refusal:    Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -469,62 +504,66 @@ pub async fn generate_conventional_analysis<'a>(
       // Build type enum from config
       let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
 
-      // Define the conventional analysis tool
+      let analysis_properties = serde_json::json!({
+         "type": {
+            "type": "string",
+            "enum": type_enum,
+            "description": "Commit type based on change classification"
+         },
+         "scope": {
+            "type": "string",
+            "description": "Optional scope (module/component). Omit if unclear or multi-component."
+         },
+         "details": {
+            "type": "array",
+            "description": "Array of 0-6 detail items with changelog metadata.",
+            "items": {
+               "type": "object",
+               "properties": {
+                  "text": {
+                     "type": "string",
+                     "description": "Detail about change, starting with past-tense verb, ending with period"
+                  },
+                  "changelog_category": {
+                     "type": "string",
+                     "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
+                     "description": "Changelog category if user-visible. Omit for internal changes."
+                  },
+                  "user_visible": {
+                     "type": "boolean",
+                     "description": "True if this change affects users/API and should appear in changelog"
+                  }
+               },
+               "required": ["text", "user_visible"]
+            }
+         },
+         "issue_refs": {
+            "type": "array",
+            "description": "Issue numbers from context (e.g., ['#123', '#456']). Empty if none.",
+            "items": {
+               "type": "string"
+            }
+         }
+      });
+      let analysis_required = vec![
+         "type".to_string(),
+         "details".to_string(),
+         "issue_refs".to_string(),
+      ];
+      let analysis_schema = strict_json_schema(
+         analysis_properties.clone(),
+         &["type", "details", "issue_refs"],
+      );
       let tool = Tool {
          tool_type: "function".to_string(),
          function:  Function {
             name:        "create_conventional_analysis".to_string(),
-            description: "Analyze changes and classify as conventional commit with type, scope, \
-                          details, and metadata"
+            description: "Analyze changes and classify as conventional commit with type, scope, details, and metadata"
                .to_string(),
             parameters:  FunctionParameters {
                param_type: "object".to_string(),
-               properties: serde_json::json!({
-                  "type": {
-                     "type": "string",
-                     "enum": type_enum,
-                     "description": "Commit type based on change classification"
-                  },
-                  "scope": {
-                     "type": "string",
-                     "description": "Optional scope (module/component). Omit if unclear or multi-component."
-                  },
-                  "details": {
-                     "type": "array",
-                     "description": "Array of 0-6 detail items with changelog metadata.",
-                     "items": {
-                        "type": "object",
-                        "properties": {
-                           "text": {
-                              "type": "string",
-                              "description": "Detail about change, starting with past-tense verb, ending with period"
-                           },
-                           "changelog_category": {
-                              "type": "string",
-                              "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
-                              "description": "Changelog category if user-visible. Omit for internal changes."
-                           },
-                           "user_visible": {
-                              "type": "boolean",
-                              "description": "True if this change affects users/API and should appear in changelog"
-                           }
-                        },
-                        "required": ["text", "user_visible"]
-                     }
-                  },
-                  "issue_refs": {
-                     "type": "array",
-                     "description": "Issue numbers from context (e.g., ['#123', '#456']). Empty if none.",
-                     "items": {
-                        "type": "string"
-                     }
-                  }
-               }),
-               required:   vec![
-                  "type".to_string(),
-                  "details".to_string(),
-                  "issue_refs".to_string(),
-               ],
+               properties: analysis_properties,
+               required:   analysis_required,
             },
          },
       };
@@ -564,8 +603,15 @@ pub async fn generate_conventional_analysis<'a>(
                model:            model_name.to_string(),
                max_tokens:       1000,
                temperature:      config.temperature,
-               tools:            vec![tool],
-                  tool_choice:      Some(serde_json::json!("required")),
+               tools:            if config.structured_outputs_enabled() { Vec::new() } else { vec![tool] },
+               tool_choice:      if config.structured_outputs_enabled() {
+                  None
+               } else {
+                  Some(serde_json::json!("required"))
+               },
+               response_format:  config
+                  .structured_outputs_enabled()
+                  .then(|| openai_response_format("conventional_analysis", analysis_schema.clone())),
                prompt_cache_key,
                messages:         vec![
                   Message { role: "system".to_string(), content: parts.system },
@@ -640,71 +686,40 @@ pub async fn generate_conventional_analysis<'a>(
             };
 
             let prompt_caching = anthropic_prompt_caching_enabled(config);
-            let mut tools = vec![AnthropicTool {
-               name:         "create_conventional_analysis".to_string(),
-               description:  "Analyze changes and classify as conventional commit with type, \
-                              scope, details, and metadata"
-                  .to_string(),
-               input_schema: serde_json::json!({
-                     "type": "object",
-                     "properties": {
-                        "type": {
-                           "type": "string",
-                           "enum": type_enum,
-                           "description": "Commit type based on change classification"
-                        },
-                        "scope": {
-                           "type": "string",
-                           "description": "Optional scope (module/component). Omit if unclear or multi-component."
-                        },
-                        "details": {
-                           "type": "array",
-                           "description": "Array of 0-6 detail items with changelog metadata.",
-                           "items": {
-                              "type": "object",
-                              "properties": {
-                                 "text": {
-                                    "type": "string",
-                                    "description": "Detail about change, starting with past-tense verb, ending with period"
-                                 },
-                                 "changelog_category": {
-                                    "type": "string",
-                                    "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
-                                    "description": "Changelog category if user-visible. Omit for internal changes."
-                                 },
-                                 "user_visible": {
-                                    "type": "boolean",
-                                    "description": "True if this change affects users/API and should appear in changelog"
-                                 }
-                              },
-                              "required": ["text", "user_visible"]
-                           }
-                        },
-                        "issue_refs": {
-                           "type": "array",
-                           "description": "Issue numbers from context (e.g., ['#123', '#456']). Empty if none.",
-                           "items": {
-                              "type": "string"
-                           }
-                        }
-                     },
-                     "required": ["type", "details", "issue_refs"]
-                  }),
-               cache_control: None,
-            }];
-            cache_last_anthropic_tool(&mut tools, prompt_caching);
+            let mut tools = if config.structured_outputs_enabled() {
+               Vec::new()
+            } else {
+               vec![AnthropicTool {
+                  name:         "create_conventional_analysis".to_string(),
+                  description:  "Analyze changes and classify as conventional commit with type, scope, \
+                                 details, and metadata"
+                     .to_string(),
+                  input_schema: analysis_schema.clone(),
+                  cache_control: None,
+               }]
+            };
+            if !config.structured_outputs_enabled() {
+               cache_last_anthropic_tool(&mut tools, prompt_caching);
+            }
 
             let request = AnthropicRequest {
-               model:       model_name.to_string(),
-               max_tokens:  1000,
-               temperature: config.temperature,
-               system:      anthropic_system_content(&parts.system, prompt_caching),
+               model:         model_name.to_string(),
+               max_tokens:    1000,
+               temperature:   config.temperature,
+               system:        anthropic_system_content(&parts.system, prompt_caching),
                tools,
-               tool_choice: Some(AnthropicToolChoice {
-                  choice_type: "tool".to_string(),
-                  name:        "create_conventional_analysis".to_string(),
-               }),
-               messages:    vec![AnthropicMessage {
+               tool_choice:   if config.structured_outputs_enabled() {
+                  None
+               } else {
+                  Some(AnthropicToolChoice {
+                     choice_type: "tool".to_string(),
+                     name:        "create_conventional_analysis".to_string(),
+                  })
+               },
+               output_format: config
+                  .structured_outputs_enabled()
+                  .then(|| anthropic_output_format(analysis_schema.clone())),
+               messages: vec![AnthropicMessage {
                   role:    "user".to_string(),
                   content: vec![anthropic_text_content(user_content, false)],
                }],
@@ -781,8 +796,12 @@ pub async fn generate_conventional_analysis<'a>(
             }
 
             let message = &api_response.choices[0].message;
+            if let Some(refusal) = &message.refusal {
+               return Err(CommitGenError::Other(format!(
+                  "Model refused change analysis: {refusal}"
+               )));
+            }
 
-            // Find the tool call in the response
             if !message.tool_calls.is_empty() {
                let tool_call = &message.tool_calls[0];
                if tool_call
@@ -813,7 +832,6 @@ pub async fn generate_conventional_analysis<'a>(
                }
             }
 
-            // Fallback: try to parse content as text
             if let Some(content) = &message.content {
                if content.trim().is_empty() {
                   crate::style::warn("Model returned empty content for analysis; retrying.");
@@ -1011,6 +1029,18 @@ pub async fn generate_summary_from_analysis<'a>(
 
          let client = get_client(config);
 
+         let summary_properties = serde_json::json!({
+            "summary": {
+               "type": "string",
+               "description": format!(
+                  "Single line summary, target {} chars (hard limit {}), past tense verb first.",
+                  config.summary_guideline,
+                  config.summary_hard_limit
+               ),
+               "maxLength": config.summary_hard_limit
+            }
+         });
+         let summary_schema = strict_json_schema(summary_properties.clone(), &["summary"]);
          let tool = Tool {
             tool_type: "function".to_string(),
             function:  Function {
@@ -1018,13 +1048,7 @@ pub async fn generate_summary_from_analysis<'a>(
                description: "Compose a git commit summary line from detail statements".to_string(),
                parameters:  FunctionParameters {
                   param_type: "object".to_string(),
-                  properties: serde_json::json!({
-                     "summary": {
-                        "type": "string",
-                        "description": format!("Single line summary, target {} chars (hard limit {}), past tense verb first.", config.summary_guideline, config.summary_hard_limit),
-                        "maxLength": config.summary_hard_limit
-                     }
-                  }),
+                  properties: summary_properties,
                   required:   vec!["summary".to_string()],
                },
             },
@@ -1069,8 +1093,15 @@ pub async fn generate_summary_from_analysis<'a>(
                   model:            config.model.clone(),
                   max_tokens:       200,
                   temperature:      config.temperature,
-                  tools:            vec![tool],
-                  tool_choice:      Some(serde_json::json!("required")),
+                  tools:            if config.structured_outputs_enabled() { Vec::new() } else { vec![tool] },
+                  tool_choice:      if config.structured_outputs_enabled() {
+                     None
+                  } else {
+                     Some(serde_json::json!("required"))
+                  },
+                  response_format:  config
+                     .structured_outputs_enabled()
+                     .then(|| openai_response_format("commit_summary", summary_schema.clone())),
                   prompt_cache_key,
                   messages:         vec![
                      Message { role: "system".to_string(), content: parts.system },
@@ -1145,36 +1176,52 @@ pub async fn generate_summary_from_analysis<'a>(
                let user_content = format!("{}{additional_constraint}", parts.user);
 
                let prompt_caching = anthropic_prompt_caching_enabled(config);
-               let mut tools = vec![AnthropicTool {
-                  name:         "create_commit_summary".to_string(),
-                  description:  "Compose a git commit summary line from detail statements"
-                     .to_string(),
-                  input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                           "summary": {
-                              "type": "string",
-                              "description": format!("Single line summary, target {} chars (hard limit {}), past tense verb first.", config.summary_guideline, config.summary_hard_limit),
-                              "maxLength": config.summary_hard_limit
-                           }
-                        },
-                        "required": ["summary"]
-                     }),
-                  cache_control: None,
-               }];
-               cache_last_anthropic_tool(&mut tools, prompt_caching);
+               let summary_schema = strict_json_schema(
+                  serde_json::json!({
+                     "summary": {
+                        "type": "string",
+                        "description": format!(
+                           "Single line summary, target {} chars (hard limit {}), past tense verb first.",
+                           config.summary_guideline,
+                           config.summary_hard_limit
+                        ),
+                        "maxLength": config.summary_hard_limit
+                     }
+                  }),
+                  &["summary"],
+               );
+               let mut tools = if config.structured_outputs_enabled() {
+                  Vec::new()
+               } else {
+                  vec![AnthropicTool {
+                     name:          "create_commit_summary".to_string(),
+                     description:   "Compose a git commit summary line from detail statements".to_string(),
+                     input_schema:  summary_schema.clone(),
+                     cache_control: None,
+                  }]
+               };
+               if !config.structured_outputs_enabled() {
+                  cache_last_anthropic_tool(&mut tools, prompt_caching);
+               }
 
                let request = AnthropicRequest {
-                  model:       config.model.clone(),
-                  max_tokens:  200,
-                  temperature: config.temperature,
-                  system:      anthropic_system_content(&parts.system, prompt_caching),
+                  model:         config.model.clone(),
+                  max_tokens:    200,
+                  temperature:   config.temperature,
+                  system:        anthropic_system_content(&parts.system, prompt_caching),
                   tools,
-                  tool_choice: Some(AnthropicToolChoice {
-                     choice_type: "tool".to_string(),
-                     name:        "create_commit_summary".to_string(),
-                  }),
-                  messages:    vec![AnthropicMessage {
+                  tool_choice:   if config.structured_outputs_enabled() {
+                     None
+                  } else {
+                     Some(AnthropicToolChoice {
+                        choice_type: "tool".to_string(),
+                        name:        "create_commit_summary".to_string(),
+                     })
+                  },
+                  output_format: config
+                     .structured_outputs_enabled()
+                     .then(|| anthropic_output_format(summary_schema.clone())),
+                  messages: vec![AnthropicMessage {
                      role:    "user".to_string(),
                      content: vec![anthropic_text_content(user_content, false)],
                   }],
@@ -1253,6 +1300,11 @@ pub async fn generate_summary_from_analysis<'a>(
                }
 
                let message_choice = &api_response.choices[0].message;
+               if let Some(refusal) = &message_choice.refusal {
+                  return Err(CommitGenError::Other(format!(
+                     "Model refused summary generation: {refusal}"
+                  )));
+               }
 
                if !message_choice.tool_calls.is_empty() {
                   let tool_call = &message_choice.tool_calls[0];
@@ -1614,6 +1666,35 @@ pub async fn generate_fast_commit(
 
       let response_text = match mode {
          ResolvedApiMode::ChatCompletions => {
+            let fast_properties = serde_json::json!({
+               "type": {
+                  "type": "string",
+                  "enum": type_enum,
+                  "description": "Conventional commit type"
+               },
+               "scope": {
+                  "type": "string",
+                  "description": "Optional scope. Omit if unclear or cross-cutting."
+               },
+               "summary": {
+                  "type": "string",
+                  "description": "≤72 char past-tense summary, no type prefix, no trailing period"
+               },
+               "details": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "0-3 past-tense detail sentences ending with period"
+               }
+            });
+            let fast_required = vec![
+               "type".to_string(),
+               "summary".to_string(),
+               "details".to_string(),
+            ];
+            let fast_schema = strict_json_schema(
+               fast_properties.clone(),
+               &["type", "summary", "details"],
+            );
             let tool = Tool {
                tool_type: "function".to_string(),
                function:  Function {
@@ -1621,31 +1702,8 @@ pub async fn generate_fast_commit(
                   description: "Generate a conventional commit from the given diff".to_string(),
                   parameters:  FunctionParameters {
                      param_type: "object".to_string(),
-                     properties: serde_json::json!({
-                        "type": {
-                           "type": "string",
-                           "enum": type_enum,
-                           "description": "Conventional commit type"
-                        },
-                        "scope": {
-                           "type": "string",
-                           "description": "Optional scope. Omit if unclear or cross-cutting."
-                        },
-                        "summary": {
-                           "type": "string",
-                           "description": "≤72 char past-tense summary, no type prefix, no trailing period"
-                        },
-                        "details": {
-                           "type": "array",
-                           "items": { "type": "string" },
-                           "description": "0-3 past-tense detail sentences ending with period"
-                        }
-                     }),
-                     required:   vec![
-                        "type".to_string(),
-                        "summary".to_string(),
-                        "details".to_string(),
-                     ],
+                     properties: fast_properties,
+                     required:   fast_required,
                   },
                },
             };
@@ -1661,8 +1719,15 @@ pub async fn generate_fast_commit(
                model:            model_name.to_string(),
                max_tokens:       500,
                temperature:      config.temperature,
-               tools:            vec![tool],
-               tool_choice:      Some(serde_json::json!("required")),
+               tools:            if config.structured_outputs_enabled() { Vec::new() } else { vec![tool] },
+               tool_choice:      if config.structured_outputs_enabled() {
+                  None
+               } else {
+                  Some(serde_json::json!("required"))
+               },
+               response_format:  config
+                  .structured_outputs_enabled()
+                  .then(|| openai_response_format("fast_commit", fast_schema.clone())),
                prompt_cache_key,
                messages:         vec![
                   Message { role: "system".to_string(), content: parts.system },
@@ -1713,48 +1778,61 @@ pub async fn generate_fast_commit(
          },
          ResolvedApiMode::AnthropicMessages => {
             let prompt_caching = anthropic_prompt_caching_enabled(config);
-            let mut tools = vec![AnthropicTool {
-               name:         "create_fast_commit".to_string(),
-               description:  "Generate a conventional commit from the given diff".to_string(),
-               input_schema: serde_json::json!({
-                  "type": "object",
-                  "properties": {
-                     "type": {
-                        "type": "string",
-                        "enum": type_enum,
-                        "description": "Conventional commit type"
-                     },
-                     "scope": {
-                        "type": "string",
-                        "description": "Optional scope. Omit if unclear or cross-cutting."
-                     },
-                     "summary": {
-                        "type": "string",
-                        "description": "≤72 char past-tense summary, no type prefix, no trailing period"
-                     },
-                     "details": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "0-3 past-tense detail sentences ending with period"
-                     }
+            let fast_schema = strict_json_schema(
+               serde_json::json!({
+                  "type": {
+                     "type": "string",
+                     "enum": type_enum,
+                     "description": "Conventional commit type"
                   },
-                  "required": ["type", "summary", "details"]
+                  "scope": {
+                     "type": "string",
+                     "description": "Optional scope. Omit if unclear or cross-cutting."
+                  },
+                  "summary": {
+                     "type": "string",
+                     "description": "≤72 char past-tense summary, no type prefix, no trailing period"
+                  },
+                  "details": {
+                     "type": "array",
+                     "items": { "type": "string" },
+                     "description": "0-3 past-tense detail sentences ending with period"
+                  }
                }),
-               cache_control: None,
-            }];
-            cache_last_anthropic_tool(&mut tools, prompt_caching);
+               &["type", "summary", "details"],
+            );
+            let mut tools = if config.structured_outputs_enabled() {
+               Vec::new()
+            } else {
+               vec![AnthropicTool {
+                  name:          "create_fast_commit".to_string(),
+                  description:   "Generate a conventional commit from the given diff".to_string(),
+                  input_schema:  fast_schema.clone(),
+                  cache_control: None,
+               }]
+            };
+            if !config.structured_outputs_enabled() {
+               cache_last_anthropic_tool(&mut tools, prompt_caching);
+            }
 
             let request = AnthropicRequest {
-               model:       model_name.to_string(),
-               max_tokens:  500,
-               temperature: config.temperature,
-               system:      anthropic_system_content(&parts.system, prompt_caching),
+               model:         model_name.to_string(),
+               max_tokens:    500,
+               temperature:   config.temperature,
+               system:        anthropic_system_content(&parts.system, prompt_caching),
                tools,
-               tool_choice: Some(AnthropicToolChoice {
-                  choice_type: "tool".to_string(),
-                  name:        "create_fast_commit".to_string(),
-               }),
-               messages:    vec![AnthropicMessage {
+               tool_choice:   if config.structured_outputs_enabled() {
+                  None
+               } else {
+                  Some(AnthropicToolChoice {
+                     choice_type: "tool".to_string(),
+                     name:        "create_fast_commit".to_string(),
+                  })
+               },
+               output_format: config
+                  .structured_outputs_enabled()
+                  .then(|| anthropic_output_format(fast_schema.clone())),
+               messages: vec![AnthropicMessage {
                   role:    "user".to_string(),
                   content: vec![anthropic_text_content(parts.user, false)],
                }],
@@ -1827,6 +1905,11 @@ pub async fn generate_fast_commit(
             }
 
             let message = &api_response.choices[0].message;
+            if let Some(refusal) = &message.refusal {
+               return Err(CommitGenError::Other(format!(
+                  "Model refused fast commit generation: {refusal}"
+               )));
+            }
 
             if !message.tool_calls.is_empty() {
                let tool_call = &message.tool_calls[0];
@@ -1922,6 +2005,37 @@ fn build_fast_commit(
 mod tests {
    use super::*;
    use crate::config::CommitConfig;
+
+   #[test]
+   fn test_strict_json_schema_disallows_extra_properties() {
+      let schema =
+         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
+      assert_eq!(schema["type"], "object");
+      assert_eq!(schema["required"], serde_json::json!(["summary"]));
+      assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+   }
+
+   #[test]
+   fn test_openai_response_format_uses_strict_json_schema() {
+      let schema =
+         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
+      let response_format = openai_response_format("commit_summary", schema.clone());
+
+      assert_eq!(response_format["type"], "json_schema");
+      assert_eq!(response_format["json_schema"]["name"], "commit_summary");
+      assert_eq!(response_format["json_schema"]["strict"], serde_json::json!(true));
+      assert_eq!(response_format["json_schema"]["schema"], schema);
+   }
+
+   #[test]
+   fn test_anthropic_output_format_wraps_schema() {
+      let schema =
+         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
+      let output_format = anthropic_output_format(schema.clone());
+
+      assert_eq!(output_format["type"], "json_schema");
+      assert_eq!(output_format["schema"], schema);
+   }
 
    #[test]
    fn test_validate_summary_quality_valid() {

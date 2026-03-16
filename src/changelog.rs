@@ -16,6 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+   api::{openai_response_format, strict_json_schema},
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
@@ -39,9 +40,12 @@ struct ApiRequest {
    model:            String,
    max_tokens:       u32,
    temperature:      f32,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
    tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   response_format:  Option<serde_json::Value>,
    #[serde(skip_serializing_if = "Option::is_none")]
    prompt_cache_key: Option<String>,
    messages:         Vec<Message>,
@@ -69,6 +73,8 @@ struct ResponseMessage {
    tool_calls: Vec<ToolCall>,
    #[serde(default)]
    content:    Option<String>,
+   #[serde(default)]
+   refusal:    Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,7 +284,58 @@ async fn call_changelog_api(
 
    let model = config.model.clone();
 
-   // Define the changelog entries tool with proper schema
+   let changelog_schema = strict_json_schema(
+      serde_json::json!({
+         "entries": {
+            "type": "object",
+            "description": "Changelog entries grouped by category",
+            "properties": {
+               "Added": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "New features or capabilities"
+               },
+               "Changed": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Changes to existing functionality"
+               },
+               "Fixed": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Bug fixes"
+               },
+               "Deprecated": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Features marked for removal"
+               },
+               "Removed": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Removed features"
+               },
+               "Security": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Security-related changes"
+               },
+               "Breaking Changes": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Breaking API or behavior changes"
+               }
+            },
+            "additionalProperties": false
+         }
+      }),
+      &["entries"],
+   );
+   let changelog_properties = changelog_schema
+      .get("properties")
+      .cloned()
+      .expect("changelog schema always includes properties");
+
    let tool = Tool {
       tool_type: "function".to_string(),
       function:  Function {
@@ -286,50 +343,7 @@ async fn call_changelog_api(
          description: "Generate changelog entries grouped by category".to_string(),
          parameters:  FunctionParameters {
             param_type: "object".to_string(),
-            properties: serde_json::json!({
-               "entries": {
-                  "type": "object",
-                  "description": "Changelog entries grouped by category",
-                  "properties": {
-                     "Added": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "New features or capabilities"
-                     },
-                     "Changed": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Changes to existing functionality"
-                     },
-                     "Fixed": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Bug fixes"
-                     },
-                     "Deprecated": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Features marked for removal"
-                     },
-                     "Removed": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Removed features"
-                     },
-                     "Security": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Security-related changes"
-                     },
-                     "Breaking Changes": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Breaking API or behavior changes"
-                     }
-                  },
-                  "additionalProperties": false
-               }
-            }),
+            properties: changelog_properties,
             required:   vec!["entries".to_string()],
          },
       },
@@ -351,8 +365,19 @@ async fn call_changelog_api(
          model: model.clone(),
          max_tokens: 2000,
          temperature: config.temperature,
-         tools: vec![tool.clone()],
-         tool_choice: Some(serde_json::json!("required")),
+         tools: if config.structured_outputs_enabled() {
+            Vec::new()
+         } else {
+            vec![tool.clone()]
+         },
+         tool_choice: if config.structured_outputs_enabled() {
+            None
+         } else {
+            Some(serde_json::json!("required"))
+         },
+         response_format: config
+            .structured_outputs_enabled()
+            .then(|| openai_response_format("changelog_entries", changelog_schema.clone())),
          prompt_cache_key,
          messages,
       };
@@ -391,6 +416,11 @@ async fn call_changelog_api(
       // Try to parse as structured tool call response first
       if let Ok(api_response) = serde_json::from_str::<ApiResponse>(&response_text) {
          let message = &api_response.choices[0].message;
+         if let Some(refusal) = &message.refusal {
+            return Err(CommitGenError::Other(format!(
+               "Model refused changelog generation: {refusal}"
+            )));
+         }
 
          // Check for tool calls (OpenAI format)
          if !message.tool_calls.is_empty() {

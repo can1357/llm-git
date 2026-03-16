@@ -9,7 +9,7 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-   api::retry_api_call,
+   api::{anthropic_output_format, openai_response_format, retry_api_call, strict_json_schema},
    config::{CommitConfig, ResolvedApiMode},
    diff::{FileDiff, parse_diff, reconstruct_diff},
    error::{CommitGenError, Result},
@@ -246,7 +246,8 @@ async fn map_single_file(
             }
 
             let (status, response_text) =
-               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name).await?;
+               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name)
+                  .await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -267,35 +268,39 @@ async fn map_single_file(
          },
          ResolvedApiMode::AnthropicMessages => {
             let prompt_caching = anthropic_prompt_caching_enabled(config);
-            let mut tools = vec![AnthropicTool {
-               name:         "create_file_observation".to_string(),
-               description:  "Extract observations from a single file's changes".to_string(),
-               input_schema: serde_json::json!({
-                  "type": "object",
-                  "properties": {
-                     "observations": {
-                        "type": "array",
-                        "description": "List of factual observations about what changed in this file",
-                        "items": {"type": "string"}
-                     }
-                  },
-                  "required": ["observations"]
-               }),
-               cache_control: None,
-            }];
-            cache_last_anthropic_tool(&mut tools, prompt_caching);
+            let observation_schema = build_observation_schema();
+            let mut tools = if config.structured_outputs_enabled() {
+               Vec::new()
+            } else {
+               vec![AnthropicTool {
+                  name:          "create_file_observation".to_string(),
+                  description:   "Extract observations from a single file's changes".to_string(),
+                  input_schema:  observation_schema.clone(),
+                  cache_control: None,
+               }]
+            };
+            if !config.structured_outputs_enabled() {
+               cache_last_anthropic_tool(&mut tools, prompt_caching);
+            }
 
             let request = AnthropicRequest {
-               model:       model_name.to_string(),
-               max_tokens:  1500,
+               model: model_name.to_string(),
+               max_tokens: 1500,
                temperature: config.temperature,
-               system:      anthropic_system_content(&parts.system, prompt_caching),
+               system: anthropic_system_content(&parts.system, prompt_caching),
                tools,
-               tool_choice: Some(AnthropicToolChoice {
-                  choice_type: "tool".to_string(),
-                  name:        "create_file_observation".to_string(),
-               }),
-               messages:    vec![AnthropicMessage {
+               tool_choice: if config.structured_outputs_enabled() {
+                  None
+               } else {
+                  Some(AnthropicToolChoice {
+                     choice_type: "tool".to_string(),
+                     name:        "create_file_observation".to_string(),
+                  })
+               },
+               output_format: config
+                  .structured_outputs_enabled()
+                  .then(|| anthropic_output_format(observation_schema.clone())),
+               messages: vec![AnthropicMessage {
                   role:    "user".to_string(),
                   content: vec![anthropic_text_content(parts.user, false)],
                }],
@@ -314,7 +319,8 @@ async fn map_single_file(
             }
 
             let (status, response_text) =
-               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name).await?;
+               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name)
+                  .await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -356,6 +362,11 @@ async fn map_single_file(
             }
 
             let message = &api_response.choices[0].message;
+            if let Some(refusal) = &message.refusal {
+               return Err(CommitGenError::Other(format!(
+                  "Model refused file observation: {refusal}"
+               )));
+            }
 
             if !message.tool_calls.is_empty() {
                let tool_call = &message.tool_calls[0];
@@ -479,7 +490,8 @@ async fn map_single_file(
             ))
          },
       }
-   }).await
+   })
+   .await
 }
 
 /// Reduce phase: synthesize all observations into final analysis
@@ -533,8 +545,12 @@ pub async fn reduce_phase(
                   request_builder.header("Authorization", format!("Bearer {api_key}"));
             }
 
-            let (status, response_text) =
-               crate::api::timed_send(request_builder.json(&request), "map-reduce/reduce", model_name).await?;
+            let (status, response_text) = crate::api::timed_send(
+               request_builder.json(&request),
+               "map-reduce/reduce",
+               model_name,
+            )
+            .await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -555,71 +571,41 @@ pub async fn reduce_phase(
          },
          ResolvedApiMode::AnthropicMessages => {
             let prompt_caching = anthropic_prompt_caching_enabled(config);
-            let mut tools = vec![AnthropicTool {
-               name:         "create_conventional_analysis".to_string(),
-               description:  "Analyze changes and classify as conventional commit with type, \
-                              scope, details, and metadata"
-                  .to_string(),
-               input_schema: serde_json::json!({
-                     "type": "object",
-                     "properties": {
-                        "type": {
-                           "type": "string",
-                           "enum": type_enum,
-                           "description": "Commit type based on change classification"
-                        },
-                        "scope": {
-                           "type": "string",
-                           "description": "Optional scope (module/component). Omit if unclear or multi-component."
-                        },
-                        "details": {
-                           "type": "array",
-                           "description": "Array of 0-6 detail items with changelog metadata.",
-                           "items": {
-                              "type": "object",
-                              "properties": {
-                                 "text": {
-                                    "type": "string",
-                                    "description": "Detail about change, starting with past-tense verb, ending with period"
-                                 },
-                                 "changelog_category": {
-                                    "type": "string",
-                                    "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
-                                    "description": "Changelog category if user-visible. Omit for internal changes."
-                                 },
-                                 "user_visible": {
-                                    "type": "boolean",
-                                    "description": "True if this change affects users/API and should appear in changelog"
-                                 }
-                              },
-                              "required": ["text", "user_visible"]
-                           }
-                        },
-                        "issue_refs": {
-                           "type": "array",
-                           "description": "Issue numbers from context (e.g., ['#123', '#456']). Empty if none.",
-                           "items": {
-                              "type": "string"
-                           }
-                        }
-                     },
-                     "required": ["type", "details", "issue_refs"]
-                  }),
-               cache_control: None,
-            }];
-            cache_last_anthropic_tool(&mut tools, prompt_caching);
+            let analysis_schema = build_analysis_schema(&type_enum);
+            let mut tools = if config.structured_outputs_enabled() {
+               Vec::new()
+            } else {
+               vec![AnthropicTool {
+                  name:          "create_conventional_analysis".to_string(),
+                  description:   "Analyze changes and classify as conventional commit with type, \
+                                  scope, details, and metadata"
+                     .to_string(),
+                  input_schema:  analysis_schema.clone(),
+                  cache_control: None,
+               }]
+            };
+            if !config.structured_outputs_enabled() {
+               cache_last_anthropic_tool(&mut tools, prompt_caching);
+            }
 
             let request = AnthropicRequest {
-               model:       model_name.to_string(),
-               max_tokens:  1500,
+               model: model_name.to_string(),
+               max_tokens: 1500,
                temperature: config.temperature,
-               system:      anthropic_system_content(&parts.system, prompt_caching),
+               system: anthropic_system_content(&parts.system, prompt_caching),
                tools,
-               tool_choice: Some(AnthropicToolChoice {
-                  choice_type: "tool".to_string(),
-                  name:        "create_conventional_analysis".to_string(),
-               }),
-               messages:    vec![AnthropicMessage {
+               tool_choice: if config.structured_outputs_enabled() {
+                  None
+               } else {
+                  Some(AnthropicToolChoice {
+                     choice_type: "tool".to_string(),
+                     name:        "create_conventional_analysis".to_string(),
+                  })
+               },
+               output_format: config
+                  .structured_outputs_enabled()
+                  .then(|| anthropic_output_format(analysis_schema.clone())),
+               messages: vec![AnthropicMessage {
                   role:    "user".to_string(),
                   content: vec![anthropic_text_content(parts.user, false)],
                }],
@@ -637,8 +623,12 @@ pub async fn reduce_phase(
                request_builder = request_builder.header("x-api-key", api_key);
             }
 
-            let (status, response_text) =
-               crate::api::timed_send(request_builder.json(&request), "map-reduce/reduce", model_name).await?;
+            let (status, response_text) = crate::api::timed_send(
+               request_builder.json(&request),
+               "map-reduce/reduce",
+               model_name,
+            )
+            .await?;
 
             if status.is_server_error() {
                eprintln!(
@@ -680,6 +670,11 @@ pub async fn reduce_phase(
             }
 
             let message = &api_response.choices[0].message;
+            if let Some(refusal) = &message.refusal {
+               return Err(CommitGenError::Other(format!(
+                  "Model refused synthesis request: {refusal}"
+               )));
+            }
 
             if !message.tool_calls.is_empty() {
                let tool_call = &message.tool_calls[0];
@@ -756,7 +751,8 @@ pub async fn reduce_phase(
             Ok((false, Some(analysis)))
          },
       }
-   }).await
+   })
+   .await
 }
 
 /// Run full map-reduce pipeline for large diffs
@@ -963,9 +959,12 @@ struct ApiRequest {
    model:            String,
    max_tokens:       u32,
    temperature:      f32,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
    tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   response_format:  Option<serde_json::Value>,
    #[serde(skip_serializing_if = "Option::is_none")]
    prompt_cache_key: Option<String>,
    messages:         Vec<Message>,
@@ -973,15 +972,18 @@ struct ApiRequest {
 
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
-   model:       String,
-   max_tokens:  u32,
-   temperature: f32,
+   model:         String,
+   max_tokens:    u32,
+   temperature:   f32,
    #[serde(skip_serializing_if = "Option::is_none")]
-   system:      Option<Vec<AnthropicContent>>,
-   tools:       Vec<AnthropicTool>,
+   system:        Option<Vec<AnthropicContent>>,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
+   tools:         Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice: Option<AnthropicToolChoice>,
-   messages:    Vec<AnthropicMessage>,
+   tool_choice:   Option<AnthropicToolChoice>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   output_format: Option<serde_json::Value>,
+   messages:      Vec<AnthropicMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1043,6 +1045,8 @@ struct ResponseMessage {
    tool_calls: Vec<ToolCall>,
    #[serde(default)]
    content:    Option<String>,
+   #[serde(default)]
+   refusal:    Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1130,7 +1134,28 @@ fn parse_string_to_observations(s: &str) -> Vec<String> {
       .collect()
 }
 
+fn build_observation_schema() -> serde_json::Value {
+   strict_json_schema(
+      serde_json::json!({
+         "observations": {
+            "type": "array",
+            "description": "List of factual observations about what changed in this file",
+            "items": {
+               "type": "string"
+            }
+         }
+      }),
+      &["observations"],
+   )
+}
+
 fn build_observation_tool() -> Tool {
+   let schema = build_observation_schema();
+   let properties = schema
+      .get("properties")
+      .cloned()
+      .expect("observation schema always includes properties");
+
    Tool {
       tool_type: "function".to_string(),
       function:  Function {
@@ -1138,22 +1163,67 @@ fn build_observation_tool() -> Tool {
          description: "Extract observations from a single file's changes".to_string(),
          parameters:  FunctionParameters {
             param_type: "object".to_string(),
-            properties: serde_json::json!({
-               "observations": {
-                  "type": "array",
-                  "description": "List of factual observations about what changed in this file",
-                  "items": {
-                     "type": "string"
-                  }
-               }
-            }),
-            required:   vec!["observations".to_string()],
+            properties,
+            required: vec!["observations".to_string()],
          },
       },
    }
 }
 
+fn build_analysis_schema(type_enum: &[&str]) -> serde_json::Value {
+   strict_json_schema(
+      serde_json::json!({
+         "type": {
+            "type": "string",
+            "enum": type_enum,
+            "description": "Commit type based on combined changes"
+         },
+         "scope": {
+            "type": "string",
+            "description": "Optional scope (module/component). Omit if unclear or multi-component."
+         },
+         "details": {
+            "type": "array",
+            "description": "Array of 0-6 detail items with changelog metadata.",
+            "items": {
+               "type": "object",
+               "properties": {
+                  "text": {
+                     "type": "string",
+                     "description": "Detail about change, starting with past-tense verb, ending with period"
+                  },
+                  "changelog_category": {
+                     "type": "string",
+                     "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
+                     "description": "Changelog category if user-visible. Omit for internal changes."
+                  },
+                  "user_visible": {
+                     "type": "boolean",
+                     "description": "True if this change affects users/API and should appear in changelog"
+                  }
+               },
+               "required": ["text", "user_visible"]
+            }
+         },
+         "issue_refs": {
+            "type": "array",
+            "description": "Issue numbers from context (e.g., ['#123', '#456']). Empty if none.",
+            "items": {
+               "type": "string"
+            }
+         }
+      }),
+      &["type", "details", "issue_refs"],
+   )
+}
+
 fn build_analysis_tool(type_enum: &[&str]) -> Tool {
+   let schema = build_analysis_schema(type_enum);
+   let properties = schema
+      .get("properties")
+      .cloned()
+      .expect("analysis schema always includes properties");
+
    Tool {
       tool_type: "function".to_string(),
       function:  Function {
@@ -1161,48 +1231,8 @@ fn build_analysis_tool(type_enum: &[&str]) -> Tool {
          description: "Synthesize observations into conventional commit analysis".to_string(),
          parameters:  FunctionParameters {
             param_type: "object".to_string(),
-            properties: serde_json::json!({
-               "type": {
-                  "type": "string",
-                  "enum": type_enum,
-                  "description": "Commit type based on combined changes"
-               },
-               "scope": {
-                  "type": "string",
-                  "description": "Optional scope (module/component). Omit if unclear or multi-component."
-               },
-               "details": {
-                  "type": "array",
-                  "description": "Array of 0-6 detail items with changelog metadata.",
-                  "items": {
-                     "type": "object",
-                     "properties": {
-                        "text": {
-                           "type": "string",
-                           "description": "Detail about change, starting with past-tense verb, ending with period"
-                        },
-                        "changelog_category": {
-                           "type": "string",
-                           "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
-                           "description": "Changelog category if user-visible. Omit for internal changes."
-                        },
-                        "user_visible": {
-                           "type": "boolean",
-                           "description": "True if this change affects users/API and should appear in changelog"
-                        }
-                     },
-                     "required": ["text", "user_visible"]
-                  }
-               },
-               "issue_refs": {
-                  "type": "array",
-                  "description": "Issue numbers from context (e.g., ['#123', '#456']). Empty if none.",
-                  "items": {
-                     "type": "string"
-                  }
-               }
-            }),
-            required:   vec!["type".to_string(), "details".to_string(), "issue_refs".to_string()],
+            properties,
+            required: vec!["type".to_string(), "details".to_string(), "issue_refs".to_string()],
          },
       },
    }
@@ -1223,6 +1253,21 @@ fn build_api_request(
    prompt_variant: &str,
 ) -> ApiRequest {
    let tool_name = tools.first().map(|t| t.function.name.clone());
+   let response_format = if config.structured_outputs_enabled() {
+      tools.first().map(|tool| {
+         let required = tool
+            .function
+            .parameters
+            .required
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+         let schema = strict_json_schema(tool.function.parameters.properties.clone(), &required);
+         openai_response_format(&tool.function.name, schema)
+      })
+   } else {
+      None
+   };
 
    let mut messages = Vec::new();
    if !system.is_empty() {
@@ -1237,9 +1282,18 @@ fn build_api_request(
       model: model.to_string(),
       max_tokens: 1500,
       temperature,
-      tool_choice: tool_name.map(|_| serde_json::json!("required")),
+      tools: if config.structured_outputs_enabled() {
+         Vec::new()
+      } else {
+         tools
+      },
+      tool_choice: if config.structured_outputs_enabled() {
+         None
+      } else {
+         tool_name.map(|_| serde_json::json!("required"))
+      },
+      response_format,
       prompt_cache_key,
-      tools,
       messages,
    }
 }
@@ -1251,6 +1305,46 @@ mod tests {
 
    fn test_counter() -> TokenCounter {
       TokenCounter::new("http://localhost:4000", None, "claude-sonnet-4.5")
+   }
+
+   #[test]
+   fn test_build_api_request_uses_tool_calling_by_default() {
+      let config = CommitConfig::default();
+      let request = build_api_request(
+         &config,
+         "claude-sonnet-4.5",
+         0.2,
+         vec![build_observation_tool()],
+         "system prompt",
+         "user prompt",
+         "map",
+         "default",
+      );
+      let value = serde_json::to_value(&request).expect("request should serialize to JSON");
+
+      assert!(value.get("tools").is_some());
+      assert!(value.get("tool_choice").is_some());
+      assert!(value.get("response_format").is_none());
+   }
+
+   #[test]
+   fn test_build_api_request_uses_structured_outputs_when_enabled() {
+      let config = CommitConfig { structured_outputs: true, ..Default::default() };
+      let request = build_api_request(
+         &config,
+         "claude-sonnet-4.5",
+         0.2,
+         vec![build_observation_tool()],
+         "system prompt",
+         "user prompt",
+         "map",
+         "default",
+      );
+      let value = serde_json::to_value(&request).expect("request should serialize to JSON");
+
+      assert!(value.get("tools").is_none());
+      assert!(value.get("tool_choice").is_none());
+      assert_eq!(value["response_format"]["type"], serde_json::json!("json_schema"));
    }
 
    #[test]
@@ -1404,21 +1498,24 @@ diff --git a/e.rs b/e.rs
    #[test]
    fn test_deserialize_observations_array() {
       let json = r#"{"observations": ["a", "b", "c"]}"#;
-      let result: FileObservationResponse = serde_json::from_str(json).unwrap();
+      let result: FileObservationResponse =
+         serde_json::from_str(json).expect("valid observation array JSON should deserialize");
       assert_eq!(result.observations, vec!["a", "b", "c"]);
    }
 
    #[test]
    fn test_deserialize_observations_stringified_array() {
       let json = r#"{"observations": "[\"a\", \"b\", \"c\"]"}"#;
-      let result: FileObservationResponse = serde_json::from_str(json).unwrap();
+      let result: FileObservationResponse = serde_json::from_str(json)
+         .expect("valid stringified observation array JSON should deserialize");
       assert_eq!(result.observations, vec!["a", "b", "c"]);
    }
 
    #[test]
    fn test_deserialize_observations_bullet_string() {
       let json = r#"{"observations": "- updated function\n- fixed bug"}"#;
-      let result: FileObservationResponse = serde_json::from_str(json).unwrap();
+      let result: FileObservationResponse =
+         serde_json::from_str(json).expect("valid bullet observation JSON should deserialize");
       assert_eq!(result.observations, vec!["updated function", "fixed bug"]);
    }
 }

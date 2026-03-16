@@ -3,7 +3,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-   api::{AnalysisContext, generate_conventional_analysis, openai_prompt_cache_key},
+   api::{
+      AnalysisContext, generate_conventional_analysis, openai_prompt_cache_key,
+      openai_response_format, strict_json_schema,
+   },
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
@@ -49,9 +52,12 @@ struct ApiRequest {
    model:            String,
    max_tokens:       u32,
    temperature:      f32,
+   #[serde(skip_serializing_if = "Vec::is_empty")]
    tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice:      Option<serde_json::Value>,
+   #[serde(skip_serializing_if = "Option::is_none")]
+   response_format:  Option<serde_json::Value>,
    #[serde(skip_serializing_if = "Option::is_none")]
    prompt_cache_key: Option<String>,
    messages:         Vec<Message>,
@@ -81,6 +87,8 @@ struct ResponseMessage {
    content:       Option<String>,
    #[serde(default)]
    function_call: Option<FunctionCall>,
+   #[serde(default)]
+   refusal:       Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -282,6 +290,74 @@ pub async fn analyze_for_compose(
 ) -> Result<ComposeAnalysis> {
    let client = crate::api::get_client(config);
 
+   let compose_schema = strict_json_schema(
+      serde_json::json!({
+         "groups": {
+            "type": "array",
+            "description": "Array of change groups in dependency order",
+            "items": {
+               "type": "object",
+               "properties": {
+                  "changes": {
+                     "type": "array",
+                     "description": "File changes with specific hunks",
+                     "items": {
+                        "type": "object",
+                        "properties": {
+                           "path": {
+                              "type": "string",
+                              "description": "File path"
+                           },
+                           "hunks": {
+                              "type": "array",
+                              "description": "Either ['ALL'] for entire file, or line range objects: [{start: 10, end: 25}]. Line numbers are 1-indexed from ORIGINAL file.",
+                              "items": {
+                                 "oneOf": [
+                                    { "type": "string", "const": "ALL" },
+                                    {
+                                       "type": "object",
+                                       "properties": {
+                                          "start": { "type": "integer", "minimum": 1 },
+                                          "end": { "type": "integer", "minimum": 1 }
+                                       },
+                                       "required": ["start", "end"]
+                                    }
+                                 ]
+                              }
+                           }
+                        },
+                        "required": ["path", "hunks"]
+                     }
+                  },
+                  "type": {
+                     "type": "string",
+                     "enum": ["feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci", "revert"],
+                     "description": "Commit type for this group"
+                  },
+                  "scope": {
+                     "type": "string",
+                     "description": "Optional scope (module/component). Omit if broad."
+                  },
+                  "rationale": {
+                     "type": "string",
+                     "description": "Brief explanation of why these changes belong together"
+                  },
+                  "dependencies": {
+                     "type": "array",
+                     "description": "Indices of groups this depends on (e.g., [0, 1])",
+                     "items": { "type": "integer" }
+                  }
+               },
+               "required": ["changes", "type", "rationale", "dependencies"]
+            }
+         }
+      }),
+      &["groups"],
+   );
+   let compose_properties = compose_schema
+      .get("properties")
+      .cloned()
+      .expect("compose schema always includes properties");
    let tool = Tool {
       tool_type: "function".to_string(),
       function:  Function {
@@ -289,67 +365,7 @@ pub async fn analyze_for_compose(
          description: "Split changes into logical commit groups with dependencies".to_string(),
          parameters:  FunctionParameters {
             param_type: "object".to_string(),
-            properties: serde_json::json!({
-               "groups": {
-                  "type": "array",
-                  "description": "Array of change groups in dependency order",
-                  "items": {
-                     "type": "object",
-                     "properties": {
-                        "changes": {
-                           "type": "array",
-                           "description": "File changes with specific hunks",
-                           "items": {
-                              "type": "object",
-                              "properties": {
-                                 "path": {
-                                    "type": "string",
-                                    "description": "File path"
-                                 },
-                                 "hunks": {
-                                    "type": "array",
-                                    "description": "Either ['ALL'] for entire file, or line range objects: [{start: 10, end: 25}]. Line numbers are 1-indexed from ORIGINAL file.",
-                                    "items": {
-                                       "oneOf": [
-                                          { "type": "string", "const": "ALL" },
-                                          {
-                                             "type": "object",
-                                             "properties": {
-                                                "start": { "type": "integer", "minimum": 1 },
-                                                "end": { "type": "integer", "minimum": 1 }
-                                             },
-                                             "required": ["start", "end"]
-                                          }
-                                       ]
-                                    }
-                                 }
-                              },
-                              "required": ["path", "hunks"]
-                           }
-                        },
-                        "type": {
-                           "type": "string",
-                           "enum": ["feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci", "revert"],
-                           "description": "Commit type for this group"
-                        },
-                        "scope": {
-                           "type": "string",
-                           "description": "Optional scope (module/component). Omit if broad."
-                        },
-                        "rationale": {
-                           "type": "string",
-                           "description": "Brief explanation of why these changes belong together"
-                        },
-                        "dependencies": {
-                           "type": "array",
-                           "description": "Indices of groups this depends on (e.g., [0, 1])",
-                           "items": { "type": "integer" }
-                        }
-                     },
-                     "required": ["changes", "type", "rationale", "dependencies"]
-                  }
-               }
-            }),
+            properties: compose_properties,
             required:   vec!["groups".to_string()],
          },
       },
@@ -366,8 +382,19 @@ pub async fn analyze_for_compose(
       model: config.model.clone(),
       max_tokens: 8000,
       temperature: config.temperature,
-      tools: vec![tool],
-      tool_choice: Some(serde_json::json!("required")),
+      tools: if config.structured_outputs_enabled() {
+         Vec::new()
+      } else {
+         vec![tool]
+      },
+      tool_choice: if config.structured_outputs_enabled() {
+         None
+      } else {
+         Some(serde_json::json!("required"))
+      },
+      response_format: config
+         .structured_outputs_enabled()
+         .then(|| openai_response_format("compose_analysis", compose_schema.clone())),
       prompt_cache_key,
       messages: vec![
          Message { role: "system".to_string(), content: COMPOSE_SYSTEM_PROMPT.to_string() },
@@ -402,6 +429,11 @@ pub async fn analyze_for_compose(
 
    for choice in &api_response.choices {
       let message = &choice.message;
+      if let Some(refusal) = &message.refusal {
+         last_parse_error =
+            Some(CommitGenError::Other(format!("Model refused compose analysis: {refusal}")));
+         continue;
+      }
 
       if let Some(tool_call) = message.tool_calls.first()
          && tool_call.function.name.ends_with("create_compose_analysis")
