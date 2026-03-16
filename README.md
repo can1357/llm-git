@@ -169,7 +169,7 @@ api_key = "sk-..."
 model = "gpt-4o"
 ```
 
-The client now prefers provider-native structured outputs, falls back to tool calling when unsupported, and only then falls back to parsing JSON content from the model response.
+The client now prefers provider-native structured outputs, falls back to tool calling when unsupported, and only then falls back to parsing JSON content from the model response. Anthropic models only use structured outputs on the official Anthropic base URL; routed Anthropic models fall back directly to tool calling.
 
 ### Commit Types
 

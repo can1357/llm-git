@@ -1,6 +1,8 @@
-use std::{path::Path, sync::OnceLock, time::Duration};
+use std::{collections::HashMap, path::Path, sync::{LazyLock, OnceLock}, time::Duration};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+use parking_lot::{Condvar, Mutex};
 
 use crate::{
    config::{CommitConfig, ResolvedApiMode},
@@ -11,11 +13,11 @@ use crate::{
 };
 
 /// Whether API tracing is enabled (`LLM_GIT_TRACE=1`).
-static TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+static TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var("LLM_GIT_TRACE").is_ok());
 
 /// Check if API request tracing is enabled via `LLM_GIT_TRACE` env var.
 fn trace_enabled() -> bool {
-   *TRACE_ENABLED.get_or_init(|| std::env::var("LLM_GIT_TRACE").is_ok())
+   *TRACE_ENABLED
 }
 
 /// Send an HTTP request with timing instrumentation.
@@ -427,6 +429,107 @@ fn build_anthropic_tool(
    tool
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuredOutputCapability {
+   Probing,
+   Supported,
+   Unsupported,
+}
+
+struct StructuredOutputCapabilityCache {
+   states:  Mutex<HashMap<String, StructuredOutputCapability>>,
+   condvar: Condvar,
+}
+
+static STRUCTURED_OUTPUT_CAPABILITIES: LazyLock<StructuredOutputCapabilityCache> =
+   LazyLock::new(|| StructuredOutputCapabilityCache {
+      states:  Mutex::new(HashMap::new()),
+      condvar: Condvar::new(),
+   });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuredOutputAttempt {
+   Probe,
+   Supported,
+   SkipUnsupported,
+}
+
+fn structured_output_cache_key(
+   config: &CommitConfig,
+   model: &str,
+   mode: ResolvedApiMode,
+ ) -> String {
+   format!(
+      "{:?}:{}:{}",
+      mode,
+      config.api_base_url.trim().to_lowercase(),
+      model.trim().to_lowercase()
+   )
+}
+
+fn begin_structured_output_attempt(
+   config: &CommitConfig,
+   model: &str,
+   mode: ResolvedApiMode,
+ ) -> StructuredOutputAttempt {
+   let key = structured_output_cache_key(config, model, mode);
+
+   loop {
+      let mut states = STRUCTURED_OUTPUT_CAPABILITIES.states.lock();
+      match states.get(&key).copied() {
+         Some(StructuredOutputCapability::Unsupported) => {
+            return StructuredOutputAttempt::SkipUnsupported;
+         },
+         Some(StructuredOutputCapability::Supported) => {
+            return StructuredOutputAttempt::Supported;
+         },
+         Some(StructuredOutputCapability::Probing) => {
+            STRUCTURED_OUTPUT_CAPABILITIES.condvar.wait(&mut states);
+         },
+         None => {
+            states.insert(key.clone(), StructuredOutputCapability::Probing);
+            return StructuredOutputAttempt::Probe;
+         },
+      }
+   }
+}
+
+fn update_structured_output_capability(
+   config: &CommitConfig,
+   model: &str,
+   mode: ResolvedApiMode,
+   state: Option<StructuredOutputCapability>,
+ ) -> bool {
+   let key = structured_output_cache_key(config, model, mode);
+   let mut states = STRUCTURED_OUTPUT_CAPABILITIES.states.lock();
+   let previous = match state {
+      Some(state) => states.insert(key, state),
+      None => states.remove(&key),
+   };
+   STRUCTURED_OUTPUT_CAPABILITIES.condvar.notify_all();
+
+   matches!(state, Some(StructuredOutputCapability::Unsupported))
+      && previous != Some(StructuredOutputCapability::Unsupported)
+}
+
+
+fn is_official_anthropic_base_url(api_base_url: &str) -> bool {
+   api_base_url.trim().to_lowercase().contains("api.anthropic.com")
+}
+
+fn is_anthropic_model(model: &str) -> bool {
+   let lower = model.trim().to_lowercase();
+   lower.starts_with("claude")
+      || lower.starts_with("anthropic/")
+      || lower.contains("/claude")
+      || lower.contains("anthropic.claude")
+}
+
+fn should_attempt_structured_output(config: &CommitConfig, model: &str) -> bool {
+   !is_anthropic_model(model) || is_official_anthropic_base_url(&config.api_base_url)
+}
+
+
 fn should_fallback_to_tool(status: reqwest::StatusCode, body: &str) -> bool {
    if matches!(status.as_u16(), 401 | 403 | 429) {
       return false;
@@ -823,18 +926,57 @@ where
 {
    retry_api_call(config, async move || {
       let mode = config.resolved_api_mode(spec.model);
+      let structured_attempt = if should_attempt_structured_output(config, spec.model) {
+         begin_structured_output_attempt(config, spec.model, mode)
+      } else {
+         StructuredOutputAttempt::SkipUnsupported
+      };
 
-      let structured_result = match send_oneshot_request(
-         config,
-         spec,
-         mode,
-         OneShotRequestKind::StructuredOutput,
-      )
-      .await?
-      {
-         OneShotRequestOutcome::Response(response_text) => Some(response_text),
-         OneShotRequestOutcome::Retry => return Ok((true, None)),
-         OneShotRequestOutcome::FallbackToTool => None,
+      let structured_result = match structured_attempt {
+         StructuredOutputAttempt::SkipUnsupported => None,
+         StructuredOutputAttempt::Probe | StructuredOutputAttempt::Supported => {
+            match send_oneshot_request(
+               config,
+               spec,
+               mode,
+               OneShotRequestKind::StructuredOutput,
+            )
+            .await?
+            {
+               OneShotRequestOutcome::Response(response_text) => {
+                  if structured_attempt == StructuredOutputAttempt::Probe {
+                     let _ = update_structured_output_capability(
+                        config,
+                        spec.model,
+                        mode,
+                        Some(StructuredOutputCapability::Supported),
+                     );
+                  }
+                  Some(response_text)
+               },
+               OneShotRequestOutcome::Retry => {
+                  if structured_attempt == StructuredOutputAttempt::Probe {
+                     let _ = update_structured_output_capability(config, spec.model, mode, None);
+                  }
+                  return Ok((true, None));
+               },
+               OneShotRequestOutcome::FallbackToTool => {
+                  let first_detection = update_structured_output_capability(
+                     config,
+                     spec.model,
+                     mode,
+                     Some(StructuredOutputCapability::Unsupported),
+                  );
+                  if first_detection {
+                     crate::style::warn(&format!(
+                        "Structured outputs unsupported for model {}. Using tool calling for the remainder of this run.",
+                        spec.model
+                     ));
+                  }
+                  None
+               },
+            }
+         },
       };
 
       if let Some(response_text) = structured_result {
@@ -1775,6 +1917,103 @@ mod tests {
          reqwest::StatusCode::UNAUTHORIZED,
          "Unknown parameter: response_format",
       ));
+   }
+
+   #[test]
+   fn test_is_anthropic_model_recognizes_common_names() {
+      assert!(is_anthropic_model("claude-haiku-4-5"));
+      assert!(is_anthropic_model("anthropic/claude-sonnet-4.5"));
+      assert!(is_anthropic_model("bedrock/anthropic.claude-3-5-sonnet"));
+      assert!(!is_anthropic_model("gpt-4o-mini"));
+   }
+
+   #[test]
+   fn test_should_attempt_structured_output_skips_claude_on_unofficial_base() {
+      let config = CommitConfig::default();
+      assert!(!should_attempt_structured_output(&config, "claude-haiku-4-5"));
+      assert!(should_attempt_structured_output(&config, "gpt-4o-mini"));
+   }
+
+   #[test]
+   fn test_should_attempt_structured_output_allows_claude_on_official_anthropic_base() {
+      let config = CommitConfig {
+         api_base_url: "https://api.anthropic.com/v1".to_string(),
+         ..CommitConfig::default()
+      };
+      assert!(should_attempt_structured_output(&config, "claude-haiku-4-5"));
+   }
+
+
+   #[test]
+   fn test_structured_output_capability_cache_skips_after_unsupported() {
+      let config = CommitConfig::default();
+      let mode = ResolvedApiMode::ChatCompletions;
+      let model = "test-structured-skip-after-unsupported";
+
+      assert_eq!(
+         begin_structured_output_attempt(&config, model, mode),
+         StructuredOutputAttempt::Probe
+      );
+      assert!(update_structured_output_capability(
+         &config,
+         model,
+         mode,
+         Some(StructuredOutputCapability::Unsupported),
+      ));
+      assert_eq!(
+         begin_structured_output_attempt(&config, model, mode),
+         StructuredOutputAttempt::SkipUnsupported
+      );
+   }
+
+   #[test]
+   fn test_structured_output_capability_cache_remembers_supported() {
+      let config = CommitConfig::default();
+      let mode = ResolvedApiMode::ChatCompletions;
+      let model = "test-structured-remembers-supported";
+
+      assert_eq!(
+         begin_structured_output_attempt(&config, model, mode),
+         StructuredOutputAttempt::Probe
+      );
+      assert!(!update_structured_output_capability(
+         &config,
+         model,
+         mode,
+         Some(StructuredOutputCapability::Supported),
+      ));
+      assert_eq!(
+         begin_structured_output_attempt(&config, model, mode),
+         StructuredOutputAttempt::Supported
+      );
+   }
+
+   #[test]
+   fn test_structured_output_capability_cache_is_mode_scoped() {
+      let config = CommitConfig::default();
+      let model = "test-structured-mode-scoped";
+      assert_eq!(
+         begin_structured_output_attempt(
+            &config,
+            model,
+            ResolvedApiMode::ChatCompletions,
+         ),
+         StructuredOutputAttempt::Probe
+      );
+      assert!(update_structured_output_capability(
+         &config,
+         model,
+         ResolvedApiMode::ChatCompletions,
+         Some(StructuredOutputCapability::Unsupported),
+      ));
+      assert_eq!(
+         begin_structured_output_attempt(
+            &config,
+            model,
+            ResolvedApiMode::AnthropicMessages,
+         ),
+         StructuredOutputAttempt::Probe
+      );
    }
 
    #[test]
