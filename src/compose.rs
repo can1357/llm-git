@@ -3,7 +3,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::{
-   api::{AnalysisContext, OneShotSpec, generate_conventional_analysis, run_oneshot, strict_json_schema},
+   api::{
+      AnalysisContext, OneShotSpec, generate_conventional_analysis, run_oneshot, strict_json_schema,
+   },
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
@@ -15,7 +17,6 @@ use crate::{
    types::{Args, ChangeGroup, CommitType, ComposeAnalysis, ConventionalCommit, Mode},
    validation::validate_commit_message,
 };
-
 
 const COMPOSE_SYSTEM_PROMPT: &str = r#"You split git diffs into logical, atomic commit groups for compose mode.
 
@@ -72,7 +73,6 @@ struct ComposeResult {
    groups: Vec<ChangeGroup>,
 }
 
-
 fn group_affects_only_dependency_files(group: &ChangeGroup) -> bool {
    group
       .changes
@@ -126,7 +126,7 @@ pub async fn analyze_for_compose(
    stat: &str,
    config: &CommitConfig,
    max_commits: usize,
- ) -> Result<ComposeAnalysis> {
+) -> Result<ComposeAnalysis> {
    let compose_schema = strict_json_schema(
       serde_json::json!({
          "groups": {
@@ -197,30 +197,26 @@ pub async fn analyze_for_compose(
       .replace("{DIFF}", diff)
       .replace("{MAX_COMMITS}", &max_commits.to_string());
 
-   let response = run_oneshot::<ComposeResult>(
-      config,
-      &OneShotSpec {
-         operation:        "compose",
-         model:            &config.model,
-         max_tokens:       8000,
-         temperature:      config.temperature,
-         prompt_family:    "compose",
-         prompt_variant:   "default",
-         system_prompt:    COMPOSE_SYSTEM_PROMPT,
-         user_prompt:      &user_prompt,
-         tool_name:        "create_compose_analysis",
-         tool_description: "Split changes into logical commit groups with dependencies",
-         schema:           &compose_schema,
-         debug:            None,
-      },
-   )
+   let response = run_oneshot::<ComposeResult>(config, &OneShotSpec {
+      operation:        "compose",
+      model:            &config.model,
+      max_tokens:       8000,
+      temperature:      config.temperature,
+      prompt_family:    "compose",
+      prompt_variant:   "default",
+      system_prompt:    COMPOSE_SYSTEM_PROMPT,
+      user_prompt:      &user_prompt,
+      tool_name:        "create_compose_analysis",
+      tool_description: "Split changes into logical commit groups with dependencies",
+      schema:           &compose_schema,
+      debug:            None,
+   })
    .await?;
 
    let groups = response.output.groups;
    let dependency_order = compute_dependency_order(&groups)?;
    Ok(ComposeAnalysis { groups, dependency_order })
 }
-
 
 /// Compute topological order for commit groups based on dependencies
 fn compute_dependency_order(groups: &[ChangeGroup]) -> Result<Vec<usize>> {

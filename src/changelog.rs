@@ -31,7 +31,6 @@ struct ChangelogResponse {
    entries: HashMap<String, Vec<String>>,
 }
 
-
 /// Run the changelog maintenance flow
 ///
 /// 1. Get staged files (excluding CHANGELOG.md files)
@@ -223,7 +222,7 @@ async fn generate_changelog_entries(
 async fn call_changelog_api(
    parts: &templates::PromptParts,
    config: &CommitConfig,
- ) -> Result<ChangelogResponse> {
+) -> Result<ChangelogResponse> {
    let changelog_schema = strict_json_schema(
       serde_json::json!({
          "entries": {
@@ -272,23 +271,20 @@ async fn call_changelog_api(
       &["entries"],
    );
 
-   let response = run_oneshot::<ChangelogResponse>(
-      config,
-      &OneShotSpec {
-         operation:        "changelog",
-         model:            &config.model,
-         max_tokens:       2000,
-         temperature:      config.temperature,
-         prompt_family:    "changelog",
-         prompt_variant:   "default",
-         system_prompt:    &parts.system,
-         user_prompt:      &parts.user,
-         tool_name:        "create_changelog_entries",
-         tool_description: "Generate changelog entries grouped by category",
-         schema:           &changelog_schema,
-         debug:            None,
-      },
-   )
+   let response = run_oneshot::<ChangelogResponse>(config, &OneShotSpec {
+      operation:        "changelog",
+      model:            &config.model,
+      max_tokens:       2000,
+      temperature:      config.temperature,
+      prompt_family:    "changelog",
+      prompt_variant:   "default",
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
+      tool_name:        "create_changelog_entries",
+      tool_description: "Generate changelog entries grouped by category",
+      schema:           &changelog_schema,
+      debug:            None,
+   })
    .await?;
 
    Ok(response.output)

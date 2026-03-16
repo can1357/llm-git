@@ -113,7 +113,6 @@ pub struct CommitConfig {
    #[serde(default = "default_map_reduce_threshold")]
    pub map_reduce_threshold: usize,
 
-
    /// Loaded analysis prompt (not in config file)
    #[serde(skip)]
    pub analysis_prompt: String,
@@ -162,7 +161,6 @@ const fn default_map_reduce_enabled() -> bool {
 const fn default_map_reduce_threshold() -> usize {
    30000 // ~30k tokens, roughly 120k characters
 }
-
 
 fn parse_api_mode(value: &str) -> ApiMode {
    match value.trim().to_lowercase().as_str() {
@@ -264,7 +262,6 @@ impl Default for CommitConfig {
 }
 
 impl CommitConfig {
-
    pub fn resolved_api_mode(&self, _model_name: &str) -> ResolvedApiMode {
       match self.api_mode {
          ApiMode::ChatCompletions => ResolvedApiMode::ChatCompletions,
@@ -569,4 +566,3 @@ BEFORE RESPONDING:
 ✓ Aligns with detail points and diff stat
 ✓ Specific (names subsystem/artifact)
 "#;
-

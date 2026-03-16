@@ -1,8 +1,12 @@
-use std::{collections::HashMap, path::Path, sync::{LazyLock, OnceLock}, time::Duration};
-
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{
+   collections::HashMap,
+   path::Path,
+   sync::{LazyLock, OnceLock},
+   time::Duration,
+};
 
 use parking_lot::{Condvar, Mutex};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
    config::{CommitConfig, ResolvedApiMode},
@@ -173,7 +177,6 @@ fn anthropic_system_content(system_prompt: &str, cache: bool) -> Option<Vec<Anth
    }
 }
 
-
 fn supports_openai_prompt_cache_key(config: &CommitConfig) -> bool {
    config
       .api_base_url
@@ -288,10 +291,10 @@ pub struct OneShotSpec<'a> {
 
 #[derive(Debug)]
 pub struct OneShotResponse<T> {
-   pub output:      T,
-   pub source:      OneShotSource,
+   pub output:       T,
+   pub source:       OneShotSource,
    pub text_content: Option<String>,
-   pub stop_reason: Option<String>,
+   pub stop_reason:  Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,15 +377,15 @@ fn schema_required(schema: &serde_json::Value) -> Result<Vec<String>> {
    schema
       .get("required")
       .and_then(|value| value.as_array())
-      .ok_or_else(|| CommitGenError::Other("Schema must include top-level required array".to_string()))
+      .ok_or_else(|| {
+         CommitGenError::Other("Schema must include top-level required array".to_string())
+      })
       .and_then(|values| {
          values
             .iter()
             .map(|value| {
                value.as_str().map(str::to_string).ok_or_else(|| {
-                  CommitGenError::Other(
-                     "Schema required entries must be strings".to_string(),
-                  )
+                  CommitGenError::Other("Schema required entries must be strings".to_string())
                })
             })
             .collect()
@@ -458,7 +461,7 @@ fn structured_output_cache_key(
    config: &CommitConfig,
    model: &str,
    mode: ResolvedApiMode,
- ) -> String {
+) -> String {
    format!(
       "{:?}:{}:{}",
       mode,
@@ -471,7 +474,7 @@ fn begin_structured_output_attempt(
    config: &CommitConfig,
    model: &str,
    mode: ResolvedApiMode,
- ) -> StructuredOutputAttempt {
+) -> StructuredOutputAttempt {
    let key = structured_output_cache_key(config, model, mode);
 
    loop {
@@ -499,7 +502,7 @@ fn update_structured_output_capability(
    model: &str,
    mode: ResolvedApiMode,
    state: Option<StructuredOutputCapability>,
- ) -> bool {
+) -> bool {
    let key = structured_output_cache_key(config, model, mode);
    let mut states = STRUCTURED_OUTPUT_CAPABILITIES.states.lock();
    let previous = match state {
@@ -512,9 +515,11 @@ fn update_structured_output_capability(
       && previous != Some(StructuredOutputCapability::Unsupported)
 }
 
-
 fn is_official_anthropic_base_url(api_base_url: &str) -> bool {
-   api_base_url.trim().to_lowercase().contains("api.anthropic.com")
+   api_base_url
+      .trim()
+      .to_lowercase()
+      .contains("api.anthropic.com")
 }
 
 fn is_anthropic_model(model: &str) -> bool {
@@ -528,7 +533,6 @@ fn is_anthropic_model(model: &str) -> bool {
 fn should_attempt_structured_output(config: &CommitConfig, model: &str) -> bool {
    !is_anthropic_model(model) || is_official_anthropic_base_url(&config.api_base_url)
 }
-
 
 fn should_fallback_to_tool(status: reqwest::StatusCode, body: &str) -> bool {
    if matches!(status.as_u16(), 401 | 403 | 429) {
@@ -573,19 +577,21 @@ async fn send_oneshot_request(
                content: spec.system_prompt.to_string(),
             });
          }
-         messages.push(Message {
-            role:    "user".to_string(),
-            content: spec.user_prompt.to_string(),
-         });
+         messages
+            .push(Message { role: "user".to_string(), content: spec.user_prompt.to_string() });
 
          let request = ApiRequest {
-            model:            spec.model.to_string(),
-            max_tokens:       spec.max_tokens,
-            temperature:      spec.temperature,
-            tools:            if kind == OneShotRequestKind::ToolCalling { vec![tool] } else { Vec::new() },
-            tool_choice:      (kind == OneShotRequestKind::ToolCalling)
+            model: spec.model.to_string(),
+            max_tokens: spec.max_tokens,
+            temperature: spec.temperature,
+            tools: if kind == OneShotRequestKind::ToolCalling {
+               vec![tool]
+            } else {
+               Vec::new()
+            },
+            tool_choice: (kind == OneShotRequestKind::ToolCalling)
                .then(|| serde_json::json!("required")),
-            response_format:  (kind == OneShotRequestKind::StructuredOutput)
+            response_format: (kind == OneShotRequestKind::StructuredOutput)
                .then(|| openai_response_format(spec.tool_name, spec.schema.clone())),
             prompt_cache_key,
             messages,
@@ -607,9 +613,12 @@ async fn send_oneshot_request(
          save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
 
          if status.is_server_error() {
-            if kind == OneShotRequestKind::StructuredOutput && should_fallback_to_tool(status, &response_text) {
+            if kind == OneShotRequestKind::StructuredOutput
+               && should_fallback_to_tool(status, &response_text)
+            {
                crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool calling.",
+                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
+                   calling.",
                   spec.operation, status
                ));
                return Ok(OneShotRequestOutcome::FallbackToTool);
@@ -622,9 +631,12 @@ async fn send_oneshot_request(
          }
 
          if !status.is_success() {
-            if kind == OneShotRequestKind::StructuredOutput && should_fallback_to_tool(status, &response_text) {
+            if kind == OneShotRequestKind::StructuredOutput
+               && should_fallback_to_tool(status, &response_text)
+            {
                crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool calling.",
+                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
+                   calling.",
                   spec.operation, status
                ));
                return Ok(OneShotRequestOutcome::FallbackToTool);
@@ -659,18 +671,18 @@ async fn send_oneshot_request(
             Vec::new()
          };
          let request = AnthropicRequest {
-            model:         spec.model.to_string(),
-            max_tokens:    spec.max_tokens,
-            temperature:   spec.temperature,
-            system:        anthropic_system_content(spec.system_prompt, prompt_caching),
+            model: spec.model.to_string(),
+            max_tokens: spec.max_tokens,
+            temperature: spec.temperature,
+            system: anthropic_system_content(spec.system_prompt, prompt_caching),
             tools,
-            tool_choice:   (kind == OneShotRequestKind::ToolCalling).then(|| AnthropicToolChoice {
+            tool_choice: (kind == OneShotRequestKind::ToolCalling).then(|| AnthropicToolChoice {
                choice_type: "tool".to_string(),
                name:        spec.tool_name.to_string(),
             }),
             output_format: (kind == OneShotRequestKind::StructuredOutput)
                .then(|| anthropic_output_format(spec.schema.clone())),
-            messages:      vec![AnthropicMessage {
+            messages: vec![AnthropicMessage {
                role:    "user".to_string(),
                content: vec![anthropic_text_content(spec.user_prompt.to_string(), false)],
             }],
@@ -696,9 +708,12 @@ async fn send_oneshot_request(
          save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
 
          if status.is_server_error() {
-            if kind == OneShotRequestKind::StructuredOutput && should_fallback_to_tool(status, &response_text) {
+            if kind == OneShotRequestKind::StructuredOutput
+               && should_fallback_to_tool(status, &response_text)
+            {
                crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool calling.",
+                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
+                   calling.",
                   spec.operation, status
                ));
                return Ok(OneShotRequestOutcome::FallbackToTool);
@@ -711,9 +726,12 @@ async fn send_oneshot_request(
          }
 
          if !status.is_success() {
-            if kind == OneShotRequestKind::StructuredOutput && should_fallback_to_tool(status, &response_text) {
+            if kind == OneShotRequestKind::StructuredOutput
+               && should_fallback_to_tool(status, &response_text)
+            {
                crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool calling.",
+                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
+                   calling.",
                   spec.operation, status
                ));
                return Ok(OneShotRequestOutcome::FallbackToTool);
@@ -838,7 +856,7 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                   Ok(output) => {
                      return OneShotParseOutcome::Success(OneShotResponse {
                         output,
-                        source:      OneShotSource::ToolCall,
+                        source: OneShotSource::ToolCall,
                         text_content: message.content.clone(),
                         stop_reason: None,
                      });
@@ -862,7 +880,7 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                Ok(output) => {
                   return OneShotParseOutcome::Success(OneShotResponse {
                      output,
-                     source:      kind.content_source(),
+                     source: kind.content_source(),
                      text_content: Some(content.clone()),
                      stop_reason: None,
                   });
@@ -889,8 +907,8 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                Ok(output) => {
                   return OneShotParseOutcome::Success(OneShotResponse {
                      output,
-                     source:      OneShotSource::ToolCall,
-                     text_content: (!text_content.is_empty()).then_some(text_content.clone()),
+                     source: OneShotSource::ToolCall,
+                     text_content: (!text_content.is_empty()).then_some(text_content),
                      stop_reason,
                   });
                },
@@ -910,7 +928,7 @@ fn parse_oneshot_response<T: DeserializeOwned>(
          match parse_json_output::<T>(&text_content, &format!("{operation} content JSON")) {
             Ok(output) => OneShotParseOutcome::Success(OneShotResponse {
                output,
-               source:      kind.content_source(),
+               source: kind.content_source(),
                text_content: Some(text_content),
                stop_reason,
             }),
@@ -920,7 +938,10 @@ fn parse_oneshot_response<T: DeserializeOwned>(
    }
 }
 
-pub async fn run_oneshot<T>(config: &CommitConfig, spec: &OneShotSpec<'_>) -> Result<OneShotResponse<T>>
+pub async fn run_oneshot<T>(
+   config: &CommitConfig,
+   spec: &OneShotSpec<'_>,
+) -> Result<OneShotResponse<T>>
 where
    T: DeserializeOwned,
 {
@@ -935,13 +956,8 @@ where
       let structured_result = match structured_attempt {
          StructuredOutputAttempt::SkipUnsupported => None,
          StructuredOutputAttempt::Probe | StructuredOutputAttempt::Supported => {
-            match send_oneshot_request(
-               config,
-               spec,
-               mode,
-               OneShotRequestKind::StructuredOutput,
-            )
-            .await?
+            match send_oneshot_request(config, spec, mode, OneShotRequestKind::StructuredOutput)
+               .await?
             {
                OneShotRequestOutcome::Response(response_text) => {
                   if structured_attempt == StructuredOutputAttempt::Probe {
@@ -969,7 +985,8 @@ where
                   );
                   if first_detection {
                      crate::style::warn(&format!(
-                        "Structured outputs unsupported for model {}. Using tool calling for the remainder of this run.",
+                        "Structured outputs unsupported for model {}. Using tool calling for the \
+                         remainder of this run.",
                         spec.model
                      ));
                   }
@@ -998,23 +1015,17 @@ where
          }
       }
 
-      let response_text = match send_oneshot_request(
-         config,
-         spec,
-         mode,
-         OneShotRequestKind::ToolCalling,
-      )
-      .await?
-      {
-         OneShotRequestOutcome::Response(response_text) => response_text,
-         OneShotRequestOutcome::Retry => return Ok((true, None)),
-         OneShotRequestOutcome::FallbackToTool => {
-            return Err(CommitGenError::Other(format!(
-               "Tool-calling fallback recursively requested for {}",
-               spec.operation
-            )));
-         },
-      };
+      let response_text =
+         match send_oneshot_request(config, spec, mode, OneShotRequestKind::ToolCalling).await? {
+            OneShotRequestOutcome::Response(response_text) => response_text,
+            OneShotRequestOutcome::Retry => return Ok((true, None)),
+            OneShotRequestOutcome::FallbackToTool => {
+               return Err(CommitGenError::Other(format!(
+                  "Tool-calling fallback recursively requested for {}",
+                  spec.operation
+               )));
+            },
+         };
 
       match parse_oneshot_response::<T>(
          mode,
@@ -1262,7 +1273,7 @@ pub async fn generate_conventional_analysis<'a>(
    scope_candidates_str: &'a str,
    ctx: &AnalysisContext<'a>,
    config: &'a CommitConfig,
- ) -> Result<ConventionalAnalysis> {
+) -> Result<ConventionalAnalysis> {
    let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
 
    let analysis_schema = strict_json_schema(
@@ -1326,27 +1337,25 @@ pub async fn generate_conventional_analysis<'a>(
       parts.user
    };
 
-   let response = run_oneshot::<ConventionalAnalysis>(
-      config,
-      &OneShotSpec {
-         operation:        "analysis",
-         model:            model_name,
-         max_tokens:       1000,
-         temperature:      config.temperature,
-         prompt_family:    "analysis",
-         prompt_variant:   &config.analysis_prompt_variant,
-         system_prompt:    &parts.system,
-         user_prompt:      &user_prompt,
-         tool_name:        "create_conventional_analysis",
-         tool_description: "Analyze changes and classify as conventional commit with type, scope, details, and metadata",
-         schema:           &analysis_schema,
-         debug:            Some(OneShotDebug {
-            dir:    ctx.debug_output,
-            prefix: ctx.debug_prefix,
-            name:   "analysis",
-         }),
-      },
-   )
+   let response = run_oneshot::<ConventionalAnalysis>(config, &OneShotSpec {
+      operation:        "analysis",
+      model:            model_name,
+      max_tokens:       1000,
+      temperature:      config.temperature,
+      prompt_family:    "analysis",
+      prompt_variant:   &config.analysis_prompt_variant,
+      system_prompt:    &parts.system,
+      user_prompt:      &user_prompt,
+      tool_name:        "create_conventional_analysis",
+      tool_description: "Analyze changes and classify as conventional commit with type, scope, \
+                         details, and metadata",
+      schema:           &analysis_schema,
+      debug:            Some(OneShotDebug {
+         dir:    ctx.debug_output,
+         prefix: ctx.debug_prefix,
+         name:   "analysis",
+      }),
+   })
    .await?;
 
    Ok(response.output)
@@ -1482,7 +1491,7 @@ pub async fn generate_summary_from_analysis<'a>(
    config: &'a CommitConfig,
    debug_dir: Option<&'a Path>,
    debug_prefix: Option<&'a str>,
- ) -> Result<CommitSummary> {
+) -> Result<CommitSummary> {
    let mut validation_attempt = 0;
    let max_validation_retries = 1;
    let mut last_failure_reason: Option<String> = None;
@@ -1532,27 +1541,24 @@ pub async fn generate_summary_from_analysis<'a>(
          &["summary"],
       );
 
-      let response = run_oneshot::<SummaryOutput>(
-         config,
-         &OneShotSpec {
-            operation:        "summary",
-            model:            &config.model,
-            max_tokens:       200,
-            temperature:      config.temperature,
-            prompt_family:    "summary",
-            prompt_variant:   &config.summary_prompt_variant,
-            system_prompt:    &parts.system,
-            user_prompt:      &user_prompt,
-            tool_name:        "create_commit_summary",
-            tool_description: "Compose a git commit summary line from detail statements",
-            schema:           &summary_schema,
-            debug:            Some(OneShotDebug {
-               dir:    debug_dir,
-               prefix: debug_prefix,
-               name:   "summary",
-            }),
-         },
-      )
+      let response = run_oneshot::<SummaryOutput>(config, &OneShotSpec {
+         operation:        "summary",
+         model:            &config.model,
+         max_tokens:       200,
+         temperature:      config.temperature,
+         prompt_family:    "summary",
+         prompt_variant:   &config.summary_prompt_variant,
+         system_prompt:    &parts.system,
+         user_prompt:      &user_prompt,
+         tool_name:        "create_commit_summary",
+         tool_description: "Compose a git commit summary line from detail statements",
+         schema:           &summary_schema,
+         debug:            Some(OneShotDebug {
+            dir:    debug_dir,
+            prefix: debug_prefix,
+            name:   "summary",
+         }),
+      })
       .await;
 
       match response {
@@ -1790,7 +1796,7 @@ pub async fn generate_fast_commit(
    let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
 
    let parts = templates::render_fast_prompt(&templates::FastPromptParams {
-      variant:          "default",
+      variant: "default",
       stat,
       diff,
       scope_candidates: scope_candidates_str,
@@ -1821,27 +1827,20 @@ pub async fn generate_fast_commit(
       &["type", "summary", "details"],
    );
 
-   let response = run_oneshot::<FastCommitOutput>(
-      config,
-      &OneShotSpec {
-         operation:        "fast",
-         model:            model_name,
-         max_tokens:       500,
-         temperature:      config.temperature,
-         prompt_family:    "fast",
-         prompt_variant:   "default",
-         system_prompt:    &parts.system,
-         user_prompt:      &parts.user,
-         tool_name:        "create_fast_commit",
-         tool_description: "Generate a conventional commit from the given diff",
-         schema:           &fast_schema,
-         debug:            Some(OneShotDebug {
-            dir:    debug_dir,
-            prefix: None,
-            name:   "fast",
-         }),
-      },
-   )
+   let response = run_oneshot::<FastCommitOutput>(config, &OneShotSpec {
+      operation:        "fast",
+      model:            model_name,
+      max_tokens:       500,
+      temperature:      config.temperature,
+      prompt_family:    "fast",
+      prompt_variant:   "default",
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
+      tool_name:        "create_fast_commit",
+      tool_description: "Generate a conventional commit from the given diff",
+      schema:           &fast_schema,
+      debug:            Some(OneShotDebug { dir: debug_dir, prefix: None, name: "fast" }),
+   })
    .await?;
 
    build_fast_commit(response.output, config)
@@ -1901,10 +1900,7 @@ mod tests {
 {"summary":"added support"}
 ```
 "#;
-      assert_eq!(
-         extract_json_from_content(content),
-         r#"{"summary":"added support"}"#
-      );
+      assert_eq!(extract_json_from_content(content), r#"{"summary":"added support"}"#);
    }
 
    #[test]
@@ -1942,7 +1938,6 @@ mod tests {
       };
       assert!(should_attempt_structured_output(&config, "claude-haiku-4-5"));
    }
-
 
    #[test]
    fn test_structured_output_capability_cache_skips_after_unsupported() {
@@ -1993,11 +1988,7 @@ mod tests {
       let config = CommitConfig::default();
       let model = "test-structured-mode-scoped";
       assert_eq!(
-         begin_structured_output_attempt(
-            &config,
-            model,
-            ResolvedApiMode::ChatCompletions,
-         ),
+         begin_structured_output_attempt(&config, model, ResolvedApiMode::ChatCompletions,),
          StructuredOutputAttempt::Probe
       );
       assert!(update_structured_output_capability(
@@ -2007,11 +1998,7 @@ mod tests {
          Some(StructuredOutputCapability::Unsupported),
       ));
       assert_eq!(
-         begin_structured_output_attempt(
-            &config,
-            model,
-            ResolvedApiMode::AnthropicMessages,
-         ),
+         begin_structured_output_attempt(&config, model, ResolvedApiMode::AnthropicMessages,),
          StructuredOutputAttempt::Probe
       );
    }

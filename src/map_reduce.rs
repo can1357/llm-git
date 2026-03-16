@@ -214,27 +214,24 @@ async fn map_single_file(
    context_header: &str,
    model_name: &str,
    config: &CommitConfig,
- ) -> Result<FileObservation> {
+) -> Result<FileObservation> {
    let parts = templates::render_map_prompt("default", filename, file_diff, context_header)?;
    let observation_schema = build_observation_schema();
 
-   let response = run_oneshot::<FileObservationResponse>(
-      config,
-      &OneShotSpec {
-         operation:        "map-reduce/map",
-         model:            model_name,
-         max_tokens:       1500,
-         temperature:      config.temperature,
-         prompt_family:    "map",
-         prompt_variant:   "default",
-         system_prompt:    &parts.system,
-         user_prompt:      &parts.user,
-         tool_name:        "create_file_observation",
-         tool_description: "Extract observations from a single file's changes",
-         schema:           &observation_schema,
-         debug:            None,
-      },
-   )
+   let response = run_oneshot::<FileObservationResponse>(config, &OneShotSpec {
+      operation:        "map-reduce/map",
+      model:            model_name,
+      max_tokens:       1500,
+      temperature:      config.temperature,
+      prompt_family:    "map",
+      prompt_variant:   "default",
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
+      tool_name:        "create_file_observation",
+      tool_description: "Extract observations from a single file's changes",
+      schema:           &observation_schema,
+      debug:            None,
+   })
    .await?;
 
    let mut observations = response.output.observations;
@@ -257,18 +254,11 @@ async fn map_single_file(
             .unwrap_or(filename);
          observations = vec![format!("Updated {fallback_target}.")];
       } else {
-         crate::style::warn(
-            "Model returned empty observations; continuing with no observations.",
-         );
+         crate::style::warn("Model returned empty observations; continuing with no observations.");
       }
    }
 
-   Ok(FileObservation {
-      file: filename.to_string(),
-      observations,
-      additions: 0,
-      deletions: 0,
-   })
+   Ok(FileObservation { file: filename.to_string(), observations, additions: 0, deletions: 0 })
 }
 
 /// Reduce phase: synthesize all observations into final analysis
@@ -278,7 +268,7 @@ pub async fn reduce_phase(
    scope_candidates: &str,
    model_name: &str,
    config: &CommitConfig,
- ) -> Result<ConventionalAnalysis> {
+) -> Result<ConventionalAnalysis> {
    let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
    let observations_json =
       serde_json::to_string_pretty(observations).unwrap_or_else(|_| "[]".to_string());
@@ -293,23 +283,21 @@ pub async fn reduce_phase(
    )?;
 
    let analysis_schema = build_analysis_schema(&type_enum);
-   let response = run_oneshot::<ConventionalAnalysis>(
-      config,
-      &OneShotSpec {
-         operation:        "map-reduce/reduce",
-         model:            model_name,
-         max_tokens:       1500,
-         temperature:      config.temperature,
-         prompt_family:    "reduce",
-         prompt_variant:   "default",
-         system_prompt:    &parts.system,
-         user_prompt:      &parts.user,
-         tool_name:        "create_conventional_analysis",
-         tool_description: "Analyze changes and classify as conventional commit with type, scope, details, and metadata",
-         schema:           &analysis_schema,
-         debug:            None,
-      },
-   )
+   let response = run_oneshot::<ConventionalAnalysis>(config, &OneShotSpec {
+      operation:        "map-reduce/reduce",
+      model:            model_name,
+      max_tokens:       1500,
+      temperature:      config.temperature,
+      prompt_family:    "reduce",
+      prompt_variant:   "default",
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
+      tool_name:        "create_conventional_analysis",
+      tool_description: "Analyze changes and classify as conventional commit with type, scope, \
+                         details, and metadata",
+      schema:           &analysis_schema,
+      debug:            None,
+   })
    .await?;
 
    Ok(response.output)
@@ -350,7 +338,6 @@ pub async fn run_map_reduce(
    reduce_phase(&observations, stat, scope_candidates, model_name, config).await
 }
 
-
 fn parse_observations_from_text(text: &str) -> Vec<String> {
    let trimmed = text.trim();
    if trimmed.is_empty() {
@@ -376,7 +363,6 @@ fn parse_observations_from_text(text: &str) -> Vec<String> {
       .map(str::to_string)
       .collect()
 }
-
 
 #[derive(Debug, Deserialize)]
 struct FileObservationResponse {
@@ -473,7 +459,6 @@ fn build_observation_schema() -> serde_json::Value {
    )
 }
 
-
 fn build_analysis_schema(type_enum: &[&str]) -> serde_json::Value {
    strict_json_schema(
       serde_json::json!({
@@ -521,7 +506,6 @@ fn build_analysis_schema(type_enum: &[&str]) -> serde_json::Value {
    )
 }
 
-
 #[cfg(test)]
 mod tests {
    use super::*;
@@ -530,7 +514,6 @@ mod tests {
    fn test_counter() -> TokenCounter {
       TokenCounter::new("http://localhost:4000", None, "claude-sonnet-4.5")
    }
-
 
    #[test]
    fn test_should_use_map_reduce_disabled() {
