@@ -9,8 +9,8 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-   api::{anthropic_output_format, openai_response_format, retry_api_call, strict_json_schema},
-   config::{CommitConfig, ResolvedApiMode},
+   api::{OneShotSpec, run_oneshot, strict_json_schema},
+   config::CommitConfig,
    diff::{FileDiff, parse_diff, reconstruct_diff},
    error::{CommitGenError, Result},
    templates,
@@ -214,284 +214,61 @@ async fn map_single_file(
    context_header: &str,
    model_name: &str,
    config: &CommitConfig,
-) -> Result<FileObservation> {
-   retry_api_call(config, async move || {
-      let client = crate::api::get_client(config);
+ ) -> Result<FileObservation> {
+   let parts = templates::render_map_prompt("default", filename, file_diff, context_header)?;
+   let observation_schema = build_observation_schema();
 
-      let tool = build_observation_tool();
+   let response = run_oneshot::<FileObservationResponse>(
+      config,
+      &OneShotSpec {
+         operation:        "map-reduce/map",
+         model:            model_name,
+         max_tokens:       1500,
+         temperature:      config.temperature,
+         prompt_family:    "map",
+         prompt_variant:   "default",
+         system_prompt:    &parts.system,
+         user_prompt:      &parts.user,
+         tool_name:        "create_file_observation",
+         tool_description: "Extract observations from a single file's changes",
+         schema:           &observation_schema,
+         debug:            None,
+      },
+   )
+   .await?;
 
-      let parts = templates::render_map_prompt("default", filename, file_diff, context_header)?;
-      let mode = config.resolved_api_mode(model_name);
+   let mut observations = response.output.observations;
+   if observations.is_empty() {
+      let text_observations = response
+         .text_content
+         .as_deref()
+         .map(parse_observations_from_text)
+         .unwrap_or_default();
 
-      let response_text = match mode {
-         ResolvedApiMode::ChatCompletions => {
-            let request = build_api_request(
-               config,
-               model_name,
-               config.temperature,
-               vec![tool],
-               &parts.system,
-               &parts.user,
-               "map",
-               "default",
-            );
-
-            let mut request_builder = client
-               .post(format!("{}/chat/completions", config.api_base_url))
-               .header("content-type", "application/json");
-
-            if let Some(api_key) = &config.api_key {
-               request_builder =
-                  request_builder.header("Authorization", format!("Bearer {api_key}"));
-            }
-
-            let (status, response_text) =
-               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name)
-                  .await?;
-
-            if status.is_server_error() {
-               eprintln!(
-                  "{}",
-                  crate::style::error(&format!("Server error {status}: {response_text}"))
-               );
-               return Ok((true, None)); // Retry
-            }
-
-            if !status.is_success() {
-               return Err(CommitGenError::ApiError {
-                  status: status.as_u16(),
-                  body:   response_text,
-               });
-            }
-
-            response_text
-         },
-         ResolvedApiMode::AnthropicMessages => {
-            let prompt_caching = anthropic_prompt_caching_enabled(config);
-            let observation_schema = build_observation_schema();
-            let mut tools = if config.structured_outputs_enabled() {
-               Vec::new()
-            } else {
-               vec![AnthropicTool {
-                  name:          "create_file_observation".to_string(),
-                  description:   "Extract observations from a single file's changes".to_string(),
-                  input_schema:  observation_schema.clone(),
-                  cache_control: None,
-               }]
-            };
-            if !config.structured_outputs_enabled() {
-               cache_last_anthropic_tool(&mut tools, prompt_caching);
-            }
-
-            let request = AnthropicRequest {
-               model: model_name.to_string(),
-               max_tokens: 1500,
-               temperature: config.temperature,
-               system: anthropic_system_content(&parts.system, prompt_caching),
-               tools,
-               tool_choice: if config.structured_outputs_enabled() {
-                  None
-               } else {
-                  Some(AnthropicToolChoice {
-                     choice_type: "tool".to_string(),
-                     name:        "create_file_observation".to_string(),
-                  })
-               },
-               output_format: config
-                  .structured_outputs_enabled()
-                  .then(|| anthropic_output_format(observation_schema.clone())),
-               messages: vec![AnthropicMessage {
-                  role:    "user".to_string(),
-                  content: vec![anthropic_text_content(parts.user, false)],
-               }],
-            };
-
-            let mut request_builder = append_anthropic_cache_beta_header(
-               client
-                  .post(anthropic_messages_url(&config.api_base_url))
-                  .header("content-type", "application/json")
-                  .header("anthropic-version", "2023-06-01"),
-               prompt_caching,
-            );
-
-            if let Some(api_key) = &config.api_key {
-               request_builder = request_builder.header("x-api-key", api_key);
-            }
-
-            let (status, response_text) =
-               crate::api::timed_send(request_builder.json(&request), "map-reduce/map", model_name)
-                  .await?;
-
-            if status.is_server_error() {
-               eprintln!(
-                  "{}",
-                  crate::style::error(&format!("Server error {status}: {response_text}"))
-               );
-               return Ok((true, None)); // Retry
-            }
-
-            if !status.is_success() {
-               return Err(CommitGenError::ApiError {
-                  status: status.as_u16(),
-                  body:   response_text,
-               });
-            }
-
-            response_text
-         },
-      };
-
-      if response_text.trim().is_empty() {
-         crate::style::warn("Model returned empty response body for observation; retrying.");
-         return Ok((true, None));
+      if !text_observations.is_empty() {
+         observations = text_observations;
+      } else if response.stop_reason.as_deref() == Some("max_tokens") {
+         crate::style::warn(
+            "Anthropic stopped at max_tokens with empty observations; using fallback observation.",
+         );
+         let fallback_target = Path::new(filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(filename);
+         observations = vec![format!("Updated {fallback_target}.")];
+      } else {
+         crate::style::warn(
+            "Model returned empty observations; continuing with no observations.",
+         );
       }
+   }
 
-      match mode {
-         ResolvedApiMode::ChatCompletions => {
-            let api_response: ApiResponse = serde_json::from_str(&response_text).map_err(|e| {
-               CommitGenError::Other(format!(
-                  "Failed to parse observation response JSON: {e}. Response body: {}",
-                  response_snippet(&response_text, 500)
-               ))
-            })?;
-
-            if api_response.choices.is_empty() {
-               return Err(CommitGenError::Other(
-                  "API returned empty response for file observation".to_string(),
-               ));
-            }
-
-            let message = &api_response.choices[0].message;
-            if let Some(refusal) = &message.refusal {
-               return Err(CommitGenError::Other(format!(
-                  "Model refused file observation: {refusal}"
-               )));
-            }
-
-            if !message.tool_calls.is_empty() {
-               let tool_call = &message.tool_calls[0];
-               if tool_call.function.name.ends_with("create_file_observation") {
-                  let args = &tool_call.function.arguments;
-                  if args.is_empty() {
-                     return Err(CommitGenError::Other(
-                        "Model returned empty function arguments for observation".to_string(),
-                     ));
-                  }
-
-                  let obs: FileObservationResponse = serde_json::from_str(args).map_err(|e| {
-                     CommitGenError::Other(format!("Failed to parse observation response: {e}"))
-                  })?;
-
-                  return Ok((
-                     false,
-                     Some(FileObservation {
-                        file:         filename.to_string(),
-                        observations: obs.observations,
-                        additions:    0, // Will be filled from FileDiff
-                        deletions:    0,
-                     }),
-                  ));
-               }
-            }
-
-            // Fallback: try to parse content
-            if let Some(content) = &message.content {
-               if content.trim().is_empty() {
-                  crate::style::warn("Model returned empty content for observation; retrying.");
-                  return Ok((true, None));
-               }
-               let obs: FileObservationResponse =
-                  serde_json::from_str(content.trim()).map_err(|e| {
-                     CommitGenError::Other(format!(
-                        "Failed to parse observation content JSON: {e}. Content: {}",
-                        response_snippet(content, 500)
-                     ))
-                  })?;
-               return Ok((
-                  false,
-                  Some(FileObservation {
-                     file:         filename.to_string(),
-                     observations: obs.observations,
-                     additions:    0,
-                     deletions:    0,
-                  }),
-               ));
-            }
-
-            Err(CommitGenError::Other("No observation found in API response".to_string()))
-         },
-         ResolvedApiMode::AnthropicMessages => {
-            let (tool_input, text_content, stop_reason) =
-               extract_anthropic_content(&response_text, "create_file_observation")?;
-
-            if let Some(input) = tool_input {
-               let mut observations = match input.get("observations") {
-                  Some(serde_json::Value::Array(arr)) => arr
-                     .iter()
-                     .filter_map(|v| v.as_str().map(str::to_string))
-                     .collect::<Vec<_>>(),
-                  Some(serde_json::Value::String(s)) => parse_string_to_observations(s),
-                  _ => Vec::new(),
-               };
-
-               if observations.is_empty() {
-                  let text_observations = parse_observations_from_text(&text_content);
-                  if !text_observations.is_empty() {
-                     observations = text_observations;
-                  } else if stop_reason.as_deref() == Some("max_tokens") {
-                     crate::style::warn(
-                        "Anthropic stopped at max_tokens with empty observations; using fallback \
-                         observation.",
-                     );
-                     let fallback_target = Path::new(filename)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(filename);
-                     observations = vec![format!("Updated {fallback_target}.")];
-                  } else {
-                     crate::style::warn(
-                        "Model returned empty observation tool input; continuing with no \
-                         observations.",
-                     );
-                  }
-               }
-
-               return Ok((
-                  false,
-                  Some(FileObservation {
-                     file: filename.to_string(),
-                     observations,
-                     additions: 0,
-                     deletions: 0,
-                  }),
-               ));
-            }
-
-            if text_content.trim().is_empty() {
-               crate::style::warn("Model returned empty content for observation; retrying.");
-               return Ok((true, None));
-            }
-
-            let obs: FileObservationResponse =
-               serde_json::from_str(text_content.trim()).map_err(|e| {
-                  CommitGenError::Other(format!(
-                     "Failed to parse observation content JSON: {e}. Content: {}",
-                     response_snippet(&text_content, 500)
-                  ))
-               })?;
-            Ok((
-               false,
-               Some(FileObservation {
-                  file:         filename.to_string(),
-                  observations: obs.observations,
-                  additions:    0,
-                  deletions:    0,
-               }),
-            ))
-         },
-      }
+   Ok(FileObservation {
+      file: filename.to_string(),
+      observations,
+      additions: 0,
+      deletions: 0,
    })
-   .await
 }
 
 /// Reduce phase: synthesize all observations into final analysis
@@ -501,258 +278,41 @@ pub async fn reduce_phase(
    scope_candidates: &str,
    model_name: &str,
    config: &CommitConfig,
-) -> Result<ConventionalAnalysis> {
-   retry_api_call(config, async move || {
-      let client = crate::api::get_client(config);
+ ) -> Result<ConventionalAnalysis> {
+   let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
+   let observations_json =
+      serde_json::to_string_pretty(observations).unwrap_or_else(|_| "[]".to_string());
 
-      // Build type enum from config
-      let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
+   let types_description = crate::api::format_types_description(config);
+   let parts = templates::render_reduce_prompt(
+      "default",
+      &observations_json,
+      stat,
+      scope_candidates,
+      Some(&types_description),
+   )?;
 
-      let tool = build_analysis_tool(&type_enum);
+   let analysis_schema = build_analysis_schema(&type_enum);
+   let response = run_oneshot::<ConventionalAnalysis>(
+      config,
+      &OneShotSpec {
+         operation:        "map-reduce/reduce",
+         model:            model_name,
+         max_tokens:       1500,
+         temperature:      config.temperature,
+         prompt_family:    "reduce",
+         prompt_variant:   "default",
+         system_prompt:    &parts.system,
+         user_prompt:      &parts.user,
+         tool_name:        "create_conventional_analysis",
+         tool_description: "Analyze changes and classify as conventional commit with type, scope, details, and metadata",
+         schema:           &analysis_schema,
+         debug:            None,
+      },
+   )
+   .await?;
 
-      let observations_json =
-         serde_json::to_string_pretty(observations).unwrap_or_else(|_| "[]".to_string());
-
-      let types_description = crate::api::format_types_description(config);
-      let parts = templates::render_reduce_prompt(
-         "default",
-         &observations_json,
-         stat,
-         scope_candidates,
-         Some(&types_description),
-      )?;
-      let mode = config.resolved_api_mode(model_name);
-
-      let response_text = match mode {
-         ResolvedApiMode::ChatCompletions => {
-            let request = build_api_request(
-               config,
-               model_name,
-               config.temperature,
-               vec![tool],
-               &parts.system,
-               &parts.user,
-               "reduce",
-               "default",
-            );
-
-            let mut request_builder = client
-               .post(format!("{}/chat/completions", config.api_base_url))
-               .header("content-type", "application/json");
-
-            if let Some(api_key) = &config.api_key {
-               request_builder =
-                  request_builder.header("Authorization", format!("Bearer {api_key}"));
-            }
-
-            let (status, response_text) = crate::api::timed_send(
-               request_builder.json(&request),
-               "map-reduce/reduce",
-               model_name,
-            )
-            .await?;
-
-            if status.is_server_error() {
-               eprintln!(
-                  "{}",
-                  crate::style::error(&format!("Server error {status}: {response_text}"))
-               );
-               return Ok((true, None)); // Retry
-            }
-
-            if !status.is_success() {
-               return Err(CommitGenError::ApiError {
-                  status: status.as_u16(),
-                  body:   response_text,
-               });
-            }
-
-            response_text
-         },
-         ResolvedApiMode::AnthropicMessages => {
-            let prompt_caching = anthropic_prompt_caching_enabled(config);
-            let analysis_schema = build_analysis_schema(&type_enum);
-            let mut tools = if config.structured_outputs_enabled() {
-               Vec::new()
-            } else {
-               vec![AnthropicTool {
-                  name:          "create_conventional_analysis".to_string(),
-                  description:   "Analyze changes and classify as conventional commit with type, \
-                                  scope, details, and metadata"
-                     .to_string(),
-                  input_schema:  analysis_schema.clone(),
-                  cache_control: None,
-               }]
-            };
-            if !config.structured_outputs_enabled() {
-               cache_last_anthropic_tool(&mut tools, prompt_caching);
-            }
-
-            let request = AnthropicRequest {
-               model: model_name.to_string(),
-               max_tokens: 1500,
-               temperature: config.temperature,
-               system: anthropic_system_content(&parts.system, prompt_caching),
-               tools,
-               tool_choice: if config.structured_outputs_enabled() {
-                  None
-               } else {
-                  Some(AnthropicToolChoice {
-                     choice_type: "tool".to_string(),
-                     name:        "create_conventional_analysis".to_string(),
-                  })
-               },
-               output_format: config
-                  .structured_outputs_enabled()
-                  .then(|| anthropic_output_format(analysis_schema.clone())),
-               messages: vec![AnthropicMessage {
-                  role:    "user".to_string(),
-                  content: vec![anthropic_text_content(parts.user, false)],
-               }],
-            };
-
-            let mut request_builder = append_anthropic_cache_beta_header(
-               client
-                  .post(anthropic_messages_url(&config.api_base_url))
-                  .header("content-type", "application/json")
-                  .header("anthropic-version", "2023-06-01"),
-               prompt_caching,
-            );
-
-            if let Some(api_key) = &config.api_key {
-               request_builder = request_builder.header("x-api-key", api_key);
-            }
-
-            let (status, response_text) = crate::api::timed_send(
-               request_builder.json(&request),
-               "map-reduce/reduce",
-               model_name,
-            )
-            .await?;
-
-            if status.is_server_error() {
-               eprintln!(
-                  "{}",
-                  crate::style::error(&format!("Server error {status}: {response_text}"))
-               );
-               return Ok((true, None));
-            }
-
-            if !status.is_success() {
-               return Err(CommitGenError::ApiError {
-                  status: status.as_u16(),
-                  body:   response_text,
-               });
-            }
-
-            response_text
-         },
-      };
-
-      if response_text.trim().is_empty() {
-         crate::style::warn("Model returned empty response body for synthesis; retrying.");
-         return Ok((true, None));
-      }
-
-      match mode {
-         ResolvedApiMode::ChatCompletions => {
-            let api_response: ApiResponse = serde_json::from_str(&response_text).map_err(|e| {
-               CommitGenError::Other(format!(
-                  "Failed to parse synthesis response JSON: {e}. Response body: {}",
-                  response_snippet(&response_text, 500)
-               ))
-            })?;
-
-            if api_response.choices.is_empty() {
-               return Err(CommitGenError::Other(
-                  "API returned empty response for synthesis".to_string(),
-               ));
-            }
-
-            let message = &api_response.choices[0].message;
-            if let Some(refusal) = &message.refusal {
-               return Err(CommitGenError::Other(format!(
-                  "Model refused synthesis request: {refusal}"
-               )));
-            }
-
-            if !message.tool_calls.is_empty() {
-               let tool_call = &message.tool_calls[0];
-               if tool_call
-                  .function
-                  .name
-                  .ends_with("create_conventional_analysis")
-               {
-                  let args = &tool_call.function.arguments;
-                  if args.is_empty() {
-                     return Err(CommitGenError::Other(
-                        "Model returned empty function arguments for synthesis".to_string(),
-                     ));
-                  }
-
-                  let analysis: ConventionalAnalysis = serde_json::from_str(args).map_err(|e| {
-                     CommitGenError::Other(format!("Failed to parse synthesis response: {e}"))
-                  })?;
-
-                  return Ok((false, Some(analysis)));
-               }
-            }
-
-            // Fallback
-            if let Some(content) = &message.content {
-               if content.trim().is_empty() {
-                  crate::style::warn("Model returned empty content for synthesis; retrying.");
-                  return Ok((true, None));
-               }
-               let analysis: ConventionalAnalysis =
-                  serde_json::from_str(content.trim()).map_err(|e| {
-                     CommitGenError::Other(format!(
-                        "Failed to parse synthesis content JSON: {e}. Content: {}",
-                        response_snippet(content, 500)
-                     ))
-                  })?;
-               return Ok((false, Some(analysis)));
-            }
-
-            Err(CommitGenError::Other("No analysis found in synthesis response".to_string()))
-         },
-         ResolvedApiMode::AnthropicMessages => {
-            let (tool_input, text_content, stop_reason) =
-               extract_anthropic_content(&response_text, "create_conventional_analysis")?;
-
-            if let Some(input) = tool_input {
-               let analysis: ConventionalAnalysis = serde_json::from_value(input).map_err(|e| {
-                  CommitGenError::Other(format!(
-                     "Failed to parse synthesis tool input: {e}. Response body: {}",
-                     response_snippet(&response_text, 500)
-                  ))
-               })?;
-               return Ok((false, Some(analysis)));
-            }
-
-            if text_content.trim().is_empty() {
-               if stop_reason.as_deref() == Some("max_tokens") {
-                  crate::style::warn(
-                     "Anthropic stopped at max_tokens with empty synthesis; retrying.",
-                  );
-                  return Ok((true, None));
-               }
-               crate::style::warn("Model returned empty content for synthesis; retrying.");
-               return Ok((true, None));
-            }
-
-            let analysis: ConventionalAnalysis = serde_json::from_str(text_content.trim())
-               .map_err(|e| {
-                  CommitGenError::Other(format!(
-                     "Failed to parse synthesis content JSON: {e}. Content: {}",
-                     response_snippet(&text_content, 500)
-                  ))
-               })?;
-            Ok((false, Some(analysis)))
-         },
-      }
-   })
-   .await
+   Ok(response.output)
 }
 
 /// Run full map-reduce pipeline for large diffs
@@ -790,21 +350,6 @@ pub async fn run_map_reduce(
    reduce_phase(&observations, stat, scope_candidates, model_name, config).await
 }
 
-// ============================================================================
-// API types (duplicated from api.rs to avoid circular deps)
-// ============================================================================
-
-fn response_snippet(body: &str, limit: usize) -> String {
-   if body.is_empty() {
-      return "<empty response body>".to_string();
-   }
-   let mut snippet = body.trim().to_string();
-   if snippet.len() > limit {
-      snippet.truncate(limit);
-      snippet.push_str("...");
-   }
-   snippet
-}
 
 fn parse_observations_from_text(text: &str) -> Vec<String> {
    let trimmed = text.trim();
@@ -832,227 +377,6 @@ fn parse_observations_from_text(text: &str) -> Vec<String> {
       .collect()
 }
 
-fn anthropic_messages_url(base_url: &str) -> String {
-   let trimmed = base_url.trim_end_matches('/');
-   if trimmed.ends_with("/v1") {
-      format!("{trimmed}/messages")
-   } else {
-      format!("{trimmed}/v1/messages")
-   }
-}
-
-fn prompt_cache_control() -> PromptCacheControl {
-   PromptCacheControl { control_type: "ephemeral".to_string() }
-}
-
-fn anthropic_prompt_caching_enabled(config: &CommitConfig) -> bool {
-   config.api_base_url.to_lowercase().contains("anthropic.com")
-}
-
-fn append_anthropic_cache_beta_header(
-   request_builder: reqwest::RequestBuilder,
-   enable_cache: bool,
-) -> reqwest::RequestBuilder {
-   if enable_cache {
-      request_builder.header("anthropic-beta", "prompt-caching-2024-07-31")
-   } else {
-      request_builder
-   }
-}
-
-fn anthropic_text_content(text: String, cache: bool) -> AnthropicContent {
-   AnthropicContent {
-      content_type: "text".to_string(),
-      text,
-      cache_control: cache.then(prompt_cache_control),
-   }
-}
-
-fn anthropic_system_content(system_prompt: &str, cache: bool) -> Option<Vec<AnthropicContent>> {
-   if system_prompt.trim().is_empty() {
-      None
-   } else {
-      Some(vec![anthropic_text_content(system_prompt.to_string(), cache)])
-   }
-}
-
-fn cache_last_anthropic_tool(tools: &mut [AnthropicTool], cache: bool) {
-   if cache && let Some(last) = tools.last_mut() {
-      last.cache_control = Some(prompt_cache_control());
-   }
-}
-
-fn extract_anthropic_content(
-   response_text: &str,
-   tool_name: &str,
-) -> Result<(Option<serde_json::Value>, String, Option<String>)> {
-   let value: serde_json::Value = serde_json::from_str(response_text).map_err(|e| {
-      CommitGenError::Other(format!(
-         "Failed to parse Anthropic response JSON: {e}. Response body: {}",
-         response_snippet(response_text, 500)
-      ))
-   })?;
-
-   let stop_reason = value
-      .get("stop_reason")
-      .and_then(|v| v.as_str())
-      .map(str::to_string);
-
-   let mut tool_input: Option<serde_json::Value> = None;
-   let mut text_parts = Vec::new();
-
-   if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
-      for item in content {
-         let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-         match item_type {
-            "tool_use" => {
-               let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-               if name == tool_name
-                  && let Some(input) = item.get("input")
-               {
-                  tool_input = Some(input.clone());
-               }
-            },
-            "text" => {
-               if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                  text_parts.push(text.to_string());
-               }
-            },
-            _ => {},
-         }
-      }
-   }
-
-   Ok((tool_input, text_parts.join("\n"), stop_reason))
-}
-
-#[derive(Debug, Serialize)]
-struct Message {
-   role:    String,
-   content: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct FunctionParameters {
-   #[serde(rename = "type")]
-   param_type: String,
-   properties: serde_json::Value,
-   required:   Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Function {
-   name:        String,
-   description: String,
-   parameters:  FunctionParameters,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Tool {
-   #[serde(rename = "type")]
-   tool_type: String,
-   function:  Function,
-}
-
-#[derive(Debug, Serialize)]
-struct ApiRequest {
-   model:            String,
-   max_tokens:       u32,
-   temperature:      f32,
-   #[serde(skip_serializing_if = "Vec::is_empty")]
-   tools:            Vec<Tool>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice:      Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   response_format:  Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   prompt_cache_key: Option<String>,
-   messages:         Vec<Message>,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicRequest {
-   model:         String,
-   max_tokens:    u32,
-   temperature:   f32,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   system:        Option<Vec<AnthropicContent>>,
-   #[serde(skip_serializing_if = "Vec::is_empty")]
-   tools:         Vec<AnthropicTool>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice:   Option<AnthropicToolChoice>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   output_format: Option<serde_json::Value>,
-   messages:      Vec<AnthropicMessage>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PromptCacheControl {
-   #[serde(rename = "type")]
-   control_type: String,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicTool {
-   name:          String,
-   description:   String,
-   input_schema:  serde_json::Value,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   cache_control: Option<PromptCacheControl>,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicToolChoice {
-   #[serde(rename = "type")]
-   choice_type: String,
-   name:        String,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicMessage {
-   role:    String,
-   content: Vec<AnthropicContent>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AnthropicContent {
-   #[serde(rename = "type")]
-   content_type:  String,
-   text:          String,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   cache_control: Option<PromptCacheControl>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolCall {
-   function: FunctionCall,
-}
-
-#[derive(Debug, Deserialize)]
-struct FunctionCall {
-   name:      String,
-   arguments: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-   message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseMessage {
-   #[serde(default)]
-   tool_calls: Vec<ToolCall>,
-   #[serde(default)]
-   content:    Option<String>,
-   #[serde(default)]
-   refusal:    Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiResponse {
-   choices: Vec<Choice>,
-}
 
 #[derive(Debug, Deserialize)]
 struct FileObservationResponse {
@@ -1149,26 +473,6 @@ fn build_observation_schema() -> serde_json::Value {
    )
 }
 
-fn build_observation_tool() -> Tool {
-   let schema = build_observation_schema();
-   let properties = schema
-      .get("properties")
-      .cloned()
-      .expect("observation schema always includes properties");
-
-   Tool {
-      tool_type: "function".to_string(),
-      function:  Function {
-         name:        "create_file_observation".to_string(),
-         description: "Extract observations from a single file's changes".to_string(),
-         parameters:  FunctionParameters {
-            param_type: "object".to_string(),
-            properties,
-            required: vec!["observations".to_string()],
-         },
-      },
-   }
-}
 
 fn build_analysis_schema(type_enum: &[&str]) -> serde_json::Value {
    strict_json_schema(
@@ -1217,86 +521,6 @@ fn build_analysis_schema(type_enum: &[&str]) -> serde_json::Value {
    )
 }
 
-fn build_analysis_tool(type_enum: &[&str]) -> Tool {
-   let schema = build_analysis_schema(type_enum);
-   let properties = schema
-      .get("properties")
-      .cloned()
-      .expect("analysis schema always includes properties");
-
-   Tool {
-      tool_type: "function".to_string(),
-      function:  Function {
-         name:        "create_conventional_analysis".to_string(),
-         description: "Synthesize observations into conventional commit analysis".to_string(),
-         parameters:  FunctionParameters {
-            param_type: "object".to_string(),
-            properties,
-            required: vec!["type".to_string(), "details".to_string(), "issue_refs".to_string()],
-         },
-      },
-   }
-}
-
-#[allow(
-   clippy::too_many_arguments,
-   reason = "needs model/tool/prompt metadata to build deterministic cacheable request"
-)]
-fn build_api_request(
-   config: &CommitConfig,
-   model: &str,
-   temperature: f32,
-   tools: Vec<Tool>,
-   system: &str,
-   user: &str,
-   prompt_family: &str,
-   prompt_variant: &str,
-) -> ApiRequest {
-   let tool_name = tools.first().map(|t| t.function.name.clone());
-   let response_format = if config.structured_outputs_enabled() {
-      tools.first().map(|tool| {
-         let required = tool
-            .function
-            .parameters
-            .required
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-         let schema = strict_json_schema(tool.function.parameters.properties.clone(), &required);
-         openai_response_format(&tool.function.name, schema)
-      })
-   } else {
-      None
-   };
-
-   let mut messages = Vec::new();
-   if !system.is_empty() {
-      messages.push(Message { role: "system".to_string(), content: system.to_string() });
-   }
-   messages.push(Message { role: "user".to_string(), content: user.to_string() });
-
-   let prompt_cache_key =
-      crate::api::openai_prompt_cache_key(config, model, prompt_family, prompt_variant, system);
-
-   ApiRequest {
-      model: model.to_string(),
-      max_tokens: 1500,
-      temperature,
-      tools: if config.structured_outputs_enabled() {
-         Vec::new()
-      } else {
-         tools
-      },
-      tool_choice: if config.structured_outputs_enabled() {
-         None
-      } else {
-         tool_name.map(|_| serde_json::json!("required"))
-      },
-      response_format,
-      prompt_cache_key,
-      messages,
-   }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1307,45 +531,6 @@ mod tests {
       TokenCounter::new("http://localhost:4000", None, "claude-sonnet-4.5")
    }
 
-   #[test]
-   fn test_build_api_request_uses_tool_calling_by_default() {
-      let config = CommitConfig::default();
-      let request = build_api_request(
-         &config,
-         "claude-sonnet-4.5",
-         0.2,
-         vec![build_observation_tool()],
-         "system prompt",
-         "user prompt",
-         "map",
-         "default",
-      );
-      let value = serde_json::to_value(&request).expect("request should serialize to JSON");
-
-      assert!(value.get("tools").is_some());
-      assert!(value.get("tool_choice").is_some());
-      assert!(value.get("response_format").is_none());
-   }
-
-   #[test]
-   fn test_build_api_request_uses_structured_outputs_when_enabled() {
-      let config = CommitConfig { structured_outputs: true, ..Default::default() };
-      let request = build_api_request(
-         &config,
-         "claude-sonnet-4.5",
-         0.2,
-         vec![build_observation_tool()],
-         "system prompt",
-         "user prompt",
-         "map",
-         "default",
-      );
-      let value = serde_json::to_value(&request).expect("request should serialize to JSON");
-
-      assert!(value.get("tools").is_none());
-      assert!(value.get("tool_choice").is_none());
-      assert_eq!(value["response_format"]["type"], serde_json::json!("json_schema"));
-   }
 
    #[test]
    fn test_should_use_map_reduce_disabled() {

@@ -1,12 +1,9 @@
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::{
-   api::{
-      AnalysisContext, generate_conventional_analysis, openai_prompt_cache_key,
-      openai_response_format, strict_json_schema,
-   },
+   api::{AnalysisContext, OneShotSpec, generate_conventional_analysis, run_oneshot, strict_json_schema},
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
@@ -19,82 +16,6 @@ use crate::{
    validation::validate_commit_message,
 };
 
-#[derive(Debug, Serialize)]
-struct Message {
-   role:    String,
-   content: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct FunctionParameters {
-   #[serde(rename = "type")]
-   param_type: String,
-   properties: serde_json::Value,
-   required:   Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Function {
-   name:        String,
-   description: String,
-   parameters:  FunctionParameters,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Tool {
-   #[serde(rename = "type")]
-   tool_type: String,
-   function:  Function,
-}
-
-#[derive(Debug, Serialize)]
-struct ApiRequest {
-   model:            String,
-   max_tokens:       u32,
-   temperature:      f32,
-   #[serde(skip_serializing_if = "Vec::is_empty")]
-   tools:            Vec<Tool>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice:      Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   response_format:  Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   prompt_cache_key: Option<String>,
-   messages:         Vec<Message>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ToolCall {
-   function: FunctionCall,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct FunctionCall {
-   name:      String,
-   arguments: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Choice {
-   message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ResponseMessage {
-   #[serde(default)]
-   tool_calls:    Vec<ToolCall>,
-   #[serde(default)]
-   content:       Option<String>,
-   #[serde(default)]
-   function_call: Option<FunctionCall>,
-   #[serde(default)]
-   refusal:       Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ApiResponse {
-   choices: Vec<Choice>,
-}
 
 const COMPOSE_SYSTEM_PROMPT: &str = r#"You split git diffs into logical, atomic commit groups for compose mode.
 
@@ -151,88 +72,6 @@ struct ComposeResult {
    groups: Vec<ChangeGroup>,
 }
 
-fn parse_compose_groups_from_content(content: &str) -> Result<Vec<ChangeGroup>> {
-   fn try_parse(input: &str) -> Option<Vec<ChangeGroup>> {
-      let trimmed = input.trim();
-      if trimmed.is_empty() {
-         return None;
-      }
-
-      serde_json::from_str::<ComposeResult>(trimmed)
-         .map(|r| r.groups)
-         .ok()
-   }
-
-   let trimmed = content.trim();
-   if trimmed.is_empty() {
-      return Err(CommitGenError::Other(
-         "Model returned an empty compose analysis response".to_string(),
-      ));
-   }
-
-   if let Some(groups) = try_parse(trimmed) {
-      return Ok(groups);
-   }
-
-   if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-      && end >= start
-   {
-      let candidate = &trimmed[start..=end];
-      if let Some(groups) = try_parse(candidate) {
-         return Ok(groups);
-      }
-   }
-
-   let segments: Vec<&str> = trimmed.split("```").collect();
-   for (idx, segment) in segments.iter().enumerate() {
-      if idx % 2 == 1 {
-         let block = segment.trim();
-         let mut lines = block.lines();
-         let first_line = lines.next().unwrap_or_default();
-
-         let rest_owned: String;
-         let json_candidate = if first_line.trim_start().starts_with('{') {
-            block
-         } else {
-            let rest: String = lines.collect::<Vec<_>>().join("\n");
-            let trimmed_rest = rest.trim();
-            if trimmed_rest.is_empty() {
-               block
-            } else {
-               rest_owned = trimmed_rest.to_string();
-               &rest_owned
-            }
-         };
-
-         if let Some(groups) = try_parse(json_candidate) {
-            return Ok(groups);
-         }
-      }
-   }
-
-   Err(CommitGenError::Other("Failed to parse compose analysis from model response".to_string()))
-}
-
-fn parse_compose_groups_from_json(
-   raw: &str,
-) -> std::result::Result<Vec<ChangeGroup>, serde_json::Error> {
-   let trimmed = raw.trim();
-   if trimmed.starts_with('[') {
-      serde_json::from_str::<Vec<ChangeGroup>>(trimmed)
-   } else {
-      serde_json::from_str::<ComposeResult>(trimmed).map(|r| r.groups)
-   }
-}
-
-fn debug_failed_payload(source: &str, payload: &str, err: &serde_json::Error) {
-   let preview = payload.trim();
-   let preview = if preview.len() > 2000 {
-      format!("{}…", &preview[..2000])
-   } else {
-      preview.to_string()
-   };
-   eprintln!("Compose debug: failed to parse {source} payload ({err}); preview: {preview}");
-}
 
 fn group_affects_only_dependency_files(group: &ChangeGroup) -> bool {
    group
@@ -287,9 +126,7 @@ pub async fn analyze_for_compose(
    stat: &str,
    config: &CommitConfig,
    max_commits: usize,
-) -> Result<ComposeAnalysis> {
-   let client = crate::api::get_client(config);
-
+ ) -> Result<ComposeAnalysis> {
    let compose_schema = strict_json_schema(
       serde_json::json!({
          "groups": {
@@ -354,193 +191,36 @@ pub async fn analyze_for_compose(
       }),
       &["groups"],
    );
-   let compose_properties = compose_schema
-      .get("properties")
-      .cloned()
-      .expect("compose schema always includes properties");
-   let tool = Tool {
-      tool_type: "function".to_string(),
-      function:  Function {
-         name:        "create_compose_analysis".to_string(),
-         description: "Split changes into logical commit groups with dependencies".to_string(),
-         parameters:  FunctionParameters {
-            param_type: "object".to_string(),
-            properties: compose_properties,
-            required:   vec!["groups".to_string()],
-         },
-      },
-   };
 
    let user_prompt = COMPOSE_USER_PROMPT
       .replace("{STAT}", stat)
       .replace("{DIFF}", diff)
       .replace("{MAX_COMMITS}", &max_commits.to_string());
-   let prompt_cache_key =
-      openai_prompt_cache_key(config, &config.model, "compose", "default", COMPOSE_SYSTEM_PROMPT);
 
-   let request = ApiRequest {
-      model: config.model.clone(),
-      max_tokens: 8000,
-      temperature: config.temperature,
-      tools: if config.structured_outputs_enabled() {
-         Vec::new()
-      } else {
-         vec![tool]
+   let response = run_oneshot::<ComposeResult>(
+      config,
+      &OneShotSpec {
+         operation:        "compose",
+         model:            &config.model,
+         max_tokens:       8000,
+         temperature:      config.temperature,
+         prompt_family:    "compose",
+         prompt_variant:   "default",
+         system_prompt:    COMPOSE_SYSTEM_PROMPT,
+         user_prompt:      &user_prompt,
+         tool_name:        "create_compose_analysis",
+         tool_description: "Split changes into logical commit groups with dependencies",
+         schema:           &compose_schema,
+         debug:            None,
       },
-      tool_choice: if config.structured_outputs_enabled() {
-         None
-      } else {
-         Some(serde_json::json!("required"))
-      },
-      response_format: config
-         .structured_outputs_enabled()
-         .then(|| openai_response_format("compose_analysis", compose_schema.clone())),
-      prompt_cache_key,
-      messages: vec![
-         Message { role: "system".to_string(), content: COMPOSE_SYSTEM_PROMPT.to_string() },
-         Message { role: "user".to_string(), content: user_prompt },
-      ],
-   };
+   )
+   .await?;
 
-   let mut request_builder = client
-      .post(format!("{}/chat/completions", config.api_base_url))
-      .header("content-type", "application/json");
-
-   if let Some(api_key) = &config.api_key {
-      request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
-   }
-
-   let (status, response_text) =
-      crate::api::timed_send(request_builder.json(&request), "compose", &config.model).await?;
-   if !status.is_success() {
-      return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
-   }
-
-   let api_response: ApiResponse =
-      serde_json::from_str(&response_text).map_err(CommitGenError::JsonError)?;
-
-   if api_response.choices.is_empty() {
-      return Err(CommitGenError::Other(
-         "API returned empty response for compose analysis".to_string(),
-      ));
-   }
-
-   let mut last_parse_error: Option<CommitGenError> = None;
-
-   for choice in &api_response.choices {
-      let message = &choice.message;
-      if let Some(refusal) = &message.refusal {
-         last_parse_error =
-            Some(CommitGenError::Other(format!("Model refused compose analysis: {refusal}")));
-         continue;
-      }
-
-      if let Some(tool_call) = message.tool_calls.first()
-         && tool_call.function.name.ends_with("create_compose_analysis")
-      {
-         let args = &tool_call.function.arguments;
-         match parse_compose_groups_from_json(args) {
-            Ok(groups) => {
-               let dependency_order = compute_dependency_order(&groups)?;
-               return Ok(ComposeAnalysis { groups, dependency_order });
-            },
-            Err(err) => {
-               debug_failed_payload("tool_call", args, &err);
-               last_parse_error =
-                  Some(CommitGenError::Other(format!("Failed to parse compose analysis: {err}")));
-            },
-         }
-      }
-
-      if let Some(function_call) = &message.function_call
-         && function_call.name == "create_compose_analysis"
-      {
-         let args = &function_call.arguments;
-         match parse_compose_groups_from_json(args) {
-            Ok(groups) => {
-               let dependency_order = compute_dependency_order(&groups)?;
-               return Ok(ComposeAnalysis { groups, dependency_order });
-            },
-            Err(err) => {
-               debug_failed_payload("function_call", args, &err);
-               last_parse_error =
-                  Some(CommitGenError::Other(format!("Failed to parse compose analysis: {err}")));
-            },
-         }
-      }
-
-      if let Some(content) = &message.content {
-         match parse_compose_groups_from_content(content) {
-            Ok(groups) => {
-               let dependency_order = compute_dependency_order(&groups)?;
-               return Ok(ComposeAnalysis { groups, dependency_order });
-            },
-            Err(err) => last_parse_error = Some(err),
-         }
-      }
-   }
-
-   if let Some(err) = last_parse_error {
-      debug_compose_response(&api_response);
-      return Err(err);
-   }
-
-   debug_compose_response(&api_response);
-   Err(CommitGenError::Other("No compose analysis found in API response".to_string()))
+   let groups = response.output.groups;
+   let dependency_order = compute_dependency_order(&groups)?;
+   Ok(ComposeAnalysis { groups, dependency_order })
 }
 
-fn debug_compose_response(response: &ApiResponse) {
-   let raw_preview = serde_json::to_string(response).map_or_else(
-      |_| "<failed to serialize response>".to_string(),
-      |json| {
-         if json.len() > 4000 {
-            format!("{}…", &json[..4000])
-         } else {
-            json
-         }
-      },
-   );
-
-   eprintln!(
-      "Compose debug: received {} choice(s) from analysis model\n  raw: {}",
-      response.choices.len(),
-      raw_preview
-   );
-
-   for (idx, choice) in response.choices.iter().enumerate() {
-      let message = &choice.message;
-      let tool_call = message.tool_calls.first();
-      let tool_name = tool_call.map_or("<none>", |tc| tc.function.name.as_str());
-      let tool_args_len = tool_call.map_or(0, |tc| tc.function.arguments.len());
-
-      let function_call_name = message
-         .function_call
-         .as_ref()
-         .map_or("<none>", |fc| fc.name.as_str());
-      let function_call_args_len = message
-         .function_call
-         .as_ref()
-         .map_or(0, |fc| fc.arguments.len());
-
-      let content_preview = message.content.as_deref().map_or_else(
-         || "<none>".to_string(),
-         |c| {
-            let trimmed = c.trim();
-            if trimmed.len() > 200 {
-               format!("{}…", &trimmed[..200])
-            } else {
-               trimmed.to_string()
-            }
-         },
-      );
-
-      eprintln!(
-         "Choice #{idx}: tool_call={tool_name} (args {tool_args_len} chars), \
-          function_call={function_call_name} (args {function_call_args_len} chars), \
-          content_preview={content_preview}"
-      );
-   }
-}
 
 /// Compute topological order for commit groups based on dependencies
 fn compute_dependency_order(groups: &[ChangeGroup]) -> Result<Vec<usize>> {

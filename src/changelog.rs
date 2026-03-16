@@ -10,22 +10,19 @@ use std::{
    collections::HashMap,
    path::{Path, PathBuf},
    process::Command,
-   time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::{
-   api::{openai_response_format, strict_json_schema},
+   api::{OneShotSpec, run_oneshot, strict_json_schema},
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
    patch::stage_files,
    templates,
    tokens::create_token_counter,
-   types::{
-      ChangelogBoundary, ChangelogCategory, Function, FunctionParameters, Tool, UnreleasedSection,
-   },
+   types::{ChangelogBoundary, ChangelogCategory, UnreleasedSection},
 };
 
 /// Response from the changelog generation LLM call
@@ -34,59 +31,6 @@ struct ChangelogResponse {
    entries: HashMap<String, Vec<String>>,
 }
 
-// OpenAI-style API request/response types
-#[derive(Debug, Serialize)]
-struct ApiRequest {
-   model:            String,
-   max_tokens:       u32,
-   temperature:      f32,
-   #[serde(skip_serializing_if = "Vec::is_empty")]
-   tools:            Vec<Tool>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice:      Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   response_format:  Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   prompt_cache_key: Option<String>,
-   messages:         Vec<Message>,
-}
-
-#[derive(Debug, Serialize)]
-struct Message {
-   role:    String,
-   content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiResponse {
-   choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-   message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseMessage {
-   #[serde(default)]
-   tool_calls: Vec<ToolCall>,
-   #[serde(default)]
-   content:    Option<String>,
-   #[serde(default)]
-   refusal:    Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolCall {
-   function: FunctionCall,
-}
-
-#[derive(Debug, Deserialize)]
-struct FunctionCall {
-   name:      String,
-   arguments: String,
-}
 
 /// Run the changelog maintenance flow
 ///
@@ -279,11 +223,7 @@ async fn generate_changelog_entries(
 async fn call_changelog_api(
    parts: &templates::PromptParts,
    config: &CommitConfig,
-) -> Result<ChangelogResponse> {
-   let client = crate::api::get_client(config);
-
-   let model = config.model.clone();
-
+ ) -> Result<ChangelogResponse> {
    let changelog_schema = strict_json_schema(
       serde_json::json!({
          "entries": {
@@ -331,187 +271,27 @@ async fn call_changelog_api(
       }),
       &["entries"],
    );
-   let changelog_properties = changelog_schema
-      .get("properties")
-      .cloned()
-      .expect("changelog schema always includes properties");
 
-   let tool = Tool {
-      tool_type: "function".to_string(),
-      function:  Function {
-         name:        "create_changelog_entries".to_string(),
-         description: "Generate changelog entries grouped by category".to_string(),
-         parameters:  FunctionParameters {
-            param_type: "object".to_string(),
-            properties: changelog_properties,
-            required:   vec!["entries".to_string()],
-         },
+   let response = run_oneshot::<ChangelogResponse>(
+      config,
+      &OneShotSpec {
+         operation:        "changelog",
+         model:            &config.model,
+         max_tokens:       2000,
+         temperature:      config.temperature,
+         prompt_family:    "changelog",
+         prompt_variant:   "default",
+         system_prompt:    &parts.system,
+         user_prompt:      &parts.user,
+         tool_name:        "create_changelog_entries",
+         tool_description: "Generate changelog entries grouped by category",
+         schema:           &changelog_schema,
+         debug:            None,
       },
-   };
+   )
+   .await?;
 
-   let mut attempt = 0;
-   loop {
-      attempt += 1;
-
-      let mut messages = Vec::new();
-      if !parts.system.is_empty() {
-         messages.push(Message { role: "system".to_string(), content: parts.system.clone() });
-      }
-      messages.push(Message { role: "user".to_string(), content: parts.user.clone() });
-
-      let prompt_cache_key =
-         crate::api::openai_prompt_cache_key(config, &model, "changelog", "default", &parts.system);
-      let request = ApiRequest {
-         model: model.clone(),
-         max_tokens: 2000,
-         temperature: config.temperature,
-         tools: if config.structured_outputs_enabled() {
-            Vec::new()
-         } else {
-            vec![tool.clone()]
-         },
-         tool_choice: if config.structured_outputs_enabled() {
-            None
-         } else {
-            Some(serde_json::json!("required"))
-         },
-         response_format: config
-            .structured_outputs_enabled()
-            .then(|| openai_response_format("changelog_entries", changelog_schema.clone())),
-         prompt_cache_key,
-         messages,
-      };
-
-      let mut request_builder = client
-         .post(format!("{}/chat/completions", config.api_base_url))
-         .header("content-type", "application/json");
-
-      if let Some(api_key) = &config.api_key {
-         request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
-      }
-
-      let (status, response_text) =
-         crate::api::timed_send(request_builder.json(&request), "changelog", &model).await?;
-
-      if status.is_server_error() {
-         if attempt < config.max_retries {
-            let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
-            eprintln!(
-               "{}",
-               crate::style::warning(&format!(
-                  "Server error {status}, retry {attempt}/{} after {backoff_ms}ms...",
-                  config.max_retries
-               ))
-            );
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            continue;
-         }
-         return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
-      }
-
-      if !status.is_success() {
-         return Err(CommitGenError::ApiError { status: status.as_u16(), body: response_text });
-      }
-
-      // Try to parse as structured tool call response first
-      if let Ok(api_response) = serde_json::from_str::<ApiResponse>(&response_text) {
-         let message = &api_response.choices[0].message;
-         if let Some(refusal) = &message.refusal {
-            return Err(CommitGenError::Other(format!(
-               "Model refused changelog generation: {refusal}"
-            )));
-         }
-
-         // Check for tool calls (OpenAI format)
-         if !message.tool_calls.is_empty() {
-            let tool_call = &message.tool_calls[0];
-            if tool_call
-               .function
-               .name
-               .ends_with("create_changelog_entries")
-            {
-               let changelog_response: ChangelogResponse =
-                  serde_json::from_str(&tool_call.function.arguments).map_err(|e| {
-                     CommitGenError::Other(format!(
-                        "Failed to parse changelog tool arguments: {e}. Args: {}",
-                        tool_call
-                           .function
-                           .arguments
-                           .chars()
-                           .take(500)
-                           .collect::<String>()
-                     ))
-                  })?;
-               return Ok(changelog_response);
-            }
-         }
-
-         // Fallback: try content field (for models that don't support function calling)
-         if let Some(content) = &message.content {
-            let json_str = extract_json_from_content(content);
-            if !json_str.is_empty() {
-               let changelog_response: ChangelogResponse = serde_json::from_str(&json_str)
-                  .map_err(|e| {
-                     CommitGenError::Other(format!(
-                        "Failed to parse changelog response from content: {e}. Content: {}",
-                        json_str.chars().take(500).collect::<String>()
-                     ))
-                  })?;
-               return Ok(changelog_response);
-            }
-         }
-      }
-
-      // Last resort: try to extract JSON from raw response
-      let json_str = extract_json_from_content(&response_text);
-      if json_str.is_empty() {
-         return Err(CommitGenError::Other(format!(
-            "Changelog API returned no tool calls or parseable content. Raw response: {}",
-            response_text.chars().take(1000).collect::<String>()
-         )));
-      }
-      let changelog_response: ChangelogResponse = serde_json::from_str(&json_str).map_err(|e| {
-         CommitGenError::Other(format!(
-            "Failed to parse changelog response: {e}. Content was: {}",
-            json_str.chars().take(500).collect::<String>()
-         ))
-      })?;
-
-      return Ok(changelog_response);
-   }
-}
-
-/// Extract JSON from content that may be wrapped in markdown code blocks
-fn extract_json_from_content(content: &str) -> String {
-   let trimmed = content.trim();
-
-   // Try to find JSON in code blocks
-   if let Some(start) = trimmed.find("```json") {
-      let after_marker = &trimmed[start + 7..];
-      if let Some(end) = after_marker.find("```") {
-         return after_marker[..end].trim().to_string();
-      }
-   }
-
-   // Try generic code block
-   if let Some(start) = trimmed.find("```") {
-      let after_marker = &trimmed[start + 3..];
-      // Skip optional language identifier
-      let content_start = after_marker.find('\n').map_or(0, |i| i + 1);
-      let after_newline = &after_marker[content_start..];
-      if let Some(end) = after_newline.find("```") {
-         return after_newline[..end].trim().to_string();
-      }
-   }
-
-   // Try to find raw JSON object
-   if let Some(start) = trimmed.find('{')
-      && let Some(end) = trimmed.rfind('}')
-   {
-      return trimmed[start..=end].to_string();
-   }
-
-   trimmed.to_string()
+   Ok(response.output)
 }
 
 /// Format existing entries for LLM context
@@ -826,7 +606,7 @@ mod tests {
    #[test]
    fn test_extract_json_from_content_raw() {
       let content = r#"{"entries": {"Added": ["entry 1"]}}"#;
-      let result = extract_json_from_content(content);
+      let result = crate::api::extract_json_from_content(content);
       assert_eq!(result, r#"{"entries": {"Added": ["entry 1"]}}"#);
    }
 
@@ -839,7 +619,7 @@ mod tests {
 ```
 
 That's all!"#;
-      let result = extract_json_from_content(content);
+      let result = crate::api::extract_json_from_content(content);
       assert_eq!(result, r#"{"entries": {"Added": ["entry 1"]}}"#);
    }
 
@@ -848,7 +628,7 @@ That's all!"#;
       let content = r#"```
 {"entries": {"Fixed": ["bug fix"]}}
 ```"#;
-      let result = extract_json_from_content(content);
+      let result = crate::api::extract_json_from_content(content);
       assert_eq!(result, r#"{"entries": {"Fixed": ["bug fix"]}}"#);
    }
 

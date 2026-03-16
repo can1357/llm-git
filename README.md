@@ -140,8 +140,7 @@ summary_hard_limit = 128                  # Absolute max
 # Features
 changelog_enabled = true
 map_reduce_enabled = true                 # Parallel analysis for large commits
-structured_outputs = false                # Use response_format/output_format instead of tools when supported
-temperature = 0.2
+temperature = 0.2                         # Structured-output-first, then tools, then JSON content parse
 
 # Commit signing
 gpg_sign = false                          # GPG sign commits by default (-S)
@@ -170,7 +169,7 @@ api_key = "sk-..."
 model = "gpt-4o"
 ```
 
-Set `structured_outputs = true` for providers/models that support JSON-schema responses. Leave it `false` to keep the default tool-calling behavior.
+The client now prefers provider-native structured outputs, falls back to tool calling when unsupported, and only then falls back to parsing JSON content from the model response.
 
 ### Commit Types
 
@@ -217,7 +216,6 @@ default = true
 |----------|-------------|---------|
 | `LLM_GIT_API_URL` | API endpoint | `http://localhost:4000` |
 | `LLM_GIT_API_KEY` | API key | none |
-| `LLM_GIT_STRUCTURED_OUTPUTS` | Enable structured outputs (`1`/`true`) | `false` |
 | `LLM_GIT_CONFIG` | Config file path | `~/.config/llm-git/config.toml` |
 | `LLM_GIT_VERBOSE` | Debug output | `false` |
 
