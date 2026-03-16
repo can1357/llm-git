@@ -565,9 +565,7 @@ pub async fn generate_conventional_analysis<'a>(
                max_tokens:       1000,
                temperature:      config.temperature,
                tools:            vec![tool],
-               tool_choice:      Some(
-                  serde_json::json!({ "type": "function", "function": { "name": "create_conventional_analysis" } }),
-               ),
+                  tool_choice:      Some(serde_json::json!("required")),
                prompt_cache_key,
                messages:         vec![
                   Message { role: "system".to_string(), content: parts.system },
@@ -1072,10 +1070,7 @@ pub async fn generate_summary_from_analysis<'a>(
                   max_tokens:       200,
                   temperature:      config.temperature,
                   tools:            vec![tool],
-                  tool_choice:      Some(serde_json::json!({
-                     "type": "function",
-                     "function": { "name": "create_commit_summary" }
-                  })),
+                  tool_choice:      Some(serde_json::json!("required")),
                   prompt_cache_key,
                   messages:         vec![
                      Message { role: "system".to_string(), content: parts.system },
@@ -1667,9 +1662,7 @@ pub async fn generate_fast_commit(
                max_tokens:       500,
                temperature:      config.temperature,
                tools:            vec![tool],
-               tool_choice:      Some(
-                  serde_json::json!({ "type": "function", "function": { "name": "create_fast_commit" } }),
-               ),
+               tool_choice:      Some(serde_json::json!("required")),
                prompt_cache_key,
                messages:         vec![
                   Message { role: "system".to_string(), content: parts.system },

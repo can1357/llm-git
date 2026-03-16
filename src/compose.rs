@@ -367,9 +367,7 @@ pub async fn analyze_for_compose(
       max_tokens: 8000,
       temperature: config.temperature,
       tools: vec![tool],
-      tool_choice: Some(
-         serde_json::json!({ "type": "function", "function": { "name": "create_compose_analysis" } }),
-      ),
+      tool_choice: Some(serde_json::json!("required")),
       prompt_cache_key,
       messages: vec![
          Message { role: "system".to_string(), content: COMPOSE_SYSTEM_PROMPT.to_string() },

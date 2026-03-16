@@ -1237,8 +1237,7 @@ fn build_api_request(
       model: model.to_string(),
       max_tokens: 1500,
       temperature,
-      tool_choice: tool_name
-         .map(|name| serde_json::json!({ "type": "function", "function": { "name": name } })),
+      tool_choice: tool_name.map(|_| serde_json::json!("required")),
       prompt_cache_key,
       tools,
       messages,
