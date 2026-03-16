@@ -890,7 +890,7 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                   return OneShotParseOutcome::Success(OneShotResponse {
                      output,
                      source:      OneShotSource::ToolCall,
-                     text_content: (!text_content.is_empty()).then_some(text_content.clone()),
+                     text_content: (!text_content.is_empty()).then_some(text_content),
                      stop_reason,
                   });
                },
