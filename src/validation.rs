@@ -159,6 +159,8 @@ pub fn validate_commit_message(msg: &ConventionalCommit, config: &CommitConfig) 
    // Validate commit type
    let valid_types = [
       "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci", "revert",
+      "deps", "security", "config", "ux", "release", "hotfix", "infra", "init", "merge", "hack",
+      "wip",
    ];
    if !valid_types.contains(&msg.commit_type.as_str()) {
       return Err(CommitGenError::InvalidCommitType(format!(

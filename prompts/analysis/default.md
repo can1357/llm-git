@@ -63,7 +63,7 @@ Call `create_conventional_analysis` with:
 
 ```json
 {
-  "type": "feat|fix|refactor|docs|test|chore|style|perf|build|ci|revert",
+  "type": "feat|fix|refactor|docs|test|chore|style|perf|build|ci|revert|deps|security|config|ux|release|hotfix|infra|init|merge|hack|wip",
   "scope": "component-name" | null,
   "details": [
     {

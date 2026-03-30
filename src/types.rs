@@ -126,12 +126,12 @@ pub fn default_types() -> IndexMap<String, TypeConfig> {
          ..Default::default()
       }),
       ("chore".to_string(), TypeConfig {
-         description: "Maintenance tasks, dependencies, tooling".to_string(),
-         file_patterns: vec![
-            ".gitignore".to_string(),
-            "*.lock".to_string(),
-            "config files".to_string(),
-         ],
+         description: "Housekeeping: tooling scripts, editor config, miscellaneous maintenance \
+                       not covered by other types"
+            .to_string(),
+         file_patterns: vec![".gitignore".to_string(), "*.lock".to_string()],
+         hint: "Use deps for version bumps, config for app/env config, build for build scripts."
+            .to_string(),
          ..Default::default()
       }),
       ("style".to_string(), TypeConfig {
@@ -168,15 +168,139 @@ pub fn default_types() -> IndexMap<String, TypeConfig> {
          diff_indicators: vec!["Revert".to_string()],
          ..Default::default()
       }),
+      // --- Extended vocabulary ---
+      ("deps".to_string(), TypeConfig {
+         description: "Dependency version bumps (Cargo.toml, package.json, go.mod, \
+                       requirements.txt, etc.)"
+            .to_string(),
+         file_patterns: vec![
+            "Cargo.toml".to_string(),
+            "package.json".to_string(),
+            "go.mod".to_string(),
+            "requirements.txt".to_string(),
+            "pyproject.toml".to_string(),
+         ],
+         hint: "Version bumps only. Build system changes belong in build; lockfile-only changes \
+                can be deps."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("security".to_string(), TypeConfig {
+         description: "Security hardening, CVE patches, auth improvements, input sanitization, \
+                       rate limiting"
+            .to_string(),
+         diff_indicators: vec![
+            "sanitize".to_string(),
+            "auth".to_string(),
+            "CVE".to_string(),
+            "rate limit".to_string(),
+            "HMAC".to_string(),
+         ],
+         hint: "Use for proactive hardening too, not just bug fixes. Security-motivated fix → \
+                security, not fix."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("config".to_string(), TypeConfig {
+         description: "Application or environment configuration changes (.env, settings, feature \
+                       flags, runtime config)"
+            .to_string(),
+         file_patterns: vec![
+            ".env".to_string(),
+            "settings.toml".to_string(),
+            "config.yaml".to_string(),
+         ],
+         hint: "App/runtime config. Build system config → build; CI config → ci; dev tooling → \
+                chore."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("ux".to_string(), TypeConfig {
+         description: "Usability and ergonomics improvements to existing interfaces (CLI flags, \
+                       error messages, output formatting)"
+            .to_string(),
+         hint: "Existing feature made easier/clearer → ux. New capability → feat.".to_string(),
+         ..Default::default()
+      }),
+      ("release".to_string(), TypeConfig {
+         description: "Version bump and release preparation (CHANGELOG.md updates, version files, \
+                       release tags)"
+            .to_string(),
+         file_patterns: vec![
+            "CHANGELOG.md".to_string(),
+            "CHANGELOG".to_string(),
+            "VERSION".to_string(),
+         ],
+         hint: "Only for the release commit itself. Code changes alongside a release use their \
+                own type."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("hotfix".to_string(), TypeConfig {
+         description: "Critical production fix requiring immediate patch, often on a dedicated \
+                       hotfix branch"
+            .to_string(),
+         hint: "Reserve for genuine production emergencies. Normal bugs → fix.".to_string(),
+         ..Default::default()
+      }),
+      ("infra".to_string(), TypeConfig {
+         description: "Infrastructure-as-code changes (Terraform, Kubernetes manifests, Ansible, \
+                       cloud config)"
+            .to_string(),
+         file_patterns: vec![
+            "*.tf".to_string(),
+            "helm/".to_string(),
+            "terraform/".to_string(),
+            "k8s/".to_string(),
+         ],
+         ..Default::default()
+      }),
+      ("init".to_string(), TypeConfig {
+         description: "Initial commit bootstrapping a project, module, or major subsystem"
+            .to_string(),
+         hint: "Use once per project/module bootstrap. Subsequent setup → chore or build."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("merge".to_string(), TypeConfig {
+         description: "Merge or sync commit with no standalone logic change (merge branches, sync \
+                       forks)"
+            .to_string(),
+         hint: "Only when the commit is purely a merge. Squashed logic changes → use the \
+                appropriate type."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("hack".to_string(), TypeConfig {
+         description: "Deliberate temporary workaround or shortcut with known technical debt"
+            .to_string(),
+         hint: "Must signal intent to revisit in the body (e.g., TODO: replace once X lands)."
+            .to_string(),
+         ..Default::default()
+      }),
+      ("wip".to_string(), TypeConfig {
+         description: "Incomplete in-progress work not ready for review or release".to_string(),
+         hint: "Prefer a real type for finished commits. Use wip only for explicit save-points."
+            .to_string(),
+         ..Default::default()
+      }),
    ])
 }
 
 /// Default global hint for cross-type disambiguation
 pub fn default_classifier_hint() -> String {
-   r"CRITICAL - feat vs refactor:
-- feat: ANY observable behavior change OR new public API
-- refactor: ONLY when provably unchanged (same tests, same API)
-When in doubt, prefer feat over refactor."
+   r"CRITICAL disambiguation rules:
+- feat vs refactor: feat=ANY observable behavior change OR new public API; refactor=provably unchanged (same tests, same API). When in doubt, prefer feat.
+- fix vs hotfix: hotfix=critical production emergency; fix=normal bug.
+- fix vs security: security=proactive hardening, CVE patches, auth hardening; fix=non-security bugs.
+- deps vs chore: deps=dependency version bumps only; chore=other maintenance (tooling, scripts).
+- deps vs build: build=build system scripts/config; deps=bumping library versions in manifests.
+- config vs chore: config=application/runtime config; chore=dev tooling and housekeeping.
+- ux vs feat: ux=existing feature made easier/clearer; feat=new capability.
+- init=bootstrap commit for a project or major subsystem; use once.
+- wip=in-progress save-point; prefer a real type for finished commits.
+- hack=deliberate temporary workaround; body must note intent to revisit.
+- merge=merge/sync commits with no standalone logic change."
       .to_string()
 }
 
@@ -409,6 +533,8 @@ pub struct CommitType(String);
 impl CommitType {
    const VALID_TYPES: &'static [&'static str] = &[
       "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci", "revert",
+      "deps", "security", "config", "ux", "release", "hotfix", "infra", "init", "merge", "hack",
+      "wip",
    ];
 
    /// Create new `CommitType` with validation
