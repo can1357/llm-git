@@ -3,7 +3,7 @@ use std::{
    time::{Duration, Instant},
 };
 
-use analysis::extract_scope_candidates;
+use analysis::{ScopeAnalyzer, extract_scope_candidates};
 use api::{
    AnalysisContext, fallback_summary, generate_analysis_with_map_reduce, generate_fast_commit,
    generate_summary_from_analysis,
@@ -15,8 +15,8 @@ use config::CommitConfig;
 use diff::{smart_truncate_diff, truncate_diff_by_lines};
 use error::{CommitGenError, Result};
 use git::{
-   ensure_git_repo, get_common_scopes, get_git_diff, get_git_stat, get_recent_commits, git_command,
-   git_commit, git_push, init_git_command_settings,
+   ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat, get_git_stat,
+   get_recent_commits, git_command, git_commit, git_push, init_git_command_settings,
 };
 use llm_git::{style, tokens::create_token_counter, *};
 use normalization::{format_commit_message, post_process_commit_message};
@@ -371,6 +371,19 @@ fn resolve_fast_mode_model(args: &Args, config: &CommitConfig) -> String {
    }
 }
 
+fn auto_fast_changed_lines(numstat: &str, config: &CommitConfig) -> Option<usize> {
+   if config.auto_fast_threshold_lines == 0 {
+      return None;
+   }
+
+   let changed_lines = ScopeAnalyzer::count_changed_lines(numstat, config);
+   if changed_lines == 0 || changed_lines > config.auto_fast_threshold_lines {
+      None
+   } else {
+      Some(changed_lines)
+   }
+}
+
 /// Main generation pipeline: get diff/stat → truncate → analyze → summarize →
 /// build commit
 async fn run_generation(
@@ -714,13 +727,6 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    let total_start = Instant::now();
    let mut timings = timings_enabled(args).then(Vec::new);
 
-   // Auto-stage if needed (same as standard mode)
-   if matches!(args.mode, Mode::Staged) {
-      let phase_start = Instant::now();
-      auto_stage_if_needed(&args.dir)?;
-      record_timing(&mut timings, "auto_stage_if_needed", phase_start.elapsed());
-   }
-
    // Skip changelog entirely in fast mode
 
    let phase_start = Instant::now();
@@ -768,7 +774,12 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
       style::dim(&format!("(temp: {})", config.temperature))
    );
 
-   status!("{} Analyzing {} changes...", style::info("›"), style::bold("staged"));
+   status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
+      Mode::Staged => style::bold("staged"),
+      Mode::Commit => style::bold("commit"),
+      Mode::Unstaged => style::bold("unstaged"),
+      Mode::Compose => unreachable!("compose mode handled separately"),
+   });
 
    // Single API call generates the complete commit
    let phase_start = Instant::now();
@@ -924,16 +935,34 @@ async fn main() -> miette::Result<()> {
       return Ok(run_test_mode(&args, &config).await?);
    }
 
+   // Auto-stage all changes if nothing staged in staged mode
+   if matches!(args.mode, Mode::Staged) {
+      let phase_start = Instant::now();
+      auto_stage_if_needed(&args.dir)?;
+      record_timing(&mut timings, "auto_stage_if_needed", phase_start.elapsed());
+   }
+
    // Route to fast mode if --fast flag is present
    if args.fast {
       return Ok(run_fast_mode(&args, &config).await?);
    }
 
-   // Auto-stage all changes if nothing staged in commit mode
-   if matches!(args.mode, Mode::Staged) {
+   if config.auto_fast_threshold_lines > 0 {
       let phase_start = Instant::now();
-      auto_stage_if_needed(&args.dir)?;
-      record_timing(&mut timings, "auto_stage_if_needed", phase_start.elapsed());
+      let numstat = get_git_numstat(&args.mode, args.target.as_deref(), &args.dir, &config)?;
+      record_timing(&mut timings, "get_git_numstat_for_auto_fast", phase_start.elapsed());
+
+      if let Some(changed_lines) = auto_fast_changed_lines(&numstat, &config) {
+         status!(
+            "{} {}",
+            style::info("›"),
+            style::dim(&format!(
+               "Auto-switching to fast mode ({changed_lines} changed lines <= {})",
+               config.auto_fast_threshold_lines
+            ))
+         );
+         return Ok(run_fast_mode(&args, &config).await?);
+      }
    }
 
    // Run changelog maintenance if not disabled (check both CLI flag and config)
@@ -1155,5 +1184,29 @@ mod tests {
       };
 
       assert_eq!(resolve_fast_mode_model(&args, &config), "gpt-5.3-codex-spark");
+   }
+
+   #[test]
+   fn test_auto_fast_changed_lines_matches_small_diff() {
+      let config = CommitConfig { auto_fast_threshold_lines: 200, ..CommitConfig::default() };
+      let numstat = "120\t70\tsrc/main.rs\n-\t-\tlogo.png";
+
+      assert_eq!(auto_fast_changed_lines(numstat, &config), Some(190));
+   }
+
+   #[test]
+   fn test_auto_fast_changed_lines_skips_large_diff() {
+      let config = CommitConfig { auto_fast_threshold_lines: 200, ..CommitConfig::default() };
+      let numstat = "120\t90\tsrc/main.rs";
+
+      assert_eq!(auto_fast_changed_lines(numstat, &config), None);
+   }
+
+   #[test]
+   fn test_auto_fast_changed_lines_can_be_disabled() {
+      let config = CommitConfig { auto_fast_threshold_lines: 0, ..CommitConfig::default() };
+      let numstat = "10\t5\tsrc/main.rs";
+
+      assert_eq!(auto_fast_changed_lines(numstat, &config), None);
    }
 }

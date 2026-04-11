@@ -51,26 +51,28 @@ pub struct CommitConfig {
    /// Maximum rounds for compose mode multi-commit generation
    pub compose_max_rounds: usize,
 
-   pub summary_guideline:       usize,
-   pub summary_soft_limit:      usize,
-   pub summary_hard_limit:      usize,
-   pub max_retries:             u32,
-   pub initial_backoff_ms:      u64,
-   pub max_diff_length:         usize,
-   pub max_diff_tokens:         usize,
-   pub wide_change_threshold:   f32,
-   pub temperature:             f32,
+   pub summary_guideline:         usize,
+   pub summary_soft_limit:        usize,
+   pub summary_hard_limit:        usize,
+   pub max_retries:               u32,
+   pub initial_backoff_ms:        u64,
+   #[serde(default = "default_auto_fast_threshold_lines")]
+   pub auto_fast_threshold_lines: usize,
+   pub max_diff_length:           usize,
+   pub max_diff_tokens:           usize,
+   pub wide_change_threshold:     f32,
+   pub temperature:               f32,
    #[serde(default = "default_analysis_model")]
-   pub analysis_model:          String,
+   pub analysis_model:            String,
    #[serde(default = "default_summary_model")]
-   pub summary_model:           String,
+   pub summary_model:             String,
    /// Legacy single-model config key. Parsed for backward compatibility and
    /// normalized into `analysis_model`, and into `summary_model` when the
    /// summary model was not set explicitly.
    #[serde(default, rename = "model")]
-   pub legacy_model:            Option<String>,
-   pub excluded_files:          Vec<String>,
-   pub low_priority_extensions: Vec<String>,
+   pub legacy_model:              Option<String>,
+   pub excluded_files:            Vec<String>,
+   pub low_priority_extensions:   Vec<String>,
 
    /// Maximum token budget for commit message detail points (approx 4
    /// chars/token)
@@ -187,6 +189,10 @@ const fn default_map_reduce_threshold() -> usize {
    30000 // ~30k tokens, roughly 120k characters
 }
 
+const fn default_auto_fast_threshold_lines() -> usize {
+   200
+}
+
 fn parse_api_mode(value: &str) -> ApiMode {
    match value.trim().to_lowercase().as_str() {
       "auto" => ApiMode::Auto,
@@ -213,6 +219,7 @@ impl Default for CommitConfig {
          summary_hard_limit: 128,
          max_retries: 3,
          initial_backoff_ms: 1000,
+         auto_fast_threshold_lines: default_auto_fast_threshold_lines(),
          max_diff_length: 100000, // Increased to handle larger refactors better
          max_diff_tokens: 25000,  // ~100K chars = 25K tokens (4 chars/token estimate)
          wide_change_threshold: 0.50,

@@ -140,6 +140,7 @@ summary_hard_limit = 128                  # Absolute max
 
 # Features
 changelog_enabled = true
+auto_fast_threshold_lines = 200           # Auto-use fast mode for small diffs; 0 disables
 map_reduce_enabled = true                 # Parallel analysis for large commits
 disable_git_background_features = true    # Disables fsmonitor/untrackedCache for lgit subprocesses
 temperature = 0.2                         # Structured-output-first, then tools, then JSON content parse

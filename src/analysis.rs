@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 /// Scope analysis functionality for git diff numstat parsing
 use crate::config::CommitConfig;
 use crate::{
-   error::{CommitGenError, Result},
-   git::git_command,
+   error::Result,
+   git::get_git_numstat,
    types::{Mode, ScopeCandidate},
 };
 
@@ -38,6 +38,16 @@ impl Default for ScopeAnalyzer {
 impl ScopeAnalyzer {
    pub fn new() -> Self {
       Self { component_lines: HashMap::new(), total_lines: 0 }
+   }
+
+   fn from_numstat(numstat: &str, config: &CommitConfig) -> Self {
+      let mut analyzer = Self::new();
+
+      for line in numstat.lines() {
+         analyzer.process_numstat_line(line, config);
+      }
+
+      analyzer
    }
 
    /// Process single numstat line: "added\tdeleted\tpath"
@@ -228,14 +238,15 @@ impl ScopeAnalyzer {
 
    /// Public API: extract scope candidates from git numstat output
    pub fn extract_scope(numstat: &str, config: &CommitConfig) -> (Vec<ScopeCandidate>, usize) {
-      let mut analyzer = Self::new();
-
-      for line in numstat.lines() {
-         analyzer.process_numstat_line(line, config);
-      }
-
+      let analyzer = Self::from_numstat(numstat, config);
       let candidates = analyzer.build_scope_candidates();
       (candidates, analyzer.total_lines)
+   }
+
+   /// Count changed lines from git numstat output, ignoring excluded and binary
+   /// files.
+   pub fn count_changed_lines(numstat: &str, config: &CommitConfig) -> usize {
+      Self::from_numstat(numstat, config).total_lines
    }
 
    /// Analyze wide changes to detect cross-cutting patterns
@@ -363,38 +374,7 @@ pub fn extract_scope_candidates(
    dir: &str,
    config: &CommitConfig,
 ) -> Result<(String, bool)> {
-   // Get numstat output
-   let output = match mode {
-      Mode::Staged => git_command()
-         .args(["diff", "--cached", "--numstat"])
-         .current_dir(dir)
-         .output()
-         .map_err(|e| {
-            CommitGenError::git(format!("Failed to run git diff --cached --numstat: {e}"))
-         })?,
-      Mode::Commit => {
-         let target = target.ok_or_else(|| {
-            CommitGenError::ValidationError("--target required for commit mode".to_string())
-         })?;
-         git_command()
-            .args(["show", "--numstat", target])
-            .current_dir(dir)
-            .output()
-            .map_err(|e| CommitGenError::git(format!("Failed to run git show --numstat: {e}")))?
-      },
-      Mode::Unstaged => git_command()
-         .args(["diff", "--numstat"])
-         .current_dir(dir)
-         .output()
-         .map_err(|e| CommitGenError::git(format!("Failed to run git diff --numstat: {e}")))?,
-      Mode::Compose => unreachable!("compose mode handled separately"),
-   };
-
-   if !output.status.success() {
-      return Err(CommitGenError::git("git diff --numstat failed".to_string()));
-   }
-
-   let numstat = String::from_utf8_lossy(&output.stdout);
+   let numstat = get_git_numstat(mode, target, dir, config)?;
 
    let (candidates, total_lines) = ScopeAnalyzer::extract_scope(&numstat, config);
 
@@ -778,6 +758,14 @@ mod tests {
 
       assert_eq!(total_lines, 0);
       assert!(candidates.is_empty());
+   }
+
+   #[test]
+   fn test_count_changed_lines_ignores_excluded_and_binary_files() {
+      let config = default_config();
+      let numstat = "100\t50\tCargo.lock\n-\t-\timage.png\n10\t5\tsrc/api/client.rs";
+
+      assert_eq!(ScopeAnalyzer::count_changed_lines(numstat, &config), 15);
    }
 
    #[test]

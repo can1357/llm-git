@@ -128,6 +128,33 @@ fn append_untracked_stat(mut stat: String, dir: &str, untracked_files: &[String]
    stat
 }
 
+fn append_untracked_numstat(mut numstat: String, dir: &str, untracked_files: &[String]) -> String {
+   use std::fmt::Write;
+
+   for file in untracked_files {
+      use std::fs;
+
+      let path = format!("{dir}/{file}");
+      if let Ok(metadata) = fs::metadata(&path) {
+         let (added, deleted) = if metadata.is_file() {
+            match fs::read_to_string(&path) {
+               Ok(content) => (content.lines().count().to_string(), "0".to_string()),
+               Err(_) => ("-".to_string(), "-".to_string()),
+            }
+         } else {
+            ("0".to_string(), "0".to_string())
+         };
+
+         if !numstat.is_empty() && !numstat.ends_with('\n') {
+            numstat.push('\n');
+         }
+         writeln!(numstat, "{added}\t{deleted}\t{file}").unwrap();
+      }
+   }
+
+   numstat
+}
+
 /// Detect a stale `index.lock` from git stderr and return a
 /// [`CommitGenError::GitIndexLocked`] with the resolved path if found.
 fn check_index_lock(stderr: &str, dir: &str) -> Option<CommitGenError> {
@@ -316,6 +343,62 @@ pub fn get_git_stat(
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
       return Err(CommitGenError::git(format!("Git stat command failed: {stderr}")));
+   }
+
+   Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn get_git_numstat(
+   mode: &Mode,
+   target: Option<&str>,
+   dir: &str,
+   config: &CommitConfig,
+) -> Result<String> {
+   let output = match mode {
+      Mode::Staged => git_command()
+         .args(["diff", "--cached", "--numstat"])
+         .current_dir(dir)
+         .output()
+         .map_err(|e| {
+            CommitGenError::git(format!("Failed to run git diff --cached --numstat: {e}"))
+         })?,
+      Mode::Commit => {
+         let target = target.ok_or_else(|| {
+            CommitGenError::ValidationError("--target required for commit mode".to_string())
+         })?;
+         let mut cmd = git_command();
+         cmd.arg("show");
+         if config.exclude_old_message {
+            cmd.arg("--format=");
+         }
+         cmd.arg("--numstat")
+            .arg(target)
+            .current_dir(dir)
+            .output()
+            .map_err(|e| CommitGenError::git(format!("Failed to run git show --numstat: {e}")))?
+      },
+      Mode::Unstaged => {
+         let tracked_output = git_command()
+            .args(["diff", "--numstat"])
+            .current_dir(dir)
+            .output()
+            .map_err(|e| CommitGenError::git(format!("Failed to run git diff --numstat: {e}")))?;
+
+         if !tracked_output.status.success() {
+            let stderr = String::from_utf8_lossy(&tracked_output.stderr);
+            return Err(CommitGenError::git(format!("git diff --numstat failed: {stderr}")));
+         }
+
+         let numstat = String::from_utf8_lossy(&tracked_output.stdout).to_string();
+         let untracked_files = list_untracked_files(dir)?;
+         return Ok(append_untracked_numstat(numstat, dir, &untracked_files));
+      },
+      Mode::Compose => unreachable!("compose mode handled separately"),
+   };
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("Git numstat command failed: {stderr}")));
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).to_string())

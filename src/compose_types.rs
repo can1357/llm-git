@@ -154,11 +154,10 @@ fn sanitize_scope_segment(segment: &str) -> Option<String> {
             out.push(ch);
             last_was_separator = true;
          }
-      } else if (ch.is_ascii_whitespace() || ch == '.')
-         && !out.is_empty() && !last_was_separator {
-            out.push('-');
-            last_was_separator = true;
-         }
+      } else if (ch.is_ascii_whitespace() || ch == '.') && !out.is_empty() && !last_was_separator {
+         out.push('-');
+         last_was_separator = true;
+      }
    }
 
    let trimmed = out.trim_matches(['-', '_']).to_string();
