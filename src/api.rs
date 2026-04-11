@@ -264,6 +264,7 @@ pub enum OneShotSource {
    StructuredOutput,
    ToolCall,
    OutputJsonParse,
+   PlainTextContent,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -530,7 +531,16 @@ fn is_anthropic_model(model: &str) -> bool {
       || lower.contains("anthropic.claude")
 }
 
+fn prefers_tool_calling_over_structured_output(model: &str) -> bool {
+   let lower = model.trim().to_lowercase();
+   lower.contains("codex-spark")
+}
+
 fn should_attempt_structured_output(config: &CommitConfig, model: &str) -> bool {
+   if prefers_tool_calling_over_structured_output(model) {
+      return false;
+   }
+
    !is_anthropic_model(model) || is_official_anthropic_base_url(&config.api_base_url)
 }
 
@@ -765,6 +775,43 @@ fn parse_json_output<T: DeserializeOwned>(json_text: &str, error_label: &str) ->
    })
 }
 
+fn normalize_plain_text_content(content: &str) -> String {
+   let trimmed = content.trim();
+
+   if let Some(start) = trimmed.find("```") {
+      let after_marker = &trimmed[start + 3..];
+      let content_start = after_marker.find('\n').map_or(0, |i| i + 1);
+      let after_newline = &after_marker[content_start..];
+      if let Some(end) = after_newline.find("```") {
+         return after_newline[..end].trim().to_string();
+      }
+   }
+
+   trimmed.to_string()
+}
+
+fn parse_plain_text_output<T: DeserializeOwned>(
+   tool_name: &str,
+   content: &str,
+) -> Result<Option<T>> {
+   let trimmed = normalize_plain_text_content(content);
+   if trimmed.is_empty() {
+      return Ok(None);
+   }
+
+   let value = match tool_name {
+      "create_commit_summary" => serde_json::json!({ "summary": trimmed }),
+      _ => return Ok(None),
+   };
+
+   serde_json::from_value(value).map(Some).map_err(|e| {
+      CommitGenError::Other(format!(
+         "Failed to parse {tool_name} plain-text fallback: {e}. Content: {}",
+         response_snippet(&trimmed, 500)
+      ))
+   })
+}
+
 fn extract_anthropic_content(
    response_text: &str,
    tool_name: &str,
@@ -885,7 +932,18 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                      stop_reason: None,
                   });
                },
-               Err(err) => last_error = Some(err),
+               Err(err) => match parse_plain_text_output::<T>(tool_name, content) {
+                  Ok(Some(output)) => {
+                     return OneShotParseOutcome::Success(OneShotResponse {
+                        output,
+                        source: OneShotSource::PlainTextContent,
+                        text_content: Some(content.clone()),
+                        stop_reason: None,
+                     });
+                  },
+                  Ok(None) => last_error = Some(err),
+                  Err(fallback_err) => last_error = Some(fallback_err),
+               },
             }
          }
 
@@ -932,7 +990,16 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                text_content: Some(text_content),
                stop_reason,
             }),
-            Err(err) => OneShotParseOutcome::Fatal(last_error.unwrap_or(err)),
+            Err(err) => match parse_plain_text_output::<T>(tool_name, &text_content) {
+               Ok(Some(output)) => OneShotParseOutcome::Success(OneShotResponse {
+                  output,
+                  source: OneShotSource::PlainTextContent,
+                  text_content: Some(text_content),
+                  stop_reason,
+               }),
+               Ok(None) => OneShotParseOutcome::Fatal(last_error.unwrap_or(err)),
+               Err(fallback_err) => OneShotParseOutcome::Fatal(last_error.unwrap_or(fallback_err)),
+            },
          }
       },
    }
@@ -1004,7 +1071,24 @@ where
             spec.operation,
             &response_text,
          ) {
-            OneShotParseOutcome::Success(output) => return Ok((false, Some(output))),
+            OneShotParseOutcome::Success(output) => {
+               if output.source == OneShotSource::PlainTextContent {
+                  let first_detection = update_structured_output_capability(
+                     config,
+                     spec.model,
+                     mode,
+                     Some(StructuredOutputCapability::Unsupported),
+                  );
+                  if first_detection {
+                     crate::style::warn(&format!(
+                        "Structured outputs unsupported for model {}. Using tool calling for the \
+                         remainder of this run.",
+                        spec.model
+                     ));
+                  }
+               }
+               return Ok((false, Some(output)));
+            },
             OneShotParseOutcome::Retry => return Ok((true, None)),
             OneShotParseOutcome::Fatal(err) => {
                crate::style::warn(&format!(
@@ -1931,6 +2015,13 @@ mod tests {
    }
 
    #[test]
+   fn test_should_attempt_structured_output_skips_codex_spark_models() {
+      let config = CommitConfig::default();
+      assert!(!should_attempt_structured_output(&config, "gpt-5.3-codex-spark"));
+      assert!(!should_attempt_structured_output(&config, "openai/gpt-5.3-codex-spark",));
+   }
+
+   #[test]
    fn test_should_attempt_structured_output_allows_claude_on_official_anthropic_base() {
       let config = CommitConfig {
          api_base_url: "https://api.anthropic.com/v1".to_string(),
@@ -2069,6 +2160,38 @@ mod tests {
             assert_eq!(response.output.summary, "added fallback");
          },
          OneShotParseOutcome::Retry => panic!("expected parsed content JSON"),
+         OneShotParseOutcome::Fatal(err) => panic!("unexpected parse failure: {err}"),
+      }
+   }
+
+   #[test]
+   fn test_parse_oneshot_response_accepts_plain_text_summary_content() {
+      let response_text = serde_json::json!({
+         "choices": [{
+            "message": {
+               "content": "updated gemini-image tests for CustomToolContext and array headers"
+            }
+         }]
+      })
+      .to_string();
+
+      let result = parse_oneshot_response::<SummaryOutput>(
+         ResolvedApiMode::ChatCompletions,
+         OneShotRequestKind::ToolCalling,
+         "create_commit_summary",
+         "summary",
+         &response_text,
+      );
+
+      match result {
+         OneShotParseOutcome::Success(response) => {
+            assert_eq!(response.source, OneShotSource::PlainTextContent);
+            assert_eq!(
+               response.output.summary,
+               "updated gemini-image tests for CustomToolContext and array headers"
+            );
+         },
+         OneShotParseOutcome::Retry => panic!("expected plain-text summary fallback"),
          OneShotParseOutcome::Fatal(err) => panic!("unexpected parse failure: {err}"),
       }
    }
