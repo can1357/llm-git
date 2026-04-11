@@ -6,6 +6,7 @@ pub mod analysis;
 pub mod api;
 pub mod changelog;
 pub mod compose;
+pub mod compose_types;
 pub mod config;
 pub mod diff;
 pub mod error;

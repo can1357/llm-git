@@ -44,6 +44,9 @@ miette = { version = "7.6.0", features = ["fancy"] }
 [build-dependencies]
 serde_json = "1.0"
 
+[dev-dependencies]
+tempfile = "3.13"
+
 [lints.clippy]
 # Enable comprehensive linting by default
 all = { level = "warn", priority = -1 }

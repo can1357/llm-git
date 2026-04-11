@@ -1,49 +1,35 @@
-use std::process::Command;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::{
+   compose_types::{ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot},
    error::{CommitGenError, Result},
-   types::{ChangeGroup, FileChange, HunkSelector},
+   git::git_command,
 };
 
-/// Represents a parsed hunk from a diff
 #[derive(Debug, Clone)]
 struct ParsedHunk {
-   header:         String,
-   #[allow(dead_code, reason = "Useful metadata for future enhancements")]
-   old_start:      usize,
-   #[allow(dead_code, reason = "Useful metadata for future enhancements")]
-   old_count:      usize,
-   #[allow(dead_code, reason = "Useful metadata for future enhancements")]
-   new_start:      usize,
-   #[allow(dead_code, reason = "Useful metadata for future enhancements")]
-   new_count:      usize,
-   lines:          Vec<String>,
-   old_line_range: (usize, usize), // (start, end) in original file
+   old_start: usize,
+   old_count: usize,
+   new_start: usize,
+   new_count: usize,
+   header:    String,
+   lines:     Vec<String>,
 }
 
-/// Create a patch for specific files
-pub fn create_patch_for_files(files: &[String], dir: &str) -> Result<String> {
-   let output = Command::new("git")
-      .arg("diff")
-      .arg("HEAD")
-      .arg("--")
-      .args(files)
-      .current_dir(dir)
-      .output()
-      .map_err(|e| CommitGenError::git(format!("Failed to create patch: {e}")))?;
-
-   if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::git(format!("git diff failed: {stderr}")));
-   }
-
-   Ok(String::from_utf8_lossy(&output.stdout).to_string())
+#[derive(Debug, Clone)]
+struct ParsedFile {
+   path:         String,
+   header_lines: Vec<String>,
+   hunks:        Vec<ParsedHunk>,
+   additions:    usize,
+   deletions:    usize,
+   is_binary:    bool,
 }
 
-/// Apply patch to staging area
+/// Apply patch to staging area.
 pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
-   let mut child = Command::new("git")
-      .args(["apply", "--cached"])
+   let mut child = git_command()
+      .args(["apply", "--cached", "--3way", "--recount"])
       .current_dir(dir)
       .stdin(std::process::Stdio::piped())
       .stdout(std::process::Stdio::piped())
@@ -53,6 +39,7 @@ pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
 
    if let Some(mut stdin) = child.stdin.take() {
       use std::io::Write;
+
       stdin
          .write_all(patch.as_bytes())
          .map_err(|e| CommitGenError::git(format!("Failed to write patch: {e}")))?;
@@ -64,19 +51,21 @@ pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::git(format!("git apply --cached failed: {stderr}")));
+      return Err(CommitGenError::git(format!(
+         "git apply --cached --3way --recount failed: {stderr}"
+      )));
    }
 
    Ok(())
 }
 
-/// Stage specific files (simpler alternative to patch application)
+/// Stage specific files.
 pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
    if files.is_empty() {
       return Ok(());
    }
 
-   let output = Command::new("git")
+   let output = git_command()
       .arg("add")
       .arg("--")
       .args(files)
@@ -92,9 +81,9 @@ pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
    Ok(())
 }
 
-/// Reset staging area
+/// Reset staging area.
 pub fn reset_staging(dir: &str) -> Result<()> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["reset", "HEAD"])
       .current_dir(dir)
       .output()
@@ -108,27 +97,14 @@ pub fn reset_staging(dir: &str) -> Result<()> {
    Ok(())
 }
 
-/// Parse hunk header to extract line numbers
-/// Format: @@ -`old_start,old_count` +`new_start,new_count` @@
 fn parse_hunk_header(header: &str) -> Option<(usize, usize, usize, usize)> {
    let trimmed = header.trim();
    if !trimmed.starts_with("@@") {
       return None;
    }
 
-   // Extract the part between @@ markers
-   let middle = if let Some(start) = trimmed.find("@@") {
-      let after_first = &trimmed[start + 2..];
-      if let Some(end) = after_first.find("@@") {
-         &after_first[..end].trim()
-      } else {
-         return None;
-      }
-   } else {
-      return None;
-   };
-
-   // Parse "-old_start,old_count +new_start,new_count"
+   let after_first = trimmed.strip_prefix("@@")?;
+   let middle = after_first.split("@@").next()?.trim();
    let parts: Vec<&str> = middle.split_whitespace().collect();
    if parts.len() < 2 {
       return None;
@@ -141,341 +117,619 @@ fn parse_hunk_header(header: &str) -> Option<(usize, usize, usize, usize)> {
       if let Some((start, count)) = s.split_once(',') {
          Some((start.parse().ok()?, count.parse().ok()?))
       } else {
-         // If no comma, it's just a line number (count is 1)
          Some((s.parse().ok()?, 1))
       }
    };
 
    let (old_start, old_count) = parse_range(old_part)?;
    let (new_start, new_count) = parse_range(new_part)?;
-
    Some((old_start, old_count, new_start, new_count))
 }
 
-/// Parse all hunks from a file's diff
-fn parse_file_hunks(file_diff: &str) -> Vec<ParsedHunk> {
-   let mut hunks = Vec::new();
-   let mut in_header = true;
+fn parse_file_path(diff_header: &str) -> Result<String> {
+   diff_header
+      .split_whitespace()
+      .nth(3)
+      .and_then(|part| part.strip_prefix("b/"))
+      .map(str::to_string)
+      .ok_or_else(|| {
+         CommitGenError::Other(format!("Failed to parse file path from '{diff_header}'"))
+      })
+}
+
+fn finalize_current_hunk(file: &mut ParsedFile, current_hunk: &mut Option<ParsedHunk>) {
+   if let Some(hunk) = current_hunk.take() {
+      file.hunks.push(hunk);
+   }
+}
+
+fn finalize_current_file(
+   files: &mut Vec<ParsedFile>,
+   current_file: &mut Option<ParsedFile>,
+   current_hunk: &mut Option<ParsedHunk>,
+) {
+   if let Some(mut file) = current_file.take() {
+      finalize_current_hunk(&mut file, current_hunk);
+      files.push(file);
+   }
+}
+
+fn join_lines(lines: &[String]) -> String {
+   if lines.is_empty() {
+      String::new()
+   } else {
+      let mut joined = lines.join("\n");
+      joined.push('\n');
+      joined
+   }
+}
+
+fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
+   let trimmed = snippet.trim();
+   if trimmed.chars().count() <= max_chars {
+      return trimmed.to_string();
+   }
+
+   let mut truncated = trimmed.chars().take(max_chars).collect::<String>();
+   truncated.push_str("...");
+   truncated
+}
+
+fn build_hunk_snippet(lines: &[String], fallback: &str) -> String {
+   let interesting: Vec<String> = lines
+      .iter()
+      .skip(1)
+      .filter(|line| {
+         (line.starts_with('+') && !line.starts_with("+++"))
+            || (line.starts_with('-') && !line.starts_with("---"))
+      })
+      .take(3)
+      .map(|line| truncate_snippet(line.trim_start_matches(['+', '-']), 80))
+      .collect();
+
+   if interesting.is_empty() {
+      truncate_snippet(fallback, 80)
+   } else {
+      interesting.join(" | ")
+   }
+}
+
+fn build_synthetic_snippet(file: &ParsedFile) -> String {
+   let header_text = file
+      .header_lines
+      .iter()
+      .skip(1)
+      .find(|line| {
+         !line.starts_with("index ")
+            && !line.starts_with("--- ")
+            && !line.starts_with("+++ ")
+            && !line.trim().is_empty()
+      })
+      .cloned()
+      .unwrap_or_else(|| format!("whole-file change in {}", file.path));
+
+   truncate_snippet(&header_text, 80)
+}
+
+fn fnv1a_64(input: &str) -> String {
+   let mut hash = 0xcbf29ce484222325_u64;
+   for byte in input.as_bytes() {
+      hash ^= u64::from(*byte);
+      hash = hash.wrapping_mul(0x100000001b3);
+   }
+   format!("{hash:016x}")
+}
+
+fn build_semantic_key(path: &str, lines: &[String], fallback: &str) -> String {
+   let mut changed = Vec::new();
+   for line in lines {
+      if (line.starts_with('+') && !line.starts_with("+++"))
+         || (line.starts_with('-') && !line.starts_with("---"))
+      {
+         changed.push(line.clone());
+      }
+   }
+
+   let source = if changed.is_empty() {
+      fallback.to_string()
+   } else {
+      changed.join("\n")
+   };
+
+   format!("{path}:{}", fnv1a_64(&source))
+}
+
+pub fn build_compose_snapshot(diff: &str, stat: &str) -> Result<ComposeSnapshot> {
+   let mut files = Vec::new();
+   let mut current_file: Option<ParsedFile> = None;
    let mut current_hunk: Option<ParsedHunk> = None;
 
-   for line in file_diff.lines() {
-      if in_header {
-         if line.starts_with("+++") {
-            in_header = false;
-         }
+   for line in diff.lines() {
+      if line.starts_with("diff --git ") {
+         finalize_current_file(&mut files, &mut current_file, &mut current_hunk);
+         current_file = Some(ParsedFile {
+            path:         parse_file_path(line)?,
+            header_lines: vec![line.to_string()],
+            hunks:        Vec::new(),
+            additions:    0,
+            deletions:    0,
+            is_binary:    false,
+         });
          continue;
       }
 
+      let Some(file) = &mut current_file else {
+         continue;
+      };
+
       if line.starts_with("@@ ") {
-         // Save previous hunk
-         if let Some(hunk) = current_hunk.take() {
-            hunks.push(hunk);
+         finalize_current_hunk(file, &mut current_hunk);
+         let (old_start, old_count, new_start, new_count) =
+            parse_hunk_header(line).ok_or_else(|| {
+               CommitGenError::Other(format!("Failed to parse hunk header '{line}'"))
+            })?;
+         current_hunk = Some(ParsedHunk {
+            old_start,
+            old_count,
+            new_start,
+            new_count,
+            header: line.to_string(),
+            lines: vec![line.to_string()],
+         });
+         continue;
+      }
+
+      if let Some(hunk) = &mut current_hunk {
+         if line.starts_with('+') && !line.starts_with("+++") {
+            file.additions += 1;
+         } else if line.starts_with('-') && !line.starts_with("---") {
+            file.deletions += 1;
          }
 
-         // Parse new hunk header
-         if let Some((old_start, old_count, new_start, new_count)) = parse_hunk_header(line) {
-            let old_end = if old_count == 0 {
-               old_start
-            } else {
-               old_start + old_count - 1
-            };
-
-            current_hunk = Some(ParsedHunk {
-               header: line.to_string(),
-               old_start,
-               old_count,
-               new_start,
-               new_count,
-               lines: vec![line.to_string()],
-               old_line_range: (old_start, old_end),
-            });
-         }
-      } else if let Some(hunk) = &mut current_hunk {
          hunk.lines.push(line.to_string());
+         continue;
       }
-   }
 
-   // Don't forget the last hunk
-   if let Some(hunk) = current_hunk {
-      hunks.push(hunk);
-   }
-
-   hunks
-}
-
-/// Map line range to hunks that overlap with it
-fn find_hunks_for_line_range(hunks: &[ParsedHunk], start: usize, end: usize) -> Vec<String> {
-   hunks
-      .iter()
-      .filter(|hunk| {
-         // Check if line range overlaps with hunk's old line range
-         let (hunk_start, hunk_end) = hunk.old_line_range;
-         !(end < hunk_start || start > hunk_end)
-      })
-      .map(|hunk| hunk.header.clone())
-      .collect()
-}
-
-/// Convert `HunkSelectors` to actual hunk headers deterministically
-fn resolve_selectors_to_headers(
-   full_diff: &str,
-   file_path: &str,
-   selectors: &[HunkSelector],
-) -> Result<Vec<String>> {
-   // Extract file diff
-   let file_diff = extract_file_diff(full_diff, file_path)?;
-
-   // Parse all hunks from the file
-   let hunks = parse_file_hunks(&file_diff);
-
-   let mut headers = Vec::new();
-
-   for selector in selectors {
-      match selector {
-         HunkSelector::All => {
-            // Return all hunk headers
-            return Ok(hunks.iter().map(|h| h.header.clone()).collect());
-         },
-         HunkSelector::Lines { start, end } => {
-            // Find hunks that overlap with this line range
-            let matching = find_hunks_for_line_range(&hunks, *start, *end);
-            if matching.is_empty() {
-               // Check if there are any nearby hunks to suggest
-               let nearby: Vec<_> = hunks
-                  .iter()
-                  .map(|h| {
-                     let (hunk_start, hunk_end) = h.old_line_range;
-                     let distance = if *end < hunk_start {
-                        hunk_start - *end
-                     } else {
-                        (*start).saturating_sub(hunk_end)
-                     };
-                     (distance, hunk_start, hunk_end)
-                  })
-                  .filter(|(dist, ..)| *dist > 0 && *dist < 20)
-                  .collect();
-
-               let hint = if nearby.is_empty() {
-                  String::new()
-               } else {
-                  let (_, nearest_start, nearest_end) =
-                     nearby.iter().min_by_key(|(dist, ..)| dist).unwrap();
-                  format!(" (nearest hunk: lines {nearest_start}-{nearest_end})")
-               };
-
-               return Err(CommitGenError::Other(format!(
-                  "No changes found in lines {start}-{end} of {file_path}. These lines may be \
-                   context (unchanged) rather than modifications{hint}"
-               )));
-            }
-            headers.extend(matching);
-         },
-         HunkSelector::Search { pattern } => {
-            // If it looks like a hunk header, try to match it directly
-            if pattern.starts_with("@@") {
-               let normalized_pattern = normalize_hunk_header(pattern);
-               let matching: Vec<String> = hunks
-                  .iter()
-                  .filter(|h| normalize_hunk_header(&h.header) == normalized_pattern)
-                  .map(|h| h.header.clone())
-                  .collect();
-
-               if matching.is_empty() {
-                  return Err(CommitGenError::Other(format!(
-                     "Hunk header not found: {pattern} in {file_path}"
-                  )));
-               }
-               headers.extend(matching);
-            } else {
-               // Search for pattern in hunk lines
-               let matching: Vec<String> = hunks
-                  .iter()
-                  .filter(|h| h.lines.iter().any(|line| line.contains(pattern)))
-                  .map(|h| h.header.clone())
-                  .collect();
-
-               if matching.is_empty() {
-                  return Err(CommitGenError::Other(format!(
-                     "Pattern '{pattern}' not found in any hunk in {file_path}"
-                  )));
-               }
-               headers.extend(matching);
-            }
-         },
+      if line.starts_with("Binary files ") {
+         file.is_binary = true;
       }
+      file.header_lines.push(line.to_string());
    }
 
-   // Deduplicate headers while preserving order
-   let mut seen = std::collections::HashSet::new();
-   Ok(headers
-      .into_iter()
-      .filter(|h| seen.insert(h.clone()))
-      .collect())
-}
+   finalize_current_file(&mut files, &mut current_file, &mut current_hunk);
 
-/// Extract specific hunks from a full diff for a file
-fn extract_hunks_for_file(
-   full_diff: &str,
-   file_path: &str,
-   hunk_headers: &[String],
-) -> Result<String> {
-   // If "ALL", return entire file diff
-   if hunk_headers.len() == 1 && hunk_headers[0] == "ALL" {
-      return extract_file_diff(full_diff, file_path);
-   }
+   let mut snapshot_files = Vec::new();
+   let mut snapshot_hunks = Vec::new();
 
-   let file_diff = extract_file_diff(full_diff, file_path)?;
-   let mut result = String::new();
-   let mut in_header = true;
-   let mut current_hunk = String::new();
-   let mut current_hunk_header;
-   let mut include_current = false;
+   for (file_index, file) in files.into_iter().enumerate() {
+      let file_id = format!("F{:03}", file_index + 1);
+      let patch_header = join_lines(&file.header_lines);
+      let mut full_patch = patch_header.clone();
+      let mut hunk_ids = Vec::new();
 
-   for line in file_diff.lines() {
-      if in_header {
-         result.push_str(line);
-         result.push('\n');
-         if line.starts_with("+++") {
-            in_header = false;
-         }
-      } else if line.starts_with("@@ ") {
-         // Save previous hunk if we were including it
-         if include_current && !current_hunk.is_empty() {
-            result.push_str(&current_hunk);
-         }
-
-         // Start new hunk
-         current_hunk_header = line.to_string();
-         current_hunk = format!("{line}\n");
-
-         // Check if this hunk should be included
-         include_current = hunk_headers.iter().any(|h| {
-            // Normalize comparison - just compare the numeric parts
-            normalize_hunk_header(h) == normalize_hunk_header(&current_hunk_header)
+      if file.hunks.is_empty() {
+         let hunk_id = format!("{file_id}-H001");
+         let snippet = build_synthetic_snippet(&file);
+         let semantic_key = build_semantic_key(&file.path, &file.header_lines, &snippet);
+         hunk_ids.push(hunk_id.clone());
+         snapshot_hunks.push(ComposeHunk {
+            hunk_id,
+            file_id: file_id.clone(),
+            path: file.path.clone(),
+            old_start: 0,
+            old_count: 0,
+            new_start: 0,
+            new_count: 0,
+            header: snippet.clone(),
+            raw_patch: String::new(),
+            snippet,
+            semantic_key,
+            synthetic: true,
          });
       } else {
-         current_hunk.push_str(line);
-         current_hunk.push('\n');
-      }
-   }
+         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            let hunk_id = format!("{file_id}-H{:03}", hunk_index + 1);
+            let raw_patch = join_lines(&hunk.lines);
+            let snippet = build_hunk_snippet(&hunk.lines, &hunk.header);
+            let semantic_key = build_semantic_key(&file.path, &hunk.lines, &snippet);
 
-   // Don't forget the last hunk
-   if include_current && !current_hunk.is_empty() {
-      result.push_str(&current_hunk);
-   }
-
-   if result
-      .lines()
-      .filter(|l| !l.starts_with("---") && !l.starts_with("+++") && !l.starts_with("diff "))
-      .count()
-      == 0
-   {
-      return Err(CommitGenError::Other(format!(
-         "No hunks found for {file_path} with headers {hunk_headers:?}"
-      )));
-   }
-
-   Ok(result)
-}
-
-/// Normalize hunk header for fuzzy comparison
-/// Extracts line numbers only, ignoring whitespace variations and context
-fn normalize_hunk_header(header: &str) -> String {
-   let trimmed = header.trim();
-
-   // Extract the part between @@ markers
-   let middle = if let Some(start) = trimmed.find("@@") {
-      let after_first = &trimmed[start + 2..];
-      if let Some(end) = after_first.find("@@") {
-         &after_first[..end]
-      } else {
-         after_first
-      }
-   } else {
-      trimmed
-   };
-
-   // Remove all whitespace for fuzzy matching
-   // Keep only: digits, commas, hyphens, plus signs
-   middle
-      .chars()
-      .filter(|c| c.is_ascii_digit() || *c == ',' || *c == '-' || *c == '+')
-      .collect()
-}
-
-/// Extract the diff for a specific file from a full diff
-fn extract_file_diff(full_diff: &str, file_path: &str) -> Result<String> {
-   let mut result = String::new();
-   let mut in_file = false;
-   let mut found = false;
-
-   for line in full_diff.lines() {
-      if line.starts_with("diff --git") {
-         // Check if this is our file
-         if line.contains(&format!("b/{file_path}")) || line.ends_with(&format!(" b/{file_path}")) {
-            in_file = true;
-            found = true;
-            result.push_str(line);
-            result.push('\n');
-         } else {
-            in_file = false;
+            full_patch.push_str(&raw_patch);
+            hunk_ids.push(hunk_id.clone());
+            snapshot_hunks.push(ComposeHunk {
+               hunk_id,
+               file_id: file_id.clone(),
+               path: file.path.clone(),
+               old_start: hunk.old_start,
+               old_count: hunk.old_count,
+               new_start: hunk.new_start,
+               new_count: hunk.new_count,
+               header: hunk.header.clone(),
+               raw_patch,
+               snippet,
+               semantic_key,
+               synthetic: false,
+            });
          }
-      } else if in_file {
-         result.push_str(line);
-         result.push('\n');
       }
+
+      let hunk_word = if hunk_ids.len() == 1 { "hunk" } else { "hunks" };
+      let summary = format!(
+         "{} (+{}/-{}, {} {})",
+         file.path,
+         file.additions,
+         file.deletions,
+         hunk_ids.len(),
+         hunk_word
+      );
+
+      snapshot_files.push(ComposeFile {
+         file_id,
+         path: file.path,
+         patch_header,
+         full_patch,
+         summary,
+         hunk_ids,
+         additions: file.additions,
+         deletions: file.deletions,
+         is_binary: file.is_binary,
+         synthetic_only: file.hunks.is_empty(),
+      });
    }
 
-   if !found {
-      return Err(CommitGenError::Other(format!("File {file_path} not found in diff")));
-   }
-
-   Ok(result)
+   Ok(ComposeSnapshot {
+      diff:  diff.to_string(),
+      stat:  stat.to_string(),
+      files: snapshot_files,
+      hunks: snapshot_hunks,
+   })
 }
 
-/// Create a patch for specific file changes with hunk selection
-pub fn create_patch_for_changes(full_diff: &str, changes: &[FileChange]) -> Result<String> {
-   let mut patch = String::new();
-
-   for change in changes {
-      // Resolve selectors to actual hunk headers
-      let hunk_headers = resolve_selectors_to_headers(full_diff, &change.path, &change.hunks)?;
-      let file_patch = extract_hunks_for_file(full_diff, &change.path, &hunk_headers)?;
-      patch.push_str(&file_patch);
+fn create_patch_for_file(file: &ComposeFile, hunks: &[&ComposeHunk]) -> String {
+   let mut patch = file.patch_header.clone();
+   for hunk in hunks {
+      patch.push_str(&hunk.raw_patch);
    }
-
-   Ok(patch)
+   patch
 }
 
-/// Stage changes for a specific group (hunk-aware).
-/// The `full_diff` argument must be taken before any compose commits run so the
-/// recorded hunk headers remain stable across groups.
-pub fn stage_group_changes(group: &ChangeGroup, dir: &str, full_diff: &str) -> Result<()> {
+pub fn stage_executable_group(
+   snapshot: &ComposeSnapshot,
+   group: &ComposeExecutableGroup,
+   dir: &str,
+) -> Result<()> {
+   if group.hunk_ids.is_empty() {
+      return Err(CommitGenError::Other(format!("Group {} has no assigned hunks", group.group_id)));
+   }
+
+   let selected_hunks: Vec<&ComposeHunk> = group
+      .hunk_ids
+      .iter()
+      .map(|hunk_id| {
+         snapshot.hunk_by_id(hunk_id).ok_or_else(|| {
+            CommitGenError::Other(format!(
+               "Group {} references unknown hunk id {hunk_id}",
+               group.group_id
+            ))
+         })
+      })
+      .collect::<Result<Vec<_>>>()?;
+
+   let mut selected_by_file: BTreeMap<String, Vec<&ComposeHunk>> = BTreeMap::new();
+   for hunk in selected_hunks {
+      selected_by_file
+         .entry(hunk.file_id.clone())
+         .or_default()
+         .push(hunk);
+   }
+
    let mut full_files = Vec::new();
-   let mut partial_changes = Vec::new();
+   let mut partial_patch = String::new();
 
-   for change in &group.changes {
-      // Check if all selectors are "All" variant
-      let is_all = change.hunks.len() == 1 && matches!(change.hunks[0], HunkSelector::All);
+   for file in &snapshot.files {
+      let Some(selected_for_file) = selected_by_file.get(&file.file_id) else {
+         continue;
+      };
 
-      if is_all {
-         full_files.push(change.path.clone());
-      } else {
-         partial_changes.push(change.clone());
+      let selected_ids: HashSet<&str> = selected_for_file
+         .iter()
+         .map(|hunk| hunk.hunk_id.as_str())
+         .collect();
+      let file_hunk_ids: HashSet<&str> = file.hunk_ids.iter().map(String::as_str).collect();
+
+      if selected_ids == file_hunk_ids {
+         full_files.push(file.path.clone());
+         continue;
       }
+
+      let ordered_hunks: Vec<&ComposeHunk> = file
+         .hunk_ids
+         .iter()
+         .filter_map(|hunk_id| {
+            selected_for_file
+               .iter()
+               .find(|hunk| hunk.hunk_id == *hunk_id)
+               .copied()
+         })
+         .collect();
+
+      if ordered_hunks.is_empty() {
+         return Err(CommitGenError::Other(format!(
+            "Group {} selected no patchable hunks for {}",
+            group.group_id, file.path
+         )));
+      }
+
+      partial_patch.push_str(&create_patch_for_file(file, &ordered_hunks));
    }
 
+   full_files.sort();
+   full_files.dedup();
    if !full_files.is_empty() {
-      // Deduplicate to avoid redundant git add calls
-      full_files.sort();
-      full_files.dedup();
       stage_files(&full_files, dir)?;
    }
 
-   if partial_changes.is_empty() {
-      return Ok(());
+   if !partial_patch.is_empty() {
+      apply_patch_to_index(&partial_patch, dir)?;
    }
 
-   let patch = create_patch_for_changes(full_diff, &partial_changes)?;
-   apply_patch_to_index(&patch, dir)
+   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+   use std::fs;
+
+   use tempfile::TempDir;
+
+   use super::*;
+   use crate::{
+      compose_types::ComposeExecutableGroup,
+      git::{get_compose_diff, get_compose_stat},
+      types::CommitType,
+   };
+
+   fn write_file(dir: &TempDir, path: &str, contents: &str) {
+      let full_path = dir.path().join(path);
+      if let Some(parent) = full_path.parent() {
+         fs::create_dir_all(parent).unwrap();
+      }
+      fs::write(full_path, contents).unwrap();
+   }
+
+   fn run_git(dir: &TempDir, args: &[&str]) -> String {
+      let output = git_command()
+         .args(args)
+         .current_dir(dir.path())
+         .output()
+         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+
+      assert!(
+         output.status.success(),
+         "git {:?} failed: stdout={} stderr={}",
+         args,
+         String::from_utf8_lossy(&output.stdout),
+         String::from_utf8_lossy(&output.stderr)
+      );
+
+      String::from_utf8_lossy(&output.stdout).to_string()
+   }
+
+   fn init_repo() -> TempDir {
+      let dir = TempDir::new().unwrap();
+      run_git(&dir, &["init"]);
+      run_git(&dir, &["config", "user.name", "Compose Test"]);
+      run_git(&dir, &["config", "user.email", "compose@test.local"]);
+      dir
+   }
+
+   fn fixture_file_original() -> String {
+      [
+         "fn alpha() {",
+         "    println!(\"alpha\");",
+         "}",
+         "",
+         "// spacer 1",
+         "// spacer 2",
+         "// spacer 3",
+         "// spacer 4",
+         "// spacer 5",
+         "// spacer 6",
+         "// spacer 7",
+         "// spacer 8",
+         "fn beta() {",
+         "    println!(\"beta\");",
+         "}",
+         "",
+      ]
+      .join("\n")
+   }
+
+   fn fixture_file_stage_only() -> String {
+      fixture_file_original().replace("alpha", "alpha staged")
+   }
+
+   fn fixture_file_stage_and_unstaged() -> String {
+      fixture_file_stage_only().replace("beta", "beta unstaged")
+   }
+
+   fn fixture_file_two_hunks() -> String {
+      [
+         "fn alpha() {",
+         "    println!(\"alpha changed\");",
+         "}",
+         "",
+         "// spacer 1",
+         "// spacer 2",
+         "// spacer 3",
+         "// spacer 4",
+         "// spacer 5",
+         "// spacer 6",
+         "// spacer 7",
+         "// spacer 8",
+         "fn beta() {",
+         "    println!(\"beta changed\");",
+         "}",
+         "",
+      ]
+      .join("\n")
+   }
+
+   fn commit_all(dir: &TempDir, message: &str) {
+      run_git(dir, &["add", "."]);
+      run_git(dir, &["commit", "-m", message]);
+   }
+
+   fn staged_diff(dir: &TempDir) -> String {
+      run_git(dir, &["diff", "--cached"])
+   }
+
+   #[test]
+   fn test_build_compose_snapshot_stable_ids() {
+      let diff = r#"diff --git a/src/lib.rs b/src/lib.rs
+index 1111111..2222222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+-fn alpha() {
++fn alpha_changed() {
+     println!("alpha");
+ }
+diff --git a/tests/lib.rs b/tests/lib.rs
+index 3333333..4444444 100644
+--- a/tests/lib.rs
++++ b/tests/lib.rs
+@@ -10,3 +10,4 @@
+ fn test_it() {
++    assert!(true);
+ }
+"#;
+
+      let stat = " src/lib.rs | 2 +-\n tests/lib.rs | 1 +\n";
+      let first = build_compose_snapshot(diff, stat).unwrap();
+      let second = build_compose_snapshot(diff, stat).unwrap();
+
+      assert_eq!(first.files.len(), 2);
+      assert_eq!(
+         first
+            .files
+            .iter()
+            .map(|file| file.file_id.clone())
+            .collect::<Vec<_>>(),
+         second
+            .files
+            .iter()
+            .map(|file| file.file_id.clone())
+            .collect::<Vec<_>>()
+      );
+      assert_eq!(
+         first
+            .hunks
+            .iter()
+            .map(|hunk| hunk.hunk_id.clone())
+            .collect::<Vec<_>>(),
+         second
+            .hunks
+            .iter()
+            .map(|hunk| hunk.hunk_id.clone())
+            .collect::<Vec<_>>()
+      );
+   }
+
+   #[test]
+   fn test_get_compose_diff_merges_staged_unstaged_and_untracked() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+
+      write_file(&dir, "src/lib.rs", &fixture_file_stage_only());
+      run_git(&dir, &["add", "src/lib.rs"]);
+      write_file(&dir, "src/lib.rs", &fixture_file_stage_and_unstaged());
+      write_file(&dir, "notes.txt", "new untracked file\n");
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+
+      assert_eq!(snapshot.files.len(), 2);
+      assert!(snapshot.file_by_path("src/lib.rs").is_some());
+      assert!(snapshot.file_by_path("notes.txt").is_some());
+
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      assert!(
+         source_file.hunk_ids.len() >= 2,
+         "expected staged + unstaged edits in one file to produce multiple hunks"
+      );
+   }
+
+   #[test]
+   fn test_stage_executable_group_partial_hunk_from_one_file() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_two_hunks());
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      assert_eq!(source_file.hunk_ids.len(), 2);
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "first hunk".to_string(),
+         dependencies: vec![],
+         hunk_ids:     vec![source_file.hunk_ids[0].clone()],
+      };
+      stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("alpha changed"));
+      assert!(!staged.contains("beta changed"));
+   }
+
+   #[test]
+   fn test_stage_executable_group_across_sequential_commits_same_file() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_two_hunks());
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      assert_eq!(source_file.hunk_ids.len(), 2);
+
+      let first_group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "first hunk".to_string(),
+         dependencies: vec![],
+         hunk_ids:     vec![source_file.hunk_ids[0].clone()],
+      };
+      let second_group = ComposeExecutableGroup {
+         group_id:     "G2".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "second hunk".to_string(),
+         dependencies: vec![],
+         hunk_ids:     vec![source_file.hunk_ids[1].clone()],
+      };
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      stage_executable_group(&snapshot, &first_group, dir.path().to_str().unwrap()).unwrap();
+      run_git(&dir, &["commit", "-m", "first"]);
+
+      stage_executable_group(&snapshot, &second_group, dir.path().to_str().unwrap()).unwrap();
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("beta changed"));
+      assert!(!staged.contains("alpha changed"));
+   }
 }
