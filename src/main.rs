@@ -363,6 +363,14 @@ fn build_footers(args: &Args) -> Vec<String> {
    footers
 }
 
+fn resolve_fast_mode_model(args: &Args, config: &CommitConfig) -> String {
+   if args.model.is_some() || config.legacy_model.is_some() {
+      config.analysis_model.clone()
+   } else {
+      resolve_model_name("haiku")
+   }
+}
+
 /// Main generation pipeline: get diff/stat → truncate → analyze → summarize →
 /// build commit
 async fn run_generation(
@@ -742,12 +750,9 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
       extract_scope_candidates(&args.mode, args.target.as_deref(), &args.dir, config)?;
    record_timing(&mut timings, "extract_scope_candidates", phase_start.elapsed());
 
-   // Resolve model: default to Haiku unless user explicitly specified -m
-   let model = if args.model.is_some() {
-      config.analysis_model.clone()
-   } else {
-      resolve_model_name("haiku")
-   };
+   // Fast mode stays cheap by default, but honors the legacy single-model
+   // selector when it is configured.
+   let model = resolve_fast_mode_model(args, config);
 
    let user_context = if args.context.is_empty() {
       None
@@ -1130,5 +1135,25 @@ mod tests {
          "Refs #200",
          "BREAKING CHANGE: This commit introduces breaking changes"
       ]);
+   }
+
+   #[test]
+   fn test_resolve_fast_mode_model_defaults_to_haiku() {
+      let args = Args::default();
+      let config = CommitConfig::default();
+
+      assert_eq!(resolve_fast_mode_model(&args, &config), "claude-haiku-4-5");
+   }
+
+   #[test]
+   fn test_resolve_fast_mode_model_uses_legacy_selector() {
+      let args = Args::default();
+      let config = CommitConfig {
+         analysis_model: "gpt-5.3-codex-spark".to_string(),
+         legacy_model: Some("gpt-5.3-codex-spark".to_string()),
+         ..CommitConfig::default()
+      };
+
+      assert_eq!(resolve_fast_mode_model(&args, &config), "gpt-5.3-codex-spark");
    }
 }

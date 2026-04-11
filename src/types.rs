@@ -1441,14 +1441,18 @@ where
    D: serde::Deserializer<'de>,
 {
    let value = Option::<String>::deserialize(deserializer)?;
-   match value {
-      None => Ok(None),
+   Ok(coerce_optional_scope(value.as_deref()))
+}
+
+pub(crate) fn coerce_optional_scope(raw: Option<&str>) -> Option<Scope> {
+   match raw {
+      None => None,
       Some(scope_str) => {
          let trimmed = scope_str.trim();
          if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-            Ok(None)
+            None
          } else {
-            Ok(coerce_scope(trimmed))
+            coerce_scope(trimmed)
          }
       },
    }
@@ -1483,11 +1487,10 @@ fn sanitize_scope_segment(segment: &str) -> Option<String> {
             out.push(ch);
             last_was_separator = true;
          }
-      } else if (ch.is_ascii_whitespace() || ch == '.')
-         && !out.is_empty() && !last_was_separator {
-            out.push('-');
-            last_was_separator = true;
-         }
+      } else if (ch.is_ascii_whitespace() || ch == '.') && !out.is_empty() && !last_was_separator {
+         out.push('-');
+         last_was_separator = true;
+      }
    }
 
    let trimmed = out.trim_matches(['-', '_']).to_string();

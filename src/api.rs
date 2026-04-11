@@ -13,7 +13,9 @@ use crate::{
    error::{CommitGenError, Result},
    templates,
    tokens::TokenCounter,
-   types::{CommitSummary, CommitType, ConventionalAnalysis, ConventionalCommit, Scope},
+   types::{
+      CommitSummary, CommitType, ConventionalAnalysis, ConventionalCommit, coerce_optional_scope,
+   },
 };
 
 /// Whether API tracing is enabled (`LLM_GIT_TRACE=1`).
@@ -1263,6 +1265,7 @@ struct SummaryOutput {
 struct FastCommitOutput {
    #[serde(rename = "type")]
    commit_type: String,
+   #[serde(default)]
    scope:       Option<String>,
    summary:     String,
    #[serde(default)]
@@ -1936,7 +1939,7 @@ fn build_fast_commit(
    config: &CommitConfig,
 ) -> Result<ConventionalCommit> {
    let commit_type = CommitType::new(&output.commit_type)?;
-   let scope = output.scope.as_deref().map(Scope::new).transpose()?;
+   let scope = coerce_optional_scope(output.scope.as_deref());
    let summary = CommitSummary::new(&output.summary, config.summary_hard_limit)?;
    Ok(ConventionalCommit { commit_type, scope, summary, body: output.details, footers: vec![] })
 }
@@ -1997,6 +2000,41 @@ mod tests {
          reqwest::StatusCode::UNAUTHORIZED,
          "Unknown parameter: response_format",
       ));
+   }
+
+   #[test]
+   fn test_build_fast_commit_coerces_invalid_scope_output() {
+      let commit = build_fast_commit(
+         FastCommitOutput {
+            commit_type: "chore".to_string(),
+            scope:       Some(".".to_string()),
+            summary:     "updated tooling".to_string(),
+            details:     vec![],
+         },
+         &CommitConfig::default(),
+      )
+      .unwrap();
+
+      assert!(commit.scope.is_none());
+   }
+
+   #[test]
+   fn test_build_fast_commit_sanitizes_path_like_scope_output() {
+      let commit = build_fast_commit(
+         FastCommitOutput {
+            commit_type: "chore".to_string(),
+            scope:       Some(".github/Release Notes".to_string()),
+            summary:     "updated tooling".to_string(),
+            details:     vec![],
+         },
+         &CommitConfig::default(),
+      )
+      .unwrap();
+
+      assert_eq!(
+         commit.scope.as_ref().map(crate::types::Scope::as_str),
+         Some("github/release-notes")
+      );
    }
 
    #[test]

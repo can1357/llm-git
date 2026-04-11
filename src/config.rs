@@ -65,7 +65,8 @@ pub struct CommitConfig {
    #[serde(default = "default_summary_model")]
    pub summary_model:           String,
    /// Legacy single-model config key. Parsed for backward compatibility and
-   /// normalized into `analysis_model`.
+   /// normalized into `analysis_model`, and into `summary_model` when the
+   /// summary model was not set explicitly.
    #[serde(default, rename = "model")]
    pub legacy_model:            Option<String>,
    pub excluded_files:          Vec<String>,
@@ -370,8 +371,11 @@ impl CommitConfig {
    }
 
    fn normalize_models(&mut self) {
-      if let Some(model) = self.legacy_model.take() {
-         self.analysis_model = model;
+      if let Some(model) = self.legacy_model.as_ref() {
+         self.analysis_model = model.clone();
+         if self.summary_model == default_summary_model() {
+            self.summary_model = model.clone();
+         }
       }
    }
 
@@ -609,3 +613,36 @@ BEFORE RESPONDING:
 ✓ Aligns with detail points and diff stat
 ✓ Specific (names subsystem/artifact)
 "#;
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn test_normalize_models_legacy_model_sets_summary_when_default() {
+      let mut config = CommitConfig {
+         legacy_model: Some("gpt-5.3-codex-spark".to_string()),
+         ..CommitConfig::default()
+      };
+
+      config.normalize_models();
+
+      assert_eq!(config.analysis_model, "gpt-5.3-codex-spark");
+      assert_eq!(config.summary_model, "gpt-5.3-codex-spark");
+      assert_eq!(config.legacy_model.as_deref(), Some("gpt-5.3-codex-spark"));
+   }
+
+   #[test]
+   fn test_normalize_models_preserves_explicit_summary_model() {
+      let mut config = CommitConfig {
+         summary_model: "gpt-5-mini".to_string(),
+         legacy_model: Some("gpt-5.3-codex-spark".to_string()),
+         ..CommitConfig::default()
+      };
+
+      config.normalize_models();
+
+      assert_eq!(config.analysis_model, "gpt-5.3-codex-spark");
+      assert_eq!(config.summary_model, "gpt-5-mini");
+   }
+}
