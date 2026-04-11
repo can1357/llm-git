@@ -1,8 +1,7 @@
-use std::process::Command;
-
 use crate::{
    config::CommitConfig,
    error::{CommitGenError, Result},
+   git::git_command,
    style::{self, icons},
    types::ConventionalCommit,
 };
@@ -49,7 +48,7 @@ fn is_code_extension(ext: &str) -> bool {
 
 /// Get repository name from git working directory
 fn get_repository_name() -> Result<String> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["rev-parse", "--show-toplevel"])
       .output()
       .map_err(|e| CommitGenError::git(e.to_string()))?;

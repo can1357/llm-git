@@ -190,7 +190,7 @@ async fn generate_for_commit(
    let analysis = generate_conventional_analysis(
       &stat,
       &diff,
-      &config.model,
+      &config.analysis_model,
       &scope_candidates_str,
       &ctx,
       config,

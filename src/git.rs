@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{collections::HashMap, path::PathBuf, process::Command, sync::OnceLock};
 
 pub use self::git_push as push;
 use crate::{
@@ -7,6 +7,126 @@ use crate::{
    style,
    types::{CommitMetadata, Mode},
 };
+
+#[derive(Debug, Clone, Copy)]
+struct GitCommandSettings {
+   disable_git_background_features: bool,
+}
+
+impl Default for GitCommandSettings {
+   fn default() -> Self {
+      Self { disable_git_background_features: true }
+   }
+}
+
+static GIT_COMMAND_SETTINGS: OnceLock<GitCommandSettings> = OnceLock::new();
+
+pub fn init_git_command_settings(config: &CommitConfig) {
+   let _ = GIT_COMMAND_SETTINGS.set(GitCommandSettings {
+      disable_git_background_features: config.disable_git_background_features,
+   });
+}
+
+fn current_git_command_settings() -> GitCommandSettings {
+   GIT_COMMAND_SETTINGS.get().copied().unwrap_or_default()
+}
+
+fn apply_git_command_overrides(cmd: &mut Command, settings: GitCommandSettings) {
+   if settings.disable_git_background_features {
+      cmd.args(["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]);
+   }
+}
+
+pub fn git_command() -> Command {
+   git_command_with_settings(current_git_command_settings())
+}
+
+fn git_command_with_settings(settings: GitCommandSettings) -> Command {
+   let mut cmd = Command::new("git");
+   apply_git_command_overrides(&mut cmd, settings);
+   cmd
+}
+
+fn list_untracked_files(dir: &str) -> Result<Vec<String>> {
+   let output = git_command()
+      .args(["ls-files", "--others", "--exclude-standard"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to list untracked files: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git ls-files failed: {stderr}")));
+   }
+
+   Ok(String::from_utf8_lossy(&output.stdout)
+      .lines()
+      .filter(|path| !path.is_empty())
+      .map(str::to_string)
+      .collect())
+}
+
+fn append_untracked_diff(
+   mut base_diff: String,
+   dir: &str,
+   untracked_files: &[String],
+) -> Result<String> {
+   for file in untracked_files {
+      let file_diff_output = git_command()
+         .args(["diff", "--no-index", "/dev/null", file])
+         .current_dir(dir)
+         .output()
+         .map_err(|e| CommitGenError::git(format!("Failed to diff untracked file {file}: {e}")))?;
+
+      // `git diff --no-index` exits with 1 when files differ, which is expected.
+      if file_diff_output.status.success() || file_diff_output.status.code() == Some(1) {
+         let file_diff = String::from_utf8_lossy(&file_diff_output.stdout);
+         let lines: Vec<&str> = file_diff.lines().collect();
+         if lines.len() >= 2 {
+            use std::fmt::Write;
+            if !base_diff.is_empty() {
+               base_diff.push('\n');
+            }
+            writeln!(base_diff, "diff --git a/{file} b/{file}").unwrap();
+            base_diff.push_str("new file mode 100644\n");
+            base_diff.push_str("index 0000000..0000000\n");
+            base_diff.push_str("--- /dev/null\n");
+            writeln!(base_diff, "+++ b/{file}").unwrap();
+            for line in lines.iter().skip(2) {
+               base_diff.push_str(line);
+               base_diff.push('\n');
+            }
+         }
+      }
+   }
+
+   Ok(base_diff)
+}
+
+fn append_untracked_stat(mut stat: String, dir: &str, untracked_files: &[String]) -> String {
+   use std::fmt::Write;
+
+   for file in untracked_files {
+      use std::fs;
+
+      if let Ok(metadata) = fs::metadata(format!("{dir}/{file}")) {
+         let lines = if metadata.is_file() {
+            fs::read_to_string(format!("{dir}/{file}"))
+               .map(|content| content.lines().count())
+               .unwrap_or(0)
+         } else {
+            0
+         };
+
+         if !stat.is_empty() && !stat.ends_with('\n') {
+            stat.push('\n');
+         }
+         writeln!(stat, " {file} | {lines} {}", "+".repeat(lines.min(50))).unwrap();
+      }
+   }
+
+   stat
+}
 
 /// Detect a stale `index.lock` from git stderr and return a
 /// [`CommitGenError::GitIndexLocked`] with the resolved path if found.
@@ -39,7 +159,7 @@ fn check_index_lock(stderr: &str, dir: &str) -> Option<CommitGenError> {
 /// # Errors
 /// Returns an error when the directory is not part of a git repository.
 pub fn ensure_git_repo(dir: &str) -> Result<()> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["rev-parse", "--show-toplevel"])
       .current_dir(dir)
       .output()
@@ -59,6 +179,23 @@ pub fn ensure_git_repo(dir: &str) -> Result<()> {
    Err(CommitGenError::git(format!("Failed to detect git repository: {stderr}")))
 }
 
+pub fn get_git_dir(dir: &str) -> Result<PathBuf> {
+   let output = git_command()
+      .args(["rev-parse", "--absolute-git-dir"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| {
+         CommitGenError::git(format!("Failed to run git rev-parse --absolute-git-dir: {e}"))
+      })?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("Failed to resolve git dir: {stderr}")));
+   }
+
+   Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+}
+
 /// Get git diff based on the specified mode
 pub fn get_git_diff(
    mode: &Mode,
@@ -67,7 +204,7 @@ pub fn get_git_diff(
    config: &CommitConfig,
 ) -> Result<String> {
    let output = match mode {
-      Mode::Staged => Command::new("git")
+      Mode::Staged => git_command()
          .args(["diff", "--cached"])
          .current_dir(dir)
          .output()
@@ -76,7 +213,7 @@ pub fn get_git_diff(
          let target = target.ok_or_else(|| {
             CommitGenError::ValidationError("--target required for commit mode".to_string())
          })?;
-         let mut cmd = Command::new("git");
+         let mut cmd = git_command();
          cmd.arg("show");
          if config.exclude_old_message {
             cmd.arg("--format=");
@@ -88,7 +225,7 @@ pub fn get_git_diff(
       },
       Mode::Unstaged => {
          // Get diff for tracked files
-         let tracked_output = Command::new("git")
+         let tracked_output = git_command()
             .args(["diff"])
             .current_dir(dir)
             .output()
@@ -100,63 +237,8 @@ pub fn get_git_diff(
          }
 
          let tracked_diff = String::from_utf8_lossy(&tracked_output.stdout).to_string();
-
-         // Get untracked files
-         let untracked_output = Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard"])
-            .current_dir(dir)
-            .output()
-            .map_err(|e| CommitGenError::git(format!("Failed to list untracked files: {e}")))?;
-
-         if !untracked_output.status.success() {
-            let stderr = String::from_utf8_lossy(&untracked_output.stderr);
-            return Err(CommitGenError::git(format!("git ls-files failed: {stderr}")));
-         }
-
-         let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
-         let untracked_files: Vec<&str> =
-            untracked_list.lines().filter(|s| !s.is_empty()).collect();
-
-         if untracked_files.is_empty() {
-            return Ok(tracked_diff);
-         }
-
-         // Generate diffs for untracked files using git diff /dev/null
-         let mut combined_diff = tracked_diff;
-         for file in untracked_files {
-            let file_diff_output = Command::new("git")
-               .args(["diff", "--no-index", "/dev/null", file])
-               .current_dir(dir)
-               .output()
-               .map_err(|e| {
-                  CommitGenError::git(format!("Failed to diff untracked file {file}: {e}"))
-               })?;
-
-            // git diff --no-index exits with 1 when files differ (expected)
-            if file_diff_output.status.success() || file_diff_output.status.code() == Some(1) {
-               let file_diff = String::from_utf8_lossy(&file_diff_output.stdout);
-               // Rewrite the diff header to match standard git format
-               let lines: Vec<&str> = file_diff.lines().collect();
-               if lines.len() >= 2 {
-                  use std::fmt::Write;
-                  if !combined_diff.is_empty() {
-                     combined_diff.push('\n');
-                  }
-                  writeln!(combined_diff, "diff --git a/{file} b/{file}").unwrap();
-                  combined_diff.push_str("new file mode 100644\n");
-                  combined_diff.push_str("index 0000000..0000000\n");
-                  combined_diff.push_str("--- /dev/null\n");
-                  writeln!(combined_diff, "+++ b/{file}").unwrap();
-                  // Skip first 2 lines (---/+++ from --no-index) and copy rest
-                  for line in lines.iter().skip(2) {
-                     combined_diff.push_str(line);
-                     combined_diff.push('\n');
-                  }
-               }
-            }
-         }
-
-         return Ok(combined_diff);
+         let untracked_files = list_untracked_files(dir)?;
+         return append_untracked_diff(tracked_diff, dir, &untracked_files);
       },
       Mode::Compose => unreachable!("compose mode handled separately"),
    };
@@ -189,7 +271,7 @@ pub fn get_git_stat(
    config: &CommitConfig,
 ) -> Result<String> {
    let output = match mode {
-      Mode::Staged => Command::new("git")
+      Mode::Staged => git_command()
          .args(["diff", "--cached", "--stat"])
          .current_dir(dir)
          .output()
@@ -200,7 +282,7 @@ pub fn get_git_stat(
          let target = target.ok_or_else(|| {
             CommitGenError::ValidationError("--target required for commit mode".to_string())
          })?;
-         let mut cmd = Command::new("git");
+         let mut cmd = git_command();
          cmd.arg("show");
          if config.exclude_old_message {
             cmd.arg("--format=");
@@ -213,7 +295,7 @@ pub fn get_git_stat(
       },
       Mode::Unstaged => {
          // Get stat for tracked files
-         let tracked_output = Command::new("git")
+         let tracked_output = git_command()
             .args(["diff", "--stat"])
             .current_dir(dir)
             .output()
@@ -224,45 +306,9 @@ pub fn get_git_stat(
             return Err(CommitGenError::git(format!("git diff --stat failed: {stderr}")));
          }
 
-         let mut stat = String::from_utf8_lossy(&tracked_output.stdout).to_string();
-
-         // Get untracked files and append to stat
-         let untracked_output = Command::new("git")
-            .args(["ls-files", "--others", "--exclude-standard"])
-            .current_dir(dir)
-            .output()
-            .map_err(|e| CommitGenError::git(format!("Failed to list untracked files: {e}")))?;
-
-         if !untracked_output.status.success() {
-            let stderr = String::from_utf8_lossy(&untracked_output.stderr);
-            return Err(CommitGenError::git(format!("git ls-files failed: {stderr}")));
-         }
-
-         let untracked_list = String::from_utf8_lossy(&untracked_output.stdout);
-         let untracked_files: Vec<&str> =
-            untracked_list.lines().filter(|s| !s.is_empty()).collect();
-
-         if !untracked_files.is_empty() {
-            use std::fmt::Write;
-            for file in untracked_files {
-               use std::fs;
-               if let Ok(metadata) = fs::metadata(format!("{dir}/{file}")) {
-                  let lines = if metadata.is_file() {
-                     fs::read_to_string(format!("{dir}/{file}"))
-                        .map(|content| content.lines().count())
-                        .unwrap_or(0)
-                  } else {
-                     0
-                  };
-                  if !stat.is_empty() && !stat.ends_with('\n') {
-                     stat.push('\n');
-                  }
-                  writeln!(stat, " {file} | {lines} {}", "+".repeat(lines.min(50))).unwrap();
-               }
-            }
-         }
-
-         return Ok(stat);
+         let stat = String::from_utf8_lossy(&tracked_output.stdout).to_string();
+         let untracked_files = list_untracked_files(dir)?;
+         return Ok(append_untracked_stat(stat, dir, &untracked_files));
       },
       Mode::Compose => unreachable!("compose mode handled separately"),
    };
@@ -273,6 +319,52 @@ pub fn get_git_stat(
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn get_compose_diff(dir: &str) -> Result<String> {
+   let output = git_command()
+      .args(["diff", "HEAD"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to run git diff HEAD: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git diff HEAD failed: {stderr}")));
+   }
+
+   let diff = String::from_utf8_lossy(&output.stdout).to_string();
+   let untracked_files = list_untracked_files(dir)?;
+   let diff = append_untracked_diff(diff, dir, &untracked_files)?;
+
+   if diff.trim().is_empty() {
+      return Err(CommitGenError::NoChanges { mode: "compose".to_string() });
+   }
+
+   Ok(diff)
+}
+
+pub fn get_compose_stat(dir: &str) -> Result<String> {
+   let output = git_command()
+      .args(["diff", "HEAD", "--stat"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to run git diff HEAD --stat: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git diff HEAD --stat failed: {stderr}")));
+   }
+
+   let stat = String::from_utf8_lossy(&output.stdout).to_string();
+   let untracked_files = list_untracked_files(dir)?;
+   let stat = append_untracked_stat(stat, dir, &untracked_files);
+
+   if stat.trim().is_empty() {
+      return Err(CommitGenError::NoChanges { mode: "compose".to_string() });
+   }
+
+   Ok(stat)
 }
 
 /// Execute git commit with the given message
@@ -319,7 +411,7 @@ pub fn git_commit(
    args.push("-m");
    args.push(message);
 
-   let output = Command::new("git")
+   let output = git_command()
       .args(&args)
       .current_dir(dir)
       .output()
@@ -362,7 +454,7 @@ pub fn git_push(dir: &str) -> Result<()> {
       println!("\n{}", style::info("Pushing changes..."));
    }
 
-   let output = Command::new("git")
+   let output = git_command()
       .args(["push"])
       .current_dir(dir)
       .output()
@@ -409,7 +501,7 @@ pub fn git_push(dir: &str) -> Result<()> {
 
 /// Get the current HEAD commit hash
 pub fn get_head_hash(dir: &str) -> Result<String> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["rev-parse", "HEAD"])
       .current_dir(dir)
       .output()
@@ -436,7 +528,7 @@ pub fn get_commit_list(start_ref: Option<&str>, dir: &str) -> Result<Vec<String>
       args.push("HEAD");
    }
 
-   let output = Command::new("git")
+   let output = git_command()
       .args(&args)
       .current_dir(dir)
       .output()
@@ -457,7 +549,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
    // 0committer_email\0committer_date\0message
    let format_str = "%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B";
 
-   let info_output = Command::new("git")
+   let info_output = git_command()
       .args(["show", "-s", &format!("--format={format_str}"), hash])
       .current_dir(dir)
       .output()
@@ -476,7 +568,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
    }
 
    // Get tree hash
-   let tree_output = Command::new("git")
+   let tree_output = git_command()
       .args(["rev-parse", &format!("{hash}^{{tree}}")])
       .current_dir(dir)
       .output()
@@ -486,7 +578,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
       .to_string();
 
    // Get parent hashes
-   let parents_output = Command::new("git")
+   let parents_output = git_command()
       .args(["rev-list", "--parents", "-n", "1", hash])
       .current_dir(dir)
       .output()
@@ -514,7 +606,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
 
 /// Check if working directory is clean
 pub fn check_working_tree_clean(dir: &str) -> Result<bool> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["status", "--porcelain"])
       .current_dir(dir)
       .output()
@@ -530,7 +622,7 @@ pub fn create_backup_branch(dir: &str) -> Result<String> {
    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
    let backup_name = format!("backup-rewrite-{timestamp}");
 
-   let output = Command::new("git")
+   let output = git_command()
       .args(["branch", &backup_name])
       .current_dir(dir)
       .output()
@@ -546,7 +638,7 @@ pub fn create_backup_branch(dir: &str) -> Result<String> {
 
 /// Get recent commit messages for style consistency (last N commits)
 pub fn get_recent_commits(dir: &str, count: usize) -> Result<Vec<String>> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["log", &format!("-{count}"), "--pretty=format:%s"])
       .current_dir(dir)
       .output()
@@ -563,7 +655,7 @@ pub fn get_recent_commits(dir: &str, count: usize) -> Result<Vec<String>> {
 
 /// Extract common scopes from git history by parsing commit messages
 pub fn get_common_scopes(dir: &str, limit: usize) -> Result<Vec<(String, usize)>> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["log", &format!("-{limit}"), "--pretty=format:%s"])
       .current_dir(dir)
       .output()
@@ -754,7 +846,7 @@ pub fn rewrite_history(
    }
 
    // Get current branch
-   let branch_output = Command::new("git")
+   let branch_output = git_command()
       .args(["rev-parse", "--abbrev-ref", "HEAD"])
       .current_dir(dir)
       .output()
@@ -781,7 +873,7 @@ pub fn rewrite_history(
          .collect();
 
       // Build commit-tree command
-      let mut cmd = Command::new("git");
+      let mut cmd = git_command();
       cmd.arg("commit-tree")
          .arg(&commit.tree_hash)
          .arg("-m")
@@ -825,7 +917,7 @@ pub fn rewrite_history(
 
    // Update branch to new head
    if let Some(head) = new_head {
-      let update_output = Command::new("git")
+      let update_output = git_command()
          .args(["update-ref", &format!("refs/heads/{current_branch}"), &head])
          .current_dir(dir)
          .output()
@@ -836,7 +928,7 @@ pub fn rewrite_history(
          return Err(CommitGenError::git(format!("git update-ref failed: {stderr}")));
       }
 
-      let reset_output = Command::new("git")
+      let reset_output = git_command()
          .args(["reset", "--hard", &head])
          .current_dir(dir)
          .output()
@@ -849,4 +941,33 @@ pub fn rewrite_history(
    }
 
    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn test_git_command_applies_background_feature_overrides_when_enabled() {
+      let cmd =
+         git_command_with_settings(GitCommandSettings { disable_git_background_features: true });
+      let args: Vec<String> = cmd
+         .get_args()
+         .map(|arg| arg.to_string_lossy().into_owned())
+         .collect();
+
+      assert_eq!(args, vec![
+         "-c".to_string(),
+         "core.fsmonitor=false".to_string(),
+         "-c".to_string(),
+         "core.untrackedCache=false".to_string(),
+      ]);
+   }
+
+   #[test]
+   fn test_git_command_skips_background_feature_overrides_when_disabled() {
+      let cmd =
+         git_command_with_settings(GitCommandSettings { disable_git_background_features: false });
+      assert!(cmd.get_args().next().is_none());
+   }
 }

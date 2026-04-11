@@ -1627,7 +1627,7 @@ pub async fn generate_summary_from_analysis<'a>(
 
       let response = run_oneshot::<SummaryOutput>(config, &OneShotSpec {
          operation:        "summary",
-         model:            &config.model,
+         model:            &config.summary_model,
          max_tokens:       200,
          temperature:      config.temperature,
          prompt_family:    "summary",

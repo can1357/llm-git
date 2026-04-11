@@ -130,7 +130,8 @@ api_base_url = "http://localhost:4000"    # Default: LiteLLM proxy
 api_key = "sk-..."                        # Or use LLM_GIT_API_KEY env var
 
 # Model
-model = "claude-sonnet-4-5"               # Default model for all API calls
+analysis_model = "claude-sonnet-4.5"      # Diff analysis / classification
+summary_model = "claude-haiku-4-5"        # Summary line generation
 
 # Commit message limits
 summary_guideline = 72                    # Target length
@@ -140,6 +141,7 @@ summary_hard_limit = 128                  # Absolute max
 # Features
 changelog_enabled = true
 map_reduce_enabled = true                 # Parallel analysis for large commits
+disable_git_background_features = true    # Disables fsmonitor/untrackedCache for lgit subprocesses
 temperature = 0.2                         # Structured-output-first, then tools, then JSON content parse
 
 # Commit signing
@@ -159,14 +161,16 @@ api_key = "sk-ant-..."
 ```toml
 api_base_url = "https://openrouter.ai/api/v1"
 api_key = "sk-or-..."
-model = "anthropic/claude-sonnet-4.5"
+analysis_model = "anthropic/claude-sonnet-4.5"
+summary_model = "anthropic/claude-haiku-4-5"
 ```
 
 **OpenAI:**
 ```toml
 api_base_url = "https://api.openai.com/v1"
 api_key = "sk-..."
-model = "gpt-4o"
+analysis_model = "gpt-4o"
+summary_model = "gpt-4o-mini"
 ```
 
 The client now prefers provider-native structured outputs, falls back to tool calling when unsupported, and only then falls back to parsing JSON content from the model response. Anthropic models only use structured outputs on the official Anthropic base URL; routed Anthropic models fall back directly to tool calling.

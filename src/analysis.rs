@@ -1,12 +1,10 @@
-use std::{
-   collections::{HashMap, HashSet},
-   process::Command,
-};
+use std::collections::{HashMap, HashSet};
 
 /// Scope analysis functionality for git diff numstat parsing
 use crate::config::CommitConfig;
 use crate::{
    error::{CommitGenError, Result},
+   git::git_command,
    types::{Mode, ScopeCandidate},
 };
 
@@ -367,7 +365,7 @@ pub fn extract_scope_candidates(
 ) -> Result<(String, bool)> {
    // Get numstat output
    let output = match mode {
-      Mode::Staged => Command::new("git")
+      Mode::Staged => git_command()
          .args(["diff", "--cached", "--numstat"])
          .current_dir(dir)
          .output()
@@ -378,13 +376,13 @@ pub fn extract_scope_candidates(
          let target = target.ok_or_else(|| {
             CommitGenError::ValidationError("--target required for commit mode".to_string())
          })?;
-         Command::new("git")
+         git_command()
             .args(["show", "--numstat", target])
             .current_dir(dir)
             .output()
             .map_err(|e| CommitGenError::git(format!("Failed to run git show --numstat: {e}")))?
       },
-      Mode::Unstaged => Command::new("git")
+      Mode::Unstaged => git_command()
          .args(["diff", "--numstat"])
          .current_dir(dir)
          .output()

@@ -43,6 +43,11 @@ pub struct CommitConfig {
    /// HTTP connection timeout in seconds
    pub connect_timeout_secs: u64,
 
+   /// Disable git background/index features that are slow for short-lived CLI
+   /// subprocesses.
+   #[serde(default = "default_disable_git_background_features")]
+   pub disable_git_background_features: bool,
+
    /// Maximum rounds for compose mode multi-commit generation
    pub compose_max_rounds: usize,
 
@@ -55,7 +60,14 @@ pub struct CommitConfig {
    pub max_diff_tokens:         usize,
    pub wide_change_threshold:   f32,
    pub temperature:             f32,
-   pub model:                   String,
+   #[serde(default = "default_analysis_model")]
+   pub analysis_model:          String,
+   #[serde(default = "default_summary_model")]
+   pub summary_model:           String,
+   /// Legacy single-model config key. Parsed for backward compatibility and
+   /// normalized into `analysis_model`.
+   #[serde(default, rename = "model")]
+   pub legacy_model:            Option<String>,
    pub excluded_files:          Vec<String>,
    pub low_priority_extensions: Vec<String>,
 
@@ -130,8 +142,20 @@ const fn default_api_mode() -> ApiMode {
    ApiMode::Auto
 }
 
+const fn default_disable_git_background_features() -> bool {
+   true
+}
+
 fn default_summary_prompt_variant() -> String {
    "default".to_string()
+}
+
+fn default_analysis_model() -> String {
+   "claude-opus-4.5".to_string()
+}
+
+fn default_summary_model() -> String {
+   "claude-haiku-4-5".to_string()
 }
 
 const fn default_wide_change_abstract() -> bool {
@@ -176,23 +200,26 @@ fn parse_api_mode(value: &str) -> ApiMode {
 impl Default for CommitConfig {
    fn default() -> Self {
       Self {
-         api_base_url:            "http://localhost:4000".to_string(),
-         api_mode:                default_api_mode(),
-         api_key:                 None,
-         request_timeout_secs:    120,
-         connect_timeout_secs:    30,
-         compose_max_rounds:      5,
-         summary_guideline:       72,
-         summary_soft_limit:      96,
-         summary_hard_limit:      128,
-         max_retries:             3,
-         initial_backoff_ms:      1000,
-         max_diff_length:         100000, // Increased to handle larger refactors better
-         max_diff_tokens:         25000,  // ~100K chars = 25K tokens (4 chars/token estimate)
-         wide_change_threshold:   0.50,
-         temperature:             0.2, // Low temperature for consistent structured output
-         model:                   "claude-opus-4.5".to_string(),
-         excluded_files:          vec![
+         api_base_url: "http://localhost:4000".to_string(),
+         api_mode: default_api_mode(),
+         api_key: None,
+         request_timeout_secs: 120,
+         connect_timeout_secs: 30,
+         disable_git_background_features: default_disable_git_background_features(),
+         compose_max_rounds: 5,
+         summary_guideline: 72,
+         summary_soft_limit: 96,
+         summary_hard_limit: 128,
+         max_retries: 3,
+         initial_backoff_ms: 1000,
+         max_diff_length: 100000, // Increased to handle larger refactors better
+         max_diff_tokens: 25000,  // ~100K chars = 25K tokens (4 chars/token estimate)
+         wide_change_threshold: 0.50,
+         temperature: 0.2, // Low temperature for consistent structured output
+         analysis_model: default_analysis_model(),
+         summary_model: default_summary_model(),
+         legacy_model: None,
+         excluded_files: vec![
             // Rust
             "Cargo.lock".to_string(),
             // JavaScript/Node
@@ -242,21 +269,21 @@ impl Default for CommitConfig {
             ".tmp".to_string(),
             ".bak".to_string(),
          ],
-         max_detail_tokens:       200,
+         max_detail_tokens: 200,
          analysis_prompt_variant: default_analysis_prompt_variant(),
-         summary_prompt_variant:  default_summary_prompt_variant(),
-         wide_change_abstract:    default_wide_change_abstract(),
-         exclude_old_message:     default_exclude_old_message(),
-         gpg_sign:                default_gpg_sign(),
-         signoff:                 default_signoff(),
-         types:                   default_types(),
-         classifier_hint:         default_classifier_hint(),
-         categories:              default_categories(),
-         changelog_enabled:       default_changelog_enabled(),
-         map_reduce_enabled:      default_map_reduce_enabled(),
-         map_reduce_threshold:    default_map_reduce_threshold(),
-         analysis_prompt:         String::new(),
-         summary_prompt:          String::new(),
+         summary_prompt_variant: default_summary_prompt_variant(),
+         wide_change_abstract: default_wide_change_abstract(),
+         exclude_old_message: default_exclude_old_message(),
+         gpg_sign: default_gpg_sign(),
+         signoff: default_signoff(),
+         types: default_types(),
+         classifier_hint: default_classifier_hint(),
+         categories: default_categories(),
+         changelog_enabled: default_changelog_enabled(),
+         map_reduce_enabled: default_map_reduce_enabled(),
+         map_reduce_threshold: default_map_reduce_threshold(),
+         analysis_prompt: String::new(),
+         summary_prompt: String::new(),
       }
    }
 }
@@ -298,6 +325,7 @@ impl CommitConfig {
 
       // Apply environment variable overrides
       Self::apply_env_overrides(&mut config);
+      config.normalize_models();
 
       config.load_prompts()?;
       Ok(config)
@@ -316,6 +344,14 @@ impl CommitConfig {
       if let Ok(api_mode) = std::env::var("LLM_GIT_API_MODE") {
          config.api_mode = parse_api_mode(&api_mode);
       }
+
+      if let Ok(value) = std::env::var("LLM_GIT_DISABLE_GIT_BACKGROUND_FEATURES") {
+         match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => config.disable_git_background_features = true,
+            "0" | "false" | "no" | "off" => config.disable_git_background_features = false,
+            _ => {},
+         }
+      }
    }
 
    /// Load config from specific file
@@ -327,9 +363,16 @@ impl CommitConfig {
 
       // Apply environment variable overrides
       Self::apply_env_overrides(&mut config);
+      config.normalize_models();
 
       config.load_prompts()?;
       Ok(config)
+   }
+
+   fn normalize_models(&mut self) {
+      if let Some(model) = self.legacy_model.take() {
+         self.analysis_model = model;
+      }
    }
 
    /// Load prompts - templates are now loaded dynamically via Tera

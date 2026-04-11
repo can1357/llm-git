@@ -9,7 +9,6 @@
 use std::{
    collections::HashMap,
    path::{Path, PathBuf},
-   process::Command,
 };
 
 use serde::Deserialize;
@@ -19,6 +18,7 @@ use crate::{
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
+   git::git_command,
    patch::stage_files,
    templates,
    tokens::create_token_counter,
@@ -273,7 +273,7 @@ async fn call_changelog_api(
 
    let response = run_oneshot::<ChangelogResponse>(config, &OneShotSpec {
       operation:        "changelog",
-      model:            &config.model,
+      model:            &config.analysis_model,
       max_tokens:       2000,
       temperature:      config.temperature,
       prompt_family:    "changelog",
@@ -319,7 +319,7 @@ fn format_existing_entries(unreleased: &UnreleasedSection) -> Option<String> {
 
 /// Get list of staged files
 fn get_staged_files(dir: &str) -> Result<Vec<String>> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["diff", "--cached", "--name-only"])
       .current_dir(dir)
       .output()
@@ -341,7 +341,7 @@ fn get_staged_files(dir: &str) -> Result<Vec<String>> {
 
 /// Find all CHANGELOG.md files in the repo
 fn find_changelogs(dir: &str) -> Result<Vec<PathBuf>> {
-   let output = Command::new("git")
+   let output = git_command()
       .args(["ls-files", "--full-name", "**/CHANGELOG.md", "CHANGELOG.md"])
       .current_dir(dir)
       .output()
@@ -444,7 +444,7 @@ fn get_diff_for_files(files: &[String], dir: &str) -> Result<String> {
       return Ok(String::new());
    }
 
-   let output = Command::new("git")
+   let output = git_command()
       .args(["diff", "--cached", "--"])
       .args(files)
       .current_dir(dir)
@@ -460,7 +460,7 @@ fn get_stat_for_files(files: &[String], dir: &str) -> Result<String> {
       return Ok(String::new());
    }
 
-   let output = Command::new("git")
+   let output = git_command()
       .args(["diff", "--cached", "--stat", "--"])
       .args(files)
       .current_dir(dir)

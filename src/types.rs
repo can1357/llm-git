@@ -1448,12 +1448,50 @@ where
          if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
             Ok(None)
          } else {
-            Scope::new(trimmed.to_string())
-               .map(Some)
-               .map_err(serde::de::Error::custom)
+            Ok(coerce_scope(trimmed))
          }
       },
    }
+}
+
+fn coerce_scope(raw: &str) -> Option<Scope> {
+   let normalized = raw.trim().replace('\\', "/").to_lowercase();
+
+   let segments: Vec<String> = normalized
+      .split('/')
+      .filter_map(sanitize_scope_segment)
+      .take(2)
+      .collect();
+
+   if segments.is_empty() {
+      return None;
+   }
+
+   Scope::new(segments.join("/")).ok()
+}
+
+fn sanitize_scope_segment(segment: &str) -> Option<String> {
+   let mut out = String::new();
+   let mut last_was_separator = false;
+
+   for ch in segment.trim().chars() {
+      if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+         out.push(ch);
+         last_was_separator = false;
+      } else if ch == '-' || ch == '_' {
+         if !out.is_empty() && !last_was_separator {
+            out.push(ch);
+            last_was_separator = true;
+         }
+      } else if (ch.is_ascii_whitespace() || ch == '.')
+         && !out.is_empty() && !last_was_separator {
+            out.push('-');
+            last_was_separator = true;
+         }
+   }
+
+   let trimmed = out.trim_matches(['-', '_']).to_string();
+   (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(test)]
@@ -1863,6 +1901,20 @@ mod tests {
             analysis.scope
          );
       }
+   }
+
+   #[test]
+   fn test_scope_invalid_model_output_is_coerced() {
+      let json = r#"{"type":"chore","scope":".github","details":[],"issue_refs":[]}"#;
+      let analysis: ConventionalAnalysis = serde_json::from_str(json).unwrap();
+      assert_eq!(analysis.scope.as_ref().map(Scope::as_str), Some("github"));
+   }
+
+   #[test]
+   fn test_scope_path_like_model_output_is_coerced() {
+      let json = r#"{"type":"chore","scope":"docs//Release Notes","details":[],"issue_refs":[]}"#;
+      let analysis: ConventionalAnalysis = serde_json::from_str(json).unwrap();
+      assert_eq!(analysis.scope.as_ref().map(Scope::as_str), Some("docs/release-notes"));
    }
 
    // ========== HunkSelector Tests ==========

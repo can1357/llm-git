@@ -107,7 +107,7 @@ impl TestRunner {
       let analysis = generate_analysis_with_map_reduce(
          &fixture.input.stat,
          &fixture.input.diff,
-         &self.config.model,
+         &self.config.analysis_model,
          &fixture.input.scope_candidates,
          &ctx,
          &self.config,

@@ -207,6 +207,30 @@ async fn map_phase(
    observations.into_iter().collect()
 }
 
+pub async fn observe_diff_files(
+   diff: &str,
+   model_name: &str,
+   config: &CommitConfig,
+   counter: &TokenCounter,
+) -> Result<Vec<FileObservation>> {
+   let mut files = parse_diff(diff);
+
+   files.retain(|file| {
+      !config
+         .excluded_files
+         .iter()
+         .any(|excluded| file.filename.ends_with(excluded))
+   });
+
+   if files.is_empty() {
+      return Err(CommitGenError::Other(
+         "No relevant files to summarize after filtering".to_string(),
+      ));
+   }
+
+   map_phase(&files, model_name, config, counter).await
+}
+
 /// Analyze a single file and extract observations
 async fn map_single_file(
    filename: &str,
@@ -312,27 +336,10 @@ pub async fn run_map_reduce(
    config: &CommitConfig,
    counter: &TokenCounter,
 ) -> Result<ConventionalAnalysis> {
-   let mut files = parse_diff(diff);
+   let observations = observe_diff_files(diff, model_name, config, counter).await?;
 
-   // Filter excluded files
-   files.retain(|f| {
-      !config
-         .excluded_files
-         .iter()
-         .any(|excluded| f.filename.ends_with(excluded))
-   });
-
-   if files.is_empty() {
-      return Err(CommitGenError::Other(
-         "No relevant files to analyze after filtering".to_string(),
-      ));
-   }
-
-   let file_count = files.len();
+   let file_count = observations.len();
    crate::style::print_info(&format!("Running map-reduce on {file_count} files..."));
-
-   // Map phase
-   let observations = map_phase(&files, model_name, config, counter).await?;
 
    // Reduce phase
    reduce_phase(&observations, stat, scope_candidates, model_name, config).await

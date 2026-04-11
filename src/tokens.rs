@@ -13,7 +13,7 @@ use crate::config::CommitConfig;
 
 /// Create a `TokenCounter` from config values.
 pub fn create_token_counter(config: &CommitConfig) -> TokenCounter {
-   TokenCounter::new(&config.api_base_url, config.api_key.as_deref(), &config.model)
+   TokenCounter::new(&config.api_base_url, config.api_key.as_deref(), &config.analysis_model)
 }
 
 /// Token counter with cascading fallback.
