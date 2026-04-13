@@ -13,8 +13,8 @@ use crate::{
       generate_summary_from_analysis, run_oneshot, strict_json_schema,
    },
    compose_types::{
-      ComposeBindingAssignment, ComposeExecutableGroup, ComposeExecutablePlan, ComposeHunk,
-      ComposeIntentGroup, ComposeIntentPlan, ComposeSnapshot,
+      ComposeBindingAssignment, ComposeExecutableGroup, ComposeExecutablePlan, ComposeFile,
+      ComposeHunk, ComposeIntentGroup, ComposeIntentPlan, ComposeSnapshot,
    },
    config::CommitConfig,
    error::{CommitGenError, Result},
@@ -25,33 +25,11 @@ use crate::{
    map_reduce::{FileObservation, observe_diff_files, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
    patch::{build_compose_snapshot, reset_staging, stage_executable_group},
-   style,
+   style, templates,
    tokens::create_token_counter,
    types::{Args, CommitType, ConventionalCommit, Mode},
    validation::validate_commit_message,
 };
-
-const COMPOSE_INTENT_SYSTEM_PROMPT: &str = r"You plan atomic git commits from a pre-parsed snapshot of changes.
-
-Rules:
-1. Return 1-{MAX_COMMITS} logical groups.
-2. Use file IDs only. Do not emit hunk IDs in this phase.
-3. Every file ID must appear in at least one group.
-4. If one file contains changes for multiple logical commits, repeat that file ID across the relevant groups.
-5. Prefer fewer groups over speculative splits.
-6. Dependencies must use group IDs, not numeric indices.
-7. Keep groups buildable in dependency order.
-";
-
-const COMPOSE_BIND_SYSTEM_PROMPT: &str = r"You bind pre-parsed hunk IDs to existing commit groups.
-
-Rules:
-1. Use only the provided group IDs and hunk IDs.
-2. Every hunk ID must be assigned to exactly one group.
-3. Only assign a hunk to one of its candidate groups.
-4. Prefer keeping related hunks together.
-5. Prefer fewer splits when uncertain.
-";
 
 const MAX_OBSERVATIONS_PER_FILE: usize = 3;
 const COMPOSE_PLAN_SCHEMA_VERSION: &str = "v2";
@@ -423,7 +401,162 @@ where
    Ok(order)
 }
 
-fn validate_intent_plan(snapshot: &ComposeSnapshot, groups: &[ComposeIntentGroup]) -> Result<()> {
+fn normalize_file_reference(raw_file_ref: &str) -> String {
+   raw_file_ref
+      .trim()
+      .trim_matches(|ch| matches!(ch, '`' | '"' | '\''))
+      .trim_start_matches("./")
+      .trim_end_matches(|ch: char| matches!(ch, ',' | ';'))
+      .to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposeFileCategory {
+   Binary,
+   Dependency,
+   Docs,
+   Test,
+   Config,
+   Source,
+   Other,
+}
+
+fn compose_file_category(file: &ComposeFile) -> ComposeFileCategory {
+   if file.is_binary {
+      return ComposeFileCategory::Binary;
+   }
+
+   if is_dependency_manifest(&file.path) {
+      return ComposeFileCategory::Dependency;
+   }
+
+   let path = file.path.to_ascii_lowercase();
+   let file_name = Path::new(&path)
+      .file_name()
+      .and_then(|name| name.to_str())
+      .unwrap_or_default();
+   let extension = Path::new(&path)
+      .extension()
+      .and_then(|ext| ext.to_str())
+      .unwrap_or_default();
+
+   if extension == "md" || file_name == "readme" || file_name == "readme.md" {
+      return ComposeFileCategory::Docs;
+   }
+
+   if path.contains("/tests/")
+      || path.starts_with("tests/")
+      || file_name.contains("test")
+      || file_name.contains("spec")
+   {
+      return ComposeFileCategory::Test;
+   }
+
+   if matches!(extension, "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "env") {
+      return ComposeFileCategory::Config;
+   }
+
+   if matches!(
+      extension,
+      "rs"
+         | "py"
+         | "js"
+         | "jsx"
+         | "ts"
+         | "tsx"
+         | "go"
+         | "java"
+         | "kt"
+         | "c"
+         | "cc"
+         | "cpp"
+         | "h"
+         | "hpp"
+         | "cs"
+         | "rb"
+         | "php"
+         | "swift"
+         | "scala"
+         | "m"
+         | "mm"
+   ) {
+      return ComposeFileCategory::Source;
+   }
+
+   ComposeFileCategory::Other
+}
+
+fn common_path_prefix_depth(left: &str, right: &str) -> usize {
+   left
+      .split('/')
+      .zip(right.split('/'))
+      .take_while(|(left_segment, right_segment)| left_segment == right_segment)
+      .count()
+}
+
+fn file_similarity_score(missing_file: &ComposeFile, candidate_file: &ComposeFile) -> i32 {
+   let mut score = (common_path_prefix_depth(&missing_file.path, &candidate_file.path) as i32) * 25;
+
+   if Path::new(&missing_file.path).parent() == Path::new(&candidate_file.path).parent() {
+      score += 40;
+   }
+
+   if Path::new(&missing_file.path).extension() == Path::new(&candidate_file.path).extension() {
+      score += 12;
+   }
+
+   if compose_file_category(missing_file) == compose_file_category(candidate_file) {
+      score += 18;
+   }
+
+   score
+}
+
+fn group_type_bonus(file: &ComposeFile, group: &ComposeIntentGroup) -> i32 {
+   match (compose_file_category(file), group.commit_type.as_str()) {
+      (ComposeFileCategory::Docs, "docs") => 25,
+      (ComposeFileCategory::Test, "test") => 25,
+      (ComposeFileCategory::Dependency, "build" | "chore" | "ci") => 18,
+      (ComposeFileCategory::Config, "build" | "chore" | "ci") => 12,
+      (ComposeFileCategory::Source, "feat" | "fix" | "refactor" | "perf") => 10,
+      _ => 0,
+   }
+}
+
+fn best_group_for_missing_file(
+   snapshot: &ComposeSnapshot,
+   groups: &[ComposeIntentGroup],
+   missing_file: &ComposeFile,
+) -> usize {
+   let mut best_group_idx = 0;
+   let mut best_score = i32::MIN;
+   let mut best_group_size = usize::MAX;
+
+   for (group_idx, group) in groups.iter().enumerate() {
+      let similarity = group
+         .file_ids
+         .iter()
+         .filter_map(|file_id| snapshot.file_by_id(file_id))
+         .map(|candidate_file| file_similarity_score(missing_file, candidate_file))
+         .max()
+         .unwrap_or_default();
+      let score = similarity + group_type_bonus(missing_file, group);
+      let group_size = group.file_ids.len();
+
+      if score > best_score || (score == best_score && group_size < best_group_size) {
+         best_group_idx = group_idx;
+         best_score = score;
+         best_group_size = group_size;
+      }
+   }
+
+   best_group_idx
+}
+
+fn normalize_intent_plan(
+   snapshot: &ComposeSnapshot,
+   mut groups: Vec<ComposeIntentGroup>,
+) -> Result<(Vec<ComposeIntentGroup>, Vec<String>)> {
    if groups.is_empty() {
       return Err(CommitGenError::Other("Compose intent plan returned no groups".to_string()));
    }
@@ -433,9 +566,15 @@ fn validate_intent_plan(snapshot: &ComposeSnapshot, groups: &[ComposeIntentGroup
       .iter()
       .map(|file| file.file_id.as_str())
       .collect();
+   let file_id_by_path: HashMap<String, &str> = snapshot
+      .files
+      .iter()
+      .map(|file| (normalize_file_reference(&file.path), file.file_id.as_str()))
+      .collect();
+   let mut repair_notes = Vec::new();
    let mut covered_file_ids = HashSet::new();
 
-   for group in groups {
+   for group in &mut groups {
       if group.file_ids.is_empty() {
          return Err(CommitGenError::Other(format!(
             "Compose group {} does not reference any files",
@@ -443,33 +582,56 @@ fn validate_intent_plan(snapshot: &ComposeSnapshot, groups: &[ComposeIntentGroup
          )));
       }
 
-      for file_id in &group.file_ids {
-         if !known_file_ids.contains(file_id.as_str()) {
-            return Err(CommitGenError::Other(format!(
-               "Compose group {} references unknown file_id {}",
-               group.group_id, file_id
-            )));
+      let mut normalized_file_ids = Vec::new();
+      let mut seen_file_ids = HashSet::new();
+      for raw_file_ref in &group.file_ids {
+         let normalized_ref = normalize_file_reference(raw_file_ref);
+         let canonical_file_id = if known_file_ids.contains(normalized_ref.as_str()) {
+            normalized_ref.clone()
+         } else {
+            let uppercase_ref = normalized_ref.to_ascii_uppercase();
+            if known_file_ids.contains(uppercase_ref.as_str()) {
+               uppercase_ref
+            } else if let Some(file_id) = file_id_by_path.get(&normalized_ref) {
+               if raw_file_ref != *file_id {
+                  repair_notes.push(format!(
+                     "Mapped compose planner file reference '{}' to {}",
+                     raw_file_ref, file_id
+                  ));
+               }
+               (*file_id).to_string()
+            } else {
+               return Err(CommitGenError::Other(format!(
+                  "Compose group {} references unknown file_id {}",
+                  group.group_id, raw_file_ref
+               )));
+            }
+         };
+
+         if seen_file_ids.insert(canonical_file_id.clone()) {
+            covered_file_ids.insert(canonical_file_id.clone());
+            normalized_file_ids.push(canonical_file_id);
          }
-         covered_file_ids.insert(file_id.as_str());
       }
+      group.file_ids = normalized_file_ids;
    }
 
-   let missing: Vec<&str> = snapshot
-      .files
-      .iter()
-      .filter_map(|file| {
-         (!covered_file_ids.contains(file.file_id.as_str())).then_some(file.file_id.as_str())
-      })
-      .collect();
+   for file in &snapshot.files {
+      if covered_file_ids.contains(file.file_id.as_str()) {
+         continue;
+      }
 
-   if !missing.is_empty() {
-      return Err(CommitGenError::Other(format!(
-         "Compose intent plan did not cover all files: {}",
-         missing.join(", ")
-      )));
+      let target_group_idx = best_group_for_missing_file(snapshot, &groups, file);
+      let target_group = &mut groups[target_group_idx];
+      target_group.file_ids.push(file.file_id.clone());
+      covered_file_ids.insert(file.file_id.clone());
+      repair_notes.push(format!(
+         "Compose planner omitted {} ({}); assigned it to {}",
+         file.file_id, file.path, target_group.group_id
+      ));
    }
 
-   Ok(())
+   Ok((groups, repair_notes))
 }
 
 async fn analyze_compose_intent(
@@ -481,10 +643,12 @@ async fn analyze_compose_intent(
 ) -> Result<ComposeIntentPlan> {
    let snapshot_summary = render_snapshot_summary(snapshot, observations);
    let schema = build_intent_schema(config);
-   let user_prompt = format!(
-      "Plan 1-{max_commits} logical commits.\n\n## Git Stat\n{}\n\n## Snapshot\n{}",
-      snapshot.stat, snapshot_summary
-   );
+   let parts = templates::render_compose_intent_prompt(&templates::ComposeIntentPromptParams {
+      variant: "default",
+      max_commits,
+      stat: &snapshot.stat,
+      snapshot_summary: &snapshot_summary,
+   })?;
 
    let response = run_oneshot::<ComposeIntentResponse>(config, &OneShotSpec {
       operation:        "compose/intent",
@@ -493,9 +657,8 @@ async fn analyze_compose_intent(
       temperature:      COMPOSE_PLANNER_TEMPERATURE,
       prompt_family:    "compose-intent",
       prompt_variant:   "default",
-      system_prompt:    &COMPOSE_INTENT_SYSTEM_PROMPT
-         .replace("{MAX_COMMITS}", &max_commits.to_string()),
-      user_prompt:      &user_prompt,
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
       tool_name:        "create_compose_intent_plan",
       tool_description: "Plan logical commit groups over file IDs",
       schema:           &schema,
@@ -507,14 +670,14 @@ async fn analyze_compose_intent(
    })
    .await?;
 
-   validate_intent_plan(snapshot, &response.output.groups)?;
-   let dependency_order = compute_dependency_order(
-      &response.output.groups,
-      |group| &group.group_id,
-      |group| &group.dependencies,
-   )?;
+   let (groups, repair_notes) = normalize_intent_plan(snapshot, response.output.groups)?;
+   for note in &repair_notes {
+      eprintln!("{}", style::warning(note));
+   }
+   let dependency_order =
+      compute_dependency_order(&groups, |group| &group.group_id, |group| &group.dependencies)?;
 
-   Ok(ComposeIntentPlan { groups: response.output.groups, dependency_order })
+   Ok(ComposeIntentPlan { groups, dependency_order })
 }
 
 fn auto_assign_hunks(
@@ -570,14 +733,8 @@ fn auto_assign_hunks(
    Ok((assigned, ambiguous))
 }
 
-fn render_binding_prompt(
-   snapshot: &ComposeSnapshot,
-   groups: &[ComposeIntentGroup],
-   ambiguous_files: &[AmbiguousFileBinding],
-) -> String {
+fn render_binding_groups(groups: &[ComposeIntentGroup]) -> String {
    let mut out = String::new();
-   out.push_str("Assign each hunk to one of its candidate groups.\n\n");
-   out.push_str("## Groups\n");
    for group in groups {
       let scope = group
          .scope
@@ -595,7 +752,14 @@ fn render_binding_prompt(
       .unwrap();
    }
 
-   out.push_str("\n## Ambiguous Files\n");
+   out
+}
+
+fn render_binding_ambiguous_files(
+   snapshot: &ComposeSnapshot,
+   ambiguous_files: &[AmbiguousFileBinding],
+) -> String {
+   let mut out = String::new();
    for ambiguous_file in ambiguous_files {
       writeln!(
          out,
@@ -637,7 +801,13 @@ async fn request_binding(
    debug_name: &'static str,
 ) -> Result<Vec<ComposeBindingAssignment>> {
    let schema = build_binding_schema();
-   let user_prompt = render_binding_prompt(snapshot, groups, ambiguous_files);
+   let groups_text = render_binding_groups(groups);
+   let ambiguous_files_text = render_binding_ambiguous_files(snapshot, ambiguous_files);
+   let parts = templates::render_compose_bind_prompt(&templates::ComposeBindPromptParams {
+      variant:         "default",
+      groups:          &groups_text,
+      ambiguous_files: &ambiguous_files_text,
+   })?;
    let response = run_oneshot::<ComposeBindingResponse>(config, &OneShotSpec {
       operation:        "compose/bind",
       model:            &config.analysis_model,
@@ -645,8 +815,8 @@ async fn request_binding(
       temperature:      COMPOSE_PLANNER_TEMPERATURE,
       prompt_family:    "compose-bind",
       prompt_variant:   "default",
-      system_prompt:    COMPOSE_BIND_SYSTEM_PROMPT,
-      user_prompt:      &user_prompt,
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
       tool_name:        "bind_compose_hunks",
       tool_description: "Assign hunk IDs to existing compose groups",
       schema:           &schema,
@@ -1741,5 +1911,60 @@ index 3333333..4444444 100644
 
       let err = validate_executable_plan(&snapshot, &executable_plan).unwrap_err();
       assert!(err.to_string().contains("assigned to both"));
+   }
+
+   #[test]
+   fn test_normalize_intent_plan_maps_path_references_to_file_ids() {
+      let snapshot = build_test_snapshot();
+      let groups = vec![ComposeIntentGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec!["src/lib.rs".to_string(), "`tests/lib.rs`".to_string()],
+         rationale:    "normalize file references".to_string(),
+         dependencies: vec![],
+      }];
+
+      let (normalized_groups, repair_notes) = normalize_intent_plan(&snapshot, groups).unwrap();
+
+      assert_eq!(normalized_groups.len(), 1);
+      assert_eq!(
+         normalized_groups[0].file_ids,
+         snapshot
+            .files
+            .iter()
+            .map(|file| file.file_id.clone())
+            .collect::<Vec<_>>()
+      );
+      assert_eq!(repair_notes.len(), 2);
+   }
+
+   #[test]
+   fn test_normalize_intent_plan_repairs_missing_files() {
+      let snapshot = build_test_snapshot();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let test_file = snapshot.file_by_path("tests/lib.rs").unwrap();
+      let groups = vec![ComposeIntentGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "partial coverage".to_string(),
+         dependencies: vec![],
+      }];
+
+      let (normalized_groups, repair_notes) = normalize_intent_plan(&snapshot, groups).unwrap();
+
+      assert_eq!(normalized_groups.len(), 1);
+      assert!(
+         normalized_groups[0].file_ids.contains(&source_file.file_id),
+         "existing file assignment should be preserved"
+      );
+      assert!(
+         normalized_groups[0].file_ids.contains(&test_file.file_id),
+         "missing files should be assigned to an existing group"
+      );
+      assert_eq!(repair_notes.len(), 1);
+      assert!(repair_notes[0].contains(&test_file.file_id));
    }
 }

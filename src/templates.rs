@@ -123,6 +123,18 @@ static TERA: LazyLock<Mutex<Tera>> = LazyLock::new(|| {
       if let Err(e) = register_directory_templates(&mut tera, &prompts_dir.join("fast"), "fast") {
          eprintln!("Warning: {e}");
       }
+      if let Err(e) = register_directory_templates(
+         &mut tera,
+         &prompts_dir.join("compose-intent"),
+         "compose-intent",
+      ) {
+         eprintln!("Warning: {e}");
+      }
+      if let Err(e) =
+         register_directory_templates(&mut tera, &prompts_dir.join("compose-bind"), "compose-bind")
+      {
+         eprintln!("Warning: {e}");
+      }
    }
 
    // Register embedded templates that aren't overridden by user-provided files.
@@ -434,6 +446,44 @@ pub fn render_reduce_prompt(
    render_prompt_parts(&format!("reduce/{variant}.md"), &template_content, &context)
 }
 
+/// Parameters for rendering the compose intent prompt template.
+pub struct ComposeIntentPromptParams<'a> {
+   pub variant:          &'a str,
+   pub max_commits:      usize,
+   pub stat:             &'a str,
+   pub snapshot_summary: &'a str,
+}
+
+/// Render compose intent prompt template.
+pub fn render_compose_intent_prompt(p: &ComposeIntentPromptParams<'_>) -> Result<PromptParts> {
+   let template_content = load_template_file("compose-intent", p.variant)?;
+
+   let mut context = Context::new();
+   context.insert("max_commits", &p.max_commits);
+   context.insert("stat", p.stat);
+   context.insert("snapshot_summary", p.snapshot_summary);
+
+   render_prompt_parts(&format!("compose-intent/{}.md", p.variant), &template_content, &context)
+}
+
+/// Parameters for rendering the compose bind prompt template.
+pub struct ComposeBindPromptParams<'a> {
+   pub variant:         &'a str,
+   pub groups:          &'a str,
+   pub ambiguous_files: &'a str,
+}
+
+/// Render compose bind prompt template.
+pub fn render_compose_bind_prompt(p: &ComposeBindPromptParams<'_>) -> Result<PromptParts> {
+   let template_content = load_template_file("compose-bind", p.variant)?;
+
+   let mut context = Context::new();
+   context.insert("groups", p.groups);
+   context.insert("ambiguous_files", p.ambiguous_files);
+
+   render_prompt_parts(&format!("compose-bind/{}.md", p.variant), &template_content, &context)
+}
+
 /// Parameters for rendering the fast mode prompt template.
 pub struct FastPromptParams<'a> {
    pub variant:          &'a str,
@@ -456,4 +506,41 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
    }
 
    render_prompt_parts(&format!("fast/{}.md", p.variant), &template_content, &context)
+}
+
+#[cfg(test)]
+mod tests {
+   use super::{
+      ComposeBindPromptParams, ComposeIntentPromptParams, render_compose_bind_prompt,
+      render_compose_intent_prompt,
+   };
+
+   #[test]
+   fn test_render_compose_intent_prompt() {
+      let parts = render_compose_intent_prompt(&ComposeIntentPromptParams {
+         variant:          "default",
+         max_commits:      3,
+         stat:             "src/foo.rs | 10 +++++-----",
+         snapshot_summary: "- F1 src/foo.rs",
+      })
+      .unwrap();
+
+      assert!(parts.system.contains("create_compose_intent_plan"));
+      assert!(parts.user.contains("max_commits: 3"));
+      assert!(parts.user.contains("src/foo.rs"));
+   }
+
+   #[test]
+   fn test_render_compose_bind_prompt() {
+      let parts = render_compose_bind_prompt(&ComposeBindPromptParams {
+         variant:         "default",
+         groups:          "- G1 [feat(api)] Added endpoint",
+         ambiguous_files: "- F2 src/api.rs candidates: G1",
+      })
+      .unwrap();
+
+      assert!(parts.system.contains("bind_compose_hunks"));
+      assert!(parts.user.contains("G1"));
+      assert!(parts.user.contains("src/api.rs"));
+   }
 }
