@@ -1505,7 +1505,7 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
       )?;
    }
 
-   let max_commits = args.compose_max_commits.unwrap_or(3);
+   let max_commits = args.compose_max_commits.unwrap_or(20);
    let executable_plan = if let Some(cached_plan) =
       load_cached_plan(&args.dir, &snapshot, max_commits, &config.analysis_model)?
    {
