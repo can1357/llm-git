@@ -13,6 +13,8 @@ Apply scope when 60%+ of line changes target a single component:
 
 Use `null` for: cross-cutting changes, no dominant component, project-wide refactoring.
 
+Scope MUST be short — ideally one word, max two words joined by `-`. If a candidate is long (e.g. `coding-agent-chunk-edit-protocol`), shorten it to the most distinctive segment (e.g. `chunk-edit`). Never use 3+ hyphenated words.
+
 Forbidden scopes (use `null`): `src`, `lib`, `include`, `tests`, `benches`, `examples`, `docs`, project name, `app`, `main`, `entire`, `all`, `misc`.
 
 Prefer scopes from `<common_scopes>` over inventing new ones.

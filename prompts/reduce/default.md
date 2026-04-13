@@ -19,6 +19,7 @@ Get this right. Accuracy matters.
 - Use null if spread across multiple components
 - Use scope_candidates as primary source
 - Valid scopes only: specific component names (api, parser, config, etc.)
+- Scope MUST be short — ideally one word, max two words joined by `-`. Shorten long candidates to the most distinctive segment (e.g. `coding-agent-chunk-edit-protocol` → `chunk-edit`).
 </scope_rules>
 
 <output_format>

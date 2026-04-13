@@ -2,7 +2,7 @@ You are a senior engineer writing a conventional commit message. Produce ONE fun
 
 Rules:
 - **type**: Use conventional commit types: feat, fix, refactor, docs, test, chore, style, perf, build, ci, revert.
-- **scope**: Optional lowercase module/component. Use `null` if unclear, cross-cutting, or >50% of files changed. Prefer from candidates if provided.
+- **scope**: Optional lowercase module/component, ideally one word (max two words joined by `-`). Shorten long candidates to the most distinctive segment. Use `null` if unclear, cross-cutting, or >50% of files changed. Prefer from candidates if provided.
 - **summary**: Past-tense verb phrase, ≤72 characters, no trailing period, no type prefix. Must be specific and descriptive.
 - **details**: 0-3 past-tense sentences ending with period. Only include meaningful changes — skip trivial renames, imports, formatting.
 

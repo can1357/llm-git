@@ -2261,7 +2261,7 @@ mod tests {
       // "fixed" is past-tense but repeats "fix" type
       let result = validate_summary_quality("fix bug", "fix", stat);
       assert!(result.is_err());
-      // "fix" is not in PAST_TENSE_VERBS, so fails on verb check
+      // "fix" is not past-tense, so fails on verb check
       assert!(result.unwrap_err().contains("past-tense verb"));
    }
 
