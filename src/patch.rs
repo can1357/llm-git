@@ -519,6 +519,7 @@ mod tests {
       run_git(&dir, &["init"]);
       run_git(&dir, &["config", "user.name", "Compose Test"]);
       run_git(&dir, &["config", "user.email", "compose@test.local"]);
+      run_git(&dir, &["config", "commit.gpgsign", "false"]);
       dir
    }
 

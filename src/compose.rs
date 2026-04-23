@@ -26,14 +26,25 @@ use crate::{
    normalization::{format_commit_message, post_process_commit_message},
    patch::{build_compose_snapshot, reset_staging, stage_executable_group},
    style, templates,
-   tokens::create_token_counter,
-   types::{Args, CommitType, ConventionalCommit, Mode},
+   tokens::{TokenCounter, create_token_counter},
+   types::{Args, CommitType, ConventionalCommit, Mode, Scope},
    validation::validate_commit_message,
 };
 
 const MAX_OBSERVATIONS_PER_FILE: usize = 3;
-const COMPOSE_PLAN_SCHEMA_VERSION: &str = "v2";
+const COMPOSE_PLAN_SCHEMA_VERSION: &str = "v3";
 const COMPOSE_PLANNER_TEMPERATURE: f32 = 0.0;
+const COMPOSE_SUMMARY_MEDIUM_FILE_THRESHOLD: usize = 60;
+const COMPOSE_SUMMARY_MEDIUM_HUNK_THRESHOLD: usize = 200;
+const COMPOSE_SUMMARY_LARGE_FILE_THRESHOLD: usize = 150;
+const COMPOSE_SUMMARY_LARGE_HUNK_THRESHOLD: usize = 500;
+const COMPOSE_AREA_TARGET_MAX_FILES: usize = 60;
+const COMPOSE_AREA_TARGET_MAX_HUNKS: usize = 140;
+const COMPOSE_AREA_TARGET_MAX_DEPTH: usize = 6;
+const COMPOSE_MONOLITH_FALLBACK_TARGET_THRESHOLD: usize = 8;
+const COMPOSE_MONOLITH_FALLBACK_WORKSTREAM_THRESHOLD: usize = 3;
+const MAX_BIND_FILES_PER_REQUEST: usize = 18;
+const MAX_BIND_HUNKS_PER_REQUEST: usize = 120;
 
 #[derive(Debug, Deserialize)]
 struct ComposeIntentResponse {
@@ -71,6 +82,70 @@ type HunkAssignments = HashMap<String, BTreeSet<String>>;
 struct BindingEvaluation {
    assigned:   HashMap<String, Vec<String>>,
    unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SnapshotSummaryBudget {
+   max_observations_per_file: usize,
+   max_hunks_per_file:        Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanningMode {
+   File,
+   Area,
+}
+
+#[derive(Debug, Clone)]
+struct PlanningTarget {
+   target_id:  String,
+   label:      String,
+   file_ids:   Vec<String>,
+   hunk_count: usize,
+   additions:  usize,
+   deletions:  usize,
+}
+
+#[derive(Debug, Clone)]
+struct PlanningIndex {
+   mode:    PlanningMode,
+   targets: Vec<PlanningTarget>,
+   aliases: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct PlanningBucket {
+   label:    String,
+   file_ids: Vec<String>,
+}
+
+impl PlanningIndex {
+   fn expand_target_ids(&self, target_ids: &[String]) -> Vec<String> {
+      let mut expanded = Vec::new();
+      let mut seen_file_ids = HashSet::new();
+
+      for target_id in target_ids {
+         if let Some(target) = self
+            .targets
+            .iter()
+            .find(|candidate| candidate.target_id == *target_id)
+         {
+            for file_id in &target.file_ids {
+               if seen_file_ids.insert(file_id.clone()) {
+                  expanded.push(file_id.clone());
+               }
+            }
+         }
+      }
+
+      expanded
+   }
+}
+
+impl SnapshotSummaryBudget {
+   const fn is_compacted(self) -> bool {
+      self.max_hunks_per_file.is_some()
+   }
 }
 
 fn is_dependency_manifest(path: &str) -> bool {
@@ -216,7 +291,55 @@ fn format_line_range(start: usize, count: usize) -> String {
    }
 }
 
+const fn snapshot_summary_budget(snapshot: &ComposeSnapshot) -> SnapshotSummaryBudget {
+   if snapshot.files.len() > COMPOSE_SUMMARY_LARGE_FILE_THRESHOLD
+      || snapshot.hunks.len() > COMPOSE_SUMMARY_LARGE_HUNK_THRESHOLD
+   {
+      SnapshotSummaryBudget { max_observations_per_file: 1, max_hunks_per_file: Some(2) }
+   } else if snapshot.files.len() > COMPOSE_SUMMARY_MEDIUM_FILE_THRESHOLD
+      || snapshot.hunks.len() > COMPOSE_SUMMARY_MEDIUM_HUNK_THRESHOLD
+   {
+      SnapshotSummaryBudget { max_observations_per_file: 2, max_hunks_per_file: Some(3) }
+   } else {
+      SnapshotSummaryBudget {
+         max_observations_per_file: MAX_OBSERVATIONS_PER_FILE,
+         max_hunks_per_file:        None,
+      }
+   }
+}
+
+fn sample_positions(count: usize, max_samples: usize) -> Vec<usize> {
+   if count <= max_samples {
+      return (0..count).collect();
+   }
+
+   if max_samples <= 1 {
+      return vec![0];
+   }
+
+   let last = count - 1;
+   let mut positions = Vec::with_capacity(max_samples);
+   for slot in 0..max_samples {
+      let position = slot * last / (max_samples - 1);
+      if positions.last().copied() != Some(position) {
+         positions.push(position);
+      }
+   }
+   positions
+}
+
+fn sampled_hunk_ids_for_summary(file: &ComposeFile, budget: SnapshotSummaryBudget) -> Vec<&str> {
+   match budget.max_hunks_per_file {
+      None => file.hunk_ids.iter().map(String::as_str).collect(),
+      Some(max_hunks_per_file) => sample_positions(file.hunk_ids.len(), max_hunks_per_file)
+         .into_iter()
+         .filter_map(|idx| file.hunk_ids.get(idx).map(String::as_str))
+         .collect(),
+   }
+}
+
 fn render_snapshot_summary(snapshot: &ComposeSnapshot, observations: &[FileObservation]) -> String {
+   let budget = snapshot_summary_budget(snapshot);
    let observations_by_file: HashMap<&str, Vec<&str>> = observations
       .iter()
       .map(|observation| {
@@ -226,13 +349,24 @@ fn render_snapshot_summary(snapshot: &ComposeSnapshot, observations: &[FileObser
                .observations
                .iter()
                .map(String::as_str)
-               .take(MAX_OBSERVATIONS_PER_FILE)
+               .take(budget.max_observations_per_file)
                .collect(),
          )
       })
       .collect();
 
    let mut out = String::new();
+   if budget.is_compacted() {
+      let max_hunks_per_file = budget.max_hunks_per_file.unwrap_or_default();
+      writeln!(
+         out,
+         "# snapshot compacted: all file IDs are preserved; showing up to {max_hunks_per_file} \
+          representative hunks and {} observation(s) per file",
+         budget.max_observations_per_file
+      )
+      .unwrap();
+   }
+
    for file in &snapshot.files {
       writeln!(out, "- {} {}", file.file_id, file.summary).unwrap();
       if let Some(file_observations) = observations_by_file.get(file.path.as_str()) {
@@ -241,8 +375,371 @@ fn render_snapshot_summary(snapshot: &ComposeSnapshot, observations: &[FileObser
          }
       }
 
-      for hunk_id in &file.hunk_ids {
+      let rendered_hunk_ids = sampled_hunk_ids_for_summary(file, budget);
+      for hunk_id in &rendered_hunk_ids {
          if let Some(hunk) = snapshot.hunk_by_id(hunk_id) {
+            if hunk.synthetic {
+               writeln!(out, "  - {} :: {}", hunk.hunk_id, hunk.snippet).unwrap();
+            } else {
+               writeln!(
+                  out,
+                  "  - {} old:{} new:{} :: {}",
+                  hunk.hunk_id,
+                  format_line_range(hunk.old_start, hunk.old_count),
+                  format_line_range(hunk.new_start, hunk.new_count),
+                  hunk.snippet
+               )
+               .unwrap();
+            }
+         }
+      }
+
+      let omitted_hunks = file.hunk_ids.len().saturating_sub(rendered_hunk_ids.len());
+      if omitted_hunks > 0 {
+         writeln!(out, "  ... {omitted_hunks} more hunks omitted from {}", file.file_id).unwrap();
+      }
+   }
+
+   out
+}
+
+const fn planning_mode_for_snapshot(snapshot: &ComposeSnapshot) -> PlanningMode {
+   if snapshot.files.len() > COMPOSE_SUMMARY_LARGE_FILE_THRESHOLD
+      || snapshot.hunks.len() > COMPOSE_SUMMARY_LARGE_HUNK_THRESHOLD
+   {
+      PlanningMode::Area
+   } else {
+      PlanningMode::File
+   }
+}
+
+fn path_depth(path: &str) -> usize {
+   path.split('/').count()
+}
+
+fn prefix_at_depth(path: &str, depth: usize) -> String {
+   if depth == 0 {
+      return String::new();
+   }
+
+   let segments: Vec<&str> = path.split('/').collect();
+   let effective_depth = depth.min(segments.len());
+   segments[..effective_depth].join("/")
+}
+
+fn common_path_prefix(paths: &[String]) -> String {
+   let Some(first_path) = paths.first() else {
+      return String::new();
+   };
+
+   let mut prefix: Vec<&str> = first_path.split('/').collect();
+   for path in paths.iter().skip(1) {
+      let segments: Vec<&str> = path.split('/').collect();
+      let shared = prefix
+         .iter()
+         .zip(segments.iter())
+         .take_while(|(left, right)| left == right)
+         .count();
+      prefix.truncate(shared);
+      if prefix.is_empty() {
+         break;
+      }
+   }
+
+   prefix.join("/")
+}
+
+fn bucket_hunk_count(snapshot: &ComposeSnapshot, file_ids: &[String]) -> usize {
+   file_ids
+      .iter()
+      .filter_map(|file_id| snapshot.file_by_id(file_id))
+      .map(|file| file.hunk_ids.len())
+      .sum()
+}
+
+fn group_file_ids_by_prefix(
+   snapshot: &ComposeSnapshot,
+   file_ids: &[String],
+   depth: usize,
+) -> BTreeMap<String, Vec<String>> {
+   let mut groups = BTreeMap::new();
+
+   for file_id in file_ids {
+      if let Some(file) = snapshot.file_by_id(file_id) {
+         groups
+            .entry(prefix_at_depth(&file.path, depth))
+            .or_insert_with(Vec::new)
+            .push(file_id.clone());
+      }
+   }
+
+   groups
+}
+
+fn planning_bucket_label(snapshot: &ComposeSnapshot, file_ids: &[String]) -> String {
+   let paths: Vec<String> = file_ids
+      .iter()
+      .filter_map(|file_id| snapshot.file_by_id(file_id).map(|file| file.path.clone()))
+      .collect();
+
+   let common_prefix = common_path_prefix(&paths);
+   if common_prefix.is_empty() {
+      paths.first().cloned().unwrap_or_else(|| "misc".to_string())
+   } else {
+      common_prefix
+   }
+}
+
+fn collect_planning_buckets(
+   snapshot: &ComposeSnapshot,
+   file_ids: &[String],
+   depth: usize,
+) -> Vec<PlanningBucket> {
+   let file_count = file_ids.len();
+   let hunk_count = bucket_hunk_count(snapshot, file_ids);
+   let max_path_depth = file_ids
+      .iter()
+      .filter_map(|file_id| snapshot.file_by_id(file_id))
+      .map(|file| path_depth(&file.path))
+      .max()
+      .unwrap_or(depth);
+
+   let should_stop =
+      file_count <= COMPOSE_AREA_TARGET_MAX_FILES && hunk_count <= COMPOSE_AREA_TARGET_MAX_HUNKS;
+   if should_stop || depth >= COMPOSE_AREA_TARGET_MAX_DEPTH || depth >= max_path_depth {
+      return vec![PlanningBucket {
+         label:    planning_bucket_label(snapshot, file_ids),
+         file_ids: file_ids.to_vec(),
+      }];
+   }
+
+   let next_depth = depth + 1;
+   let groups = group_file_ids_by_prefix(snapshot, file_ids, next_depth);
+   if groups.len() <= 1 {
+      return collect_planning_buckets(snapshot, file_ids, next_depth);
+   }
+
+   groups
+      .into_values()
+      .flat_map(|group_file_ids| collect_planning_buckets(snapshot, &group_file_ids, next_depth))
+      .collect()
+}
+
+fn build_area_planning_targets(snapshot: &ComposeSnapshot) -> Vec<PlanningTarget> {
+   let all_file_ids: Vec<String> = snapshot
+      .files
+      .iter()
+      .map(|file| file.file_id.clone())
+      .collect();
+   let buckets = collect_planning_buckets(snapshot, &all_file_ids, 0);
+
+   buckets
+      .into_iter()
+      .enumerate()
+      .map(|(idx, bucket)| {
+         let mut additions = 0_usize;
+         let mut deletions = 0_usize;
+         let mut hunk_count = 0_usize;
+
+         for file_id in &bucket.file_ids {
+            if let Some(file) = snapshot.file_by_id(file_id) {
+               additions = additions.saturating_add(file.additions);
+               deletions = deletions.saturating_add(file.deletions);
+               hunk_count = hunk_count.saturating_add(file.hunk_ids.len());
+            }
+         }
+
+         PlanningTarget {
+            target_id: format!("A{:03}", idx + 1),
+            label: bucket.label,
+            file_ids: bucket.file_ids,
+            hunk_count,
+            additions,
+            deletions,
+         }
+      })
+      .collect()
+}
+
+fn build_file_planning_targets(snapshot: &ComposeSnapshot) -> Vec<PlanningTarget> {
+   snapshot
+      .files
+      .iter()
+      .map(|file| PlanningTarget {
+         target_id:  file.file_id.clone(),
+         label:      file.path.clone(),
+         file_ids:   vec![file.file_id.clone()],
+         hunk_count: file.hunk_ids.len(),
+         additions:  file.additions,
+         deletions:  file.deletions,
+      })
+      .collect()
+}
+
+fn build_planning_index(snapshot: &ComposeSnapshot) -> PlanningIndex {
+   let mode = planning_mode_for_snapshot(snapshot);
+   let targets = match mode {
+      PlanningMode::File => build_file_planning_targets(snapshot),
+      PlanningMode::Area => build_area_planning_targets(snapshot),
+   };
+
+   let aliases = targets
+      .iter()
+      .flat_map(|target| {
+         let normalized_label = normalize_file_reference(&target.label);
+         [
+            (target.target_id.clone(), target.target_id.clone()),
+            (target.target_id.to_ascii_uppercase(), target.target_id.clone()),
+            (normalized_label, target.target_id.clone()),
+         ]
+      })
+      .collect();
+
+   PlanningIndex { mode, targets, aliases }
+}
+
+fn sample_file_ids_for_target(target: &PlanningTarget) -> Vec<&str> {
+   sample_positions(target.file_ids.len(), 4)
+      .into_iter()
+      .filter_map(|idx| target.file_ids.get(idx).map(String::as_str))
+      .collect()
+}
+
+fn sample_hunk_ids_for_target(target: &PlanningTarget, snapshot: &ComposeSnapshot) -> Vec<String> {
+   let hunk_ids: Vec<&String> = target
+      .file_ids
+      .iter()
+      .filter_map(|file_id| snapshot.file_by_id(file_id))
+      .flat_map(|file| file.hunk_ids.iter())
+      .collect();
+
+   sample_positions(hunk_ids.len(), 4)
+      .into_iter()
+      .filter_map(|idx| hunk_ids.get(idx).map(|hunk_id| (*hunk_id).clone()))
+      .collect()
+}
+
+fn render_planning_stat(index: &PlanningIndex) -> String {
+   let mut out = String::new();
+
+   match index.mode {
+      PlanningMode::File => {
+         writeln!(out, "# planning over individual file IDs").unwrap();
+      },
+      PlanningMode::Area => {
+         writeln!(
+            out,
+            "# planning over {} area IDs spanning {} files",
+            index.targets.len(),
+            index
+               .targets
+               .iter()
+               .flat_map(|target| target.file_ids.iter())
+               .collect::<HashSet<_>>()
+               .len()
+         )
+         .unwrap();
+      },
+   }
+
+   for target in &index.targets {
+      writeln!(
+         out,
+         "{} {} | {} files | {} hunks | +{}/-{}",
+         target.target_id,
+         target.label,
+         target.file_ids.len(),
+         target.hunk_count,
+         target.additions,
+         target.deletions
+      )
+      .unwrap();
+   }
+
+   out
+}
+
+fn render_planning_snapshot_summary(
+   snapshot: &ComposeSnapshot,
+   observations: &[FileObservation],
+   index: &PlanningIndex,
+) -> String {
+   if index.mode == PlanningMode::File {
+      return render_snapshot_summary(snapshot, observations);
+   }
+
+   let observations_by_file: HashMap<&str, Vec<&str>> = observations
+      .iter()
+      .map(|observation| {
+         (
+            observation.file.as_str(),
+            observation
+               .observations
+               .iter()
+               .map(String::as_str)
+               .take(1)
+               .collect(),
+         )
+      })
+      .collect();
+
+   let mut out = String::new();
+   writeln!(
+      out,
+      "# snapshot compacted into path-based planning areas; use the area IDs below in `file_ids`"
+   )
+   .unwrap();
+
+   for target in &index.targets {
+      writeln!(
+         out,
+         "- {} {} ({} files, {} hunks, +{}/-{})",
+         target.target_id,
+         target.label,
+         target.file_ids.len(),
+         target.hunk_count,
+         target.additions,
+         target.deletions
+      )
+      .unwrap();
+
+      let sample_file_ids = sample_file_ids_for_target(target);
+      if !sample_file_ids.is_empty() {
+         let sample_files: Vec<String> = sample_file_ids
+            .iter()
+            .filter_map(|file_id| snapshot.file_by_id(file_id).map(|file| file.path.clone()))
+            .collect();
+         writeln!(out, "  files: {}", sample_files.join(", ")).unwrap();
+         let omitted = target.file_ids.len().saturating_sub(sample_files.len());
+         if omitted > 0 {
+            writeln!(out, "  ... {omitted} more files omitted from {}", target.target_id).unwrap();
+         }
+      }
+
+      let mut rendered_observations = 0_usize;
+      for file_id in &target.file_ids {
+         let Some(file) = snapshot.file_by_id(file_id) else {
+            continue;
+         };
+         let Some(file_observations) = observations_by_file.get(file.path.as_str()) else {
+            continue;
+         };
+
+         for observation in file_observations {
+            writeln!(out, "  observation: {observation}").unwrap();
+            rendered_observations += 1;
+            if rendered_observations >= 2 {
+               break;
+            }
+         }
+
+         if rendered_observations >= 2 {
+            break;
+         }
+      }
+
+      for hunk_id in sample_hunk_ids_for_target(target, snapshot) {
+         if let Some(hunk) = snapshot.hunk_by_id(&hunk_id) {
             if hunk.synthetic {
                writeln!(out, "  - {} :: {}", hunk.hunk_id, hunk.snippet).unwrap();
             } else {
@@ -263,6 +760,43 @@ fn render_snapshot_summary(snapshot: &ComposeSnapshot, observations: &[FileObser
    out
 }
 
+fn render_planning_targets(index: &PlanningIndex, snapshot: &ComposeSnapshot) -> String {
+   match index.mode {
+      PlanningMode::File => format!(
+         "File IDs only. Each target maps to exactly one file. Coverage: {} files.",
+         snapshot.files.len()
+      ),
+      PlanningMode::Area => format!(
+         "Area IDs only. Each target may expand to multiple files by shared path prefix. \
+          Coverage: {} areas spanning {} files.",
+         index.targets.len(),
+         snapshot.files.len()
+      ),
+   }
+}
+
+fn render_planning_notes(index: &PlanningIndex) -> String {
+   match index.mode {
+      PlanningMode::File => {
+         "Use only the provided file IDs and keep the grouping conservative.".to_string()
+      },
+      PlanningMode::Area => "This snapshot is large, so files were compacted into path-based \
+                             planning areas. Split along independent subsystems or workstreams \
+                             when the areas point at unrelated changes."
+         .to_string(),
+   }
+}
+
+fn render_split_bias(index: &PlanningIndex) -> String {
+   match index.mode {
+      PlanningMode::File => "Prefer fewer groups when the split is uncertain.".to_string(),
+      PlanningMode::Area => "Prefer splitting unrelated areas into separate groups. Only return \
+                             one broad group if nearly every area clearly belongs to the same \
+                             atomic change."
+         .to_string(),
+   }
+}
+
 fn build_intent_schema(config: &CommitConfig) -> serde_json::Value {
    let type_enum: Vec<&str> = config.types.keys().map(String::as_str).collect();
 
@@ -279,7 +813,7 @@ fn build_intent_schema(config: &CommitConfig) -> serde_json::Value {
                   },
                   "file_ids": {
                      "type": "array",
-                     "description": "File IDs that belong to this logical commit. Repeat file IDs across groups when a file is shared.",
+                     "description": "Planning target IDs that belong to this logical commit. Use the exact IDs supplied in the prompt, even when they represent path-based areas instead of individual files. Never place group IDs or placeholder strings here. Repeat IDs across groups when a target is shared.",
                      "items": { "type": "string" }
                   },
                   "type": {
@@ -406,8 +940,87 @@ fn normalize_file_reference(raw_file_ref: &str) -> String {
       .trim()
       .trim_matches(|ch| matches!(ch, '`' | '"' | '\''))
       .trim_start_matches("./")
-      .trim_end_matches(|ch: char| matches!(ch, ',' | ';'))
+      .trim_end_matches([',', ';'])
       .to_string()
+}
+
+fn planning_text_tokens(text: &str) -> Vec<String> {
+   const STOP_WORDS: &[&str] = &[
+      "and",
+      "for",
+      "the",
+      "with",
+      "from",
+      "into",
+      "after",
+      "before",
+      "over",
+      "under",
+      "plus",
+      "across",
+      "update",
+      "updated",
+      "refactor",
+      "refactored",
+      "changes",
+      "change",
+      "logical",
+      "group",
+      "groups",
+      "commit",
+      "commits",
+   ];
+
+   let mut tokens = Vec::new();
+   let mut current = String::new();
+   let mut seen = HashSet::new();
+
+   for ch in text.chars() {
+      if ch.is_ascii_alphanumeric() {
+         current.push(ch.to_ascii_lowercase());
+      } else if current.len() >= 3 {
+         if !STOP_WORDS.contains(&current.as_str()) && seen.insert(current.clone()) {
+            tokens.push(current.clone());
+         }
+         current.clear();
+      } else {
+         current.clear();
+      }
+   }
+
+   if current.len() >= 3 && !STOP_WORDS.contains(&current.as_str()) && seen.insert(current.clone())
+   {
+      tokens.push(current);
+   }
+
+   tokens
+}
+
+fn extract_group_id_candidate(raw: &str) -> Option<String> {
+   let normalized = normalize_file_reference(raw);
+   let uppercase = normalized.to_ascii_uppercase();
+
+   if uppercase.chars().all(|ch| ch.is_ascii_digit()) {
+      return Some(format!("G{uppercase}"));
+   }
+
+   if let Some(rest) = uppercase.strip_prefix('G')
+      && !rest.is_empty()
+      && rest.chars().all(|ch| ch.is_ascii_digit())
+   {
+      return Some(format!("G{rest}"));
+   }
+
+   let digits: String = uppercase.chars().filter(|ch| ch.is_ascii_digit()).collect();
+   let compact = uppercase
+      .chars()
+      .filter(|ch| !matches!(ch, ' ' | '_' | '-'))
+      .collect::<String>();
+   if compact.starts_with("GROUP") && !digits.is_empty() {
+      return Some(format!("G{digits}"));
+   }
+
+   None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,67 +1166,219 @@ fn best_group_for_missing_file(
    best_group_idx
 }
 
+fn normalize_dependency_reference(
+   raw_dependency: &str,
+   known_group_ids: &HashSet<String>,
+) -> Option<String> {
+   let normalized = normalize_file_reference(raw_dependency);
+   if normalized.is_empty() {
+      return None;
+   }
+
+   if known_group_ids.contains(&normalized) {
+      return Some(normalized);
+   }
+
+   let uppercase = normalized.to_ascii_uppercase();
+   if known_group_ids.contains(&uppercase) {
+      return Some(uppercase);
+   }
+
+   let candidate = extract_group_id_candidate(&normalized)?;
+   known_group_ids.contains(&candidate).then_some(candidate)
+}
+
+fn planning_target_match_score(target: &PlanningTarget, group: &ComposeIntentGroup) -> i32 {
+   let label = target.label.to_ascii_lowercase();
+   let workstream = workstream_key_for_label(&target.label).to_ascii_lowercase();
+   let mut score = (target.hunk_count.min(40) as i32) + (target.file_ids.len().min(20) as i32);
+
+   if let Some(scope) = &group.scope {
+      let scope = scope.as_str().to_ascii_lowercase();
+      if label.contains(&scope) || workstream.contains(&scope) {
+         score += 140;
+      }
+
+      for segment in scope.split('/') {
+         if !segment.is_empty() && (label.contains(segment) || workstream.contains(segment)) {
+            score += 45;
+         }
+      }
+   }
+
+   for token in planning_text_tokens(&group.rationale) {
+      if label.contains(&token) || workstream.contains(&token) {
+         score += 16;
+      }
+   }
+
+   match group.commit_type.as_str() {
+      "ci" if target.label.starts_with(".github/") => score += 120,
+      "docs"
+         if target.label.starts_with("docs/")
+            || Path::new(&target.label)
+               .extension()
+               .is_some_and(|ext| ext.eq_ignore_ascii_case("md")) =>
+         score += 80,
+      "build" | "chore"
+         if target.label.contains("Cargo")
+            || target.label.contains("package")
+            || target.label.contains("lock")
+            || target.label.contains("tsconfig")
+            || target.label.contains("biome")
+            || target.label.contains("bun") =>
+      {
+         score += 55;
+      },
+      _ => {},
+   }
+
+   score
+}
+
+fn seed_group_targets(
+   groups: &[ComposeIntentGroup],
+   planning_index: &PlanningIndex,
+   group_targets: &mut [Vec<String>],
+   repair_notes: &mut Vec<String>,
+) {
+   let mut claimed_target_ids: HashSet<String> = group_targets.iter().flatten().cloned().collect();
+
+   for (group_idx, group) in groups.iter().enumerate() {
+      if !group_targets[group_idx].is_empty() {
+         continue;
+      }
+
+      let fallback_target = planning_index
+         .targets
+         .iter()
+         .max_by_key(|target| {
+            let mut score = planning_target_match_score(target, group);
+            if !claimed_target_ids.contains(&target.target_id) {
+               score += 60;
+            }
+            (score, target.hunk_count, target.file_ids.len())
+         })
+         .or_else(|| planning_index.targets.first());
+
+      let Some(fallback_target) = fallback_target else {
+         continue;
+      };
+
+      group_targets[group_idx].push(fallback_target.target_id.clone());
+      claimed_target_ids.insert(fallback_target.target_id.clone());
+      repair_notes.push(format!(
+         "Compose planner left {} without valid planning targets; seeded it with {} ({})",
+         group.group_id, fallback_target.target_id, fallback_target.label
+      ));
+   }
+}
+
 fn normalize_intent_plan(
    snapshot: &ComposeSnapshot,
+   planning_index: &PlanningIndex,
    mut groups: Vec<ComposeIntentGroup>,
 ) -> Result<(Vec<ComposeIntentGroup>, Vec<String>)> {
    if groups.is_empty() {
       return Err(CommitGenError::Other("Compose intent plan returned no groups".to_string()));
    }
 
-   let known_file_ids: HashSet<&str> = snapshot
-      .files
+   let known_target_ids: HashSet<&str> = planning_index
+      .targets
       .iter()
-      .map(|file| file.file_id.as_str())
-      .collect();
-   let file_id_by_path: HashMap<String, &str> = snapshot
-      .files
-      .iter()
-      .map(|file| (normalize_file_reference(&file.path), file.file_id.as_str()))
+      .map(|target| target.target_id.as_str())
       .collect();
    let mut repair_notes = Vec::new();
    let mut covered_file_ids = HashSet::new();
+   let mut normalized_group_targets = Vec::with_capacity(groups.len());
 
-   for group in &mut groups {
+   for group in &groups {
       if group.file_ids.is_empty() {
-         return Err(CommitGenError::Other(format!(
-            "Compose group {} does not reference any files",
+         repair_notes.push(format!(
+            "Compose planner left {} without planning targets; assigning targets heuristically",
             group.group_id
-         )));
+         ));
       }
 
-      let mut normalized_file_ids = Vec::new();
-      let mut seen_file_ids = HashSet::new();
-      for raw_file_ref in &group.file_ids {
-         let normalized_ref = normalize_file_reference(raw_file_ref);
-         let canonical_file_id = if known_file_ids.contains(normalized_ref.as_str()) {
+      let mut normalized_target_ids = Vec::new();
+      let mut seen_target_ids = HashSet::new();
+      for raw_target_ref in &group.file_ids {
+         let normalized_ref = normalize_file_reference(raw_target_ref);
+         let canonical_target_id = if known_target_ids.contains(normalized_ref.as_str()) {
             normalized_ref.clone()
          } else {
             let uppercase_ref = normalized_ref.to_ascii_uppercase();
-            if known_file_ids.contains(uppercase_ref.as_str()) {
+            if known_target_ids.contains(uppercase_ref.as_str()) {
                uppercase_ref
-            } else if let Some(file_id) = file_id_by_path.get(&normalized_ref) {
-               if raw_file_ref != *file_id {
+            } else if let Some(target_id) = planning_index.aliases.get(&normalized_ref) {
+               if raw_target_ref != target_id {
                   repair_notes.push(format!(
-                     "Mapped compose planner file reference '{}' to {}",
-                     raw_file_ref, file_id
+                     "Mapped compose planner target reference '{raw_target_ref}' to {target_id}"
                   ));
                }
-               (*file_id).to_string()
+               target_id.clone()
             } else {
-               return Err(CommitGenError::Other(format!(
-                  "Compose group {} references unknown file_id {}",
-                  group.group_id, raw_file_ref
-               )));
+               repair_notes.push(format!(
+                  "Dropped unknown planning target '{}' from {}",
+                  raw_target_ref, group.group_id
+               ));
+               continue;
             }
          };
 
-         if seen_file_ids.insert(canonical_file_id.clone()) {
-            covered_file_ids.insert(canonical_file_id.clone());
-            normalized_file_ids.push(canonical_file_id);
+         if seen_target_ids.insert(canonical_target_id.clone()) {
+            normalized_target_ids.push(canonical_target_id);
          }
       }
-      group.file_ids = normalized_file_ids;
+
+      normalized_group_targets.push(normalized_target_ids);
+   }
+
+   seed_group_targets(&groups, planning_index, &mut normalized_group_targets, &mut repair_notes);
+
+   let known_group_ids: HashSet<String> =
+      groups.iter().map(|group| group.group_id.clone()).collect();
+   for group in &mut groups {
+      let mut normalized_dependencies = Vec::new();
+      let mut seen_dependencies = HashSet::new();
+
+      for raw_dependency in &group.dependencies {
+         let Some(dependency) = normalize_dependency_reference(raw_dependency, &known_group_ids)
+         else {
+            repair_notes.push(format!(
+               "Dropped unknown dependency '{}' from {}",
+               raw_dependency, group.group_id
+            ));
+            continue;
+         };
+
+         if dependency == group.group_id {
+            repair_notes.push(format!(
+               "Dropped self-dependency '{}' from {}",
+               raw_dependency, group.group_id
+            ));
+            continue;
+         }
+
+         if seen_dependencies.insert(dependency.clone()) {
+            if raw_dependency != &dependency {
+               repair_notes.push(format!(
+                  "Mapped compose planner dependency '{raw_dependency}' to {dependency}"
+               ));
+            }
+            normalized_dependencies.push(dependency);
+         }
+      }
+
+      group.dependencies = normalized_dependencies;
+   }
+
+   for (group, target_ids) in groups.iter_mut().zip(normalized_group_targets) {
+      let expanded_file_ids = planning_index.expand_target_ids(&target_ids);
+      for file_id in &expanded_file_ids {
+         covered_file_ids.insert(file_id.clone());
+      }
+      group.file_ids = expanded_file_ids;
    }
 
    for file in &snapshot.files {
@@ -634,6 +1399,291 @@ fn normalize_intent_plan(
    Ok((groups, repair_notes))
 }
 
+fn workstream_key_for_label(label: &str) -> String {
+   let segments: Vec<&str> = label
+      .split('/')
+      .filter(|segment| !segment.is_empty())
+      .collect();
+   let Some(first) = segments.first() else {
+      return label.to_string();
+   };
+
+   match *first {
+      ".github" => match segments.get(1) {
+         Some(second) => format!("{first}/{second}"),
+         None => (*first).to_string(),
+      },
+      "apps" | "packages" | "crates" | "services" | "libs" | "pass" => match segments.get(1) {
+         Some(second) => format!("{first}/{second}"),
+         None => (*first).to_string(),
+      },
+      _ => (*first).to_string(),
+   }
+}
+
+fn workstream_display_name(label: &str) -> String {
+   let key = workstream_key_for_label(label);
+   match key.as_str() {
+      ".github/workflows" => "CI workflows".to_string(),
+      ".github" => "GitHub automation".to_string(),
+      _ => key
+         .split('/')
+         .next_back()
+         .map(|segment| segment.replace(['_', '-'], " "))
+         .unwrap_or(key),
+   }
+}
+
+fn sanitize_scope_fragment(raw: &str) -> Option<String> {
+   let mut out = String::new();
+   let mut last_was_separator = false;
+
+   for ch in raw.trim().chars() {
+      if ch.is_ascii_alphanumeric() {
+         out.push(ch.to_ascii_lowercase());
+         last_was_separator = false;
+      } else if matches!(ch, '-' | '_' | '/' | '.' | ' ') && !out.is_empty() && !last_was_separator
+      {
+         out.push('-');
+         last_was_separator = true;
+      }
+   }
+
+   let trimmed = out.trim_matches('-').to_string();
+   (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn fallback_scope_for_label(label: &str) -> Option<Scope> {
+   let key = workstream_key_for_label(label);
+   let candidate = key
+      .split('/')
+      .next_back()
+      .and_then(sanitize_scope_fragment)?;
+   Scope::new(candidate).ok()
+}
+
+fn fallback_rationale_for_labels(labels: &[String]) -> String {
+   if labels.len() == 1 {
+      let label = labels[0].as_str();
+      let display = workstream_display_name(label);
+      if label.starts_with("apps/") {
+         return format!("{display} application updates");
+      }
+      if label.starts_with("packages/") {
+         return format!("{display} package updates");
+      }
+      if label.starts_with("crates/") {
+         return format!("{display} crate updates");
+      }
+      if label.starts_with(".github/") || label == ".github" {
+         return format!("{display} updates");
+      }
+      return format!("{display} updates");
+   }
+
+   let display_labels: Vec<String> = labels
+      .iter()
+      .take(3)
+      .map(|label| workstream_display_name(label))
+      .collect();
+   format!("cross-cutting updates for {}", display_labels.join(", "))
+}
+
+fn fallback_commit_type_for_group(
+   snapshot: &ComposeSnapshot,
+   labels: &[String],
+   file_ids: &[String],
+) -> Result<CommitType> {
+   if labels
+      .iter()
+      .any(|label| label == ".github" || label.starts_with(".github/"))
+   {
+      return CommitType::new("ci");
+   }
+
+   let files: Vec<&ComposeFile> = file_ids
+      .iter()
+      .filter_map(|file_id| snapshot.file_by_id(file_id))
+      .collect();
+   let all_docs = !files.is_empty()
+      && files
+         .iter()
+         .all(|file| compose_file_category(file) == ComposeFileCategory::Docs);
+   if all_docs {
+      return CommitType::new("docs");
+   }
+
+   let all_tests = !files.is_empty()
+      && files
+         .iter()
+         .all(|file| compose_file_category(file) == ComposeFileCategory::Test);
+   if all_tests {
+      return CommitType::new("test");
+   }
+
+   let all_dependencies =
+      !files.is_empty() && files.iter().all(|file| is_dependency_manifest(&file.path));
+   if all_dependencies {
+      return CommitType::new("build");
+   }
+
+   let all_config = !files.is_empty()
+      && files.iter().all(|file| {
+         matches!(
+            compose_file_category(file),
+            ComposeFileCategory::Config | ComposeFileCategory::Dependency
+         )
+      });
+   if all_config {
+      return CommitType::new("chore");
+   }
+
+   CommitType::new("refactor")
+}
+
+fn ordered_file_ids(snapshot: &ComposeSnapshot, file_ids: &HashSet<String>) -> Vec<String> {
+   snapshot
+      .files
+      .iter()
+      .filter(|file| file_ids.contains(&file.file_id))
+      .map(|file| file.file_id.clone())
+      .collect()
+}
+
+fn is_monolithic_intent_plan(snapshot: &ComposeSnapshot, groups: &[ComposeIntentGroup]) -> bool {
+   if groups.is_empty() {
+      return false;
+   }
+
+   let largest_group = groups
+      .iter()
+      .map(|group| group.file_ids.iter().collect::<HashSet<_>>().len())
+      .max()
+      .unwrap_or_default();
+
+   groups.len() == 1
+      || (groups.len() <= 2
+         && largest_group.saturating_mul(10) >= snapshot.files.len().saturating_mul(9))
+}
+
+fn should_force_large_patch_fallback(
+   snapshot: &ComposeSnapshot,
+   planning_index: &PlanningIndex,
+   groups: &[ComposeIntentGroup],
+   max_commits: usize,
+) -> bool {
+   if max_commits <= 1
+      || planning_index.mode != PlanningMode::Area
+      || planning_index.targets.len() < COMPOSE_MONOLITH_FALLBACK_TARGET_THRESHOLD
+      || !is_monolithic_intent_plan(snapshot, groups)
+   {
+      return false;
+   }
+
+   let workstream_count = planning_index
+      .targets
+      .iter()
+      .map(|target| workstream_key_for_label(&target.label))
+      .collect::<HashSet<_>>()
+      .len();
+
+   workstream_count >= COMPOSE_MONOLITH_FALLBACK_WORKSTREAM_THRESHOLD
+}
+
+fn build_large_patch_fallback_groups(
+   snapshot: &ComposeSnapshot,
+   planning_index: &PlanningIndex,
+   max_commits: usize,
+) -> Result<Vec<ComposeIntentGroup>> {
+   #[derive(Debug, Clone)]
+   struct WorkstreamGroup {
+      label:    String,
+      file_ids: HashSet<String>,
+      weight:   usize,
+   }
+
+   #[derive(Debug, Clone)]
+   struct FallbackBin {
+      labels:       Vec<String>,
+      file_ids:     HashSet<String>,
+      total_weight: usize,
+   }
+
+   let mut workstreams: HashMap<String, WorkstreamGroup> = HashMap::new();
+   for target in &planning_index.targets {
+      let key = workstream_key_for_label(&target.label);
+      let entry = workstreams
+         .entry(key.clone())
+         .or_insert_with(|| WorkstreamGroup {
+            label:    key,
+            file_ids: HashSet::new(),
+            weight:   0,
+         });
+
+      for file_id in &target.file_ids {
+         entry.file_ids.insert(file_id.clone());
+      }
+      entry.weight = entry
+         .weight
+         .saturating_add(target.hunk_count.max(target.file_ids.len()));
+   }
+
+   let mut workstreams: Vec<WorkstreamGroup> = workstreams.into_values().collect();
+   workstreams.sort_by(|left, right| {
+      right
+         .weight
+         .cmp(&left.weight)
+         .then_with(|| left.label.cmp(&right.label))
+   });
+
+   let bin_count = max_commits.min(workstreams.len());
+   let mut bins: Vec<FallbackBin> = Vec::new();
+   for workstream in workstreams {
+      if bins.len() < bin_count {
+         bins.push(FallbackBin {
+            labels:       vec![workstream.label],
+            file_ids:     workstream.file_ids,
+            total_weight: workstream.weight,
+         });
+         continue;
+      }
+
+      let Some((target_idx, _)) = bins
+         .iter()
+         .enumerate()
+         .min_by_key(|(_, bin)| (bin.total_weight, bin.labels.len()))
+      else {
+         continue;
+      };
+
+      let target_bin = &mut bins[target_idx];
+      target_bin.labels.push(workstream.label);
+      target_bin.total_weight = target_bin.total_weight.saturating_add(workstream.weight);
+      target_bin.file_ids.extend(workstream.file_ids);
+   }
+
+   let mut groups = Vec::new();
+   for (idx, bin) in bins.into_iter().enumerate() {
+      let ordered_ids = ordered_file_ids(snapshot, &bin.file_ids);
+      let commit_type = fallback_commit_type_for_group(snapshot, &bin.labels, &ordered_ids)?;
+      let scope = (bin.labels.len() == 1)
+         .then(|| fallback_scope_for_label(&bin.labels[0]))
+         .flatten();
+      let rationale = fallback_rationale_for_labels(&bin.labels);
+
+      groups.push(ComposeIntentGroup {
+         group_id: format!("G{}", idx + 1),
+         commit_type,
+         scope,
+         file_ids: ordered_ids,
+         rationale,
+         dependencies: Vec::new(),
+      });
+   }
+
+   Ok(groups)
+}
+
 async fn analyze_compose_intent(
    snapshot: &ComposeSnapshot,
    observations: &[FileObservation],
@@ -641,13 +1691,21 @@ async fn analyze_compose_intent(
    max_commits: usize,
    debug_dir: Option<&Path>,
 ) -> Result<ComposeIntentPlan> {
-   let snapshot_summary = render_snapshot_summary(snapshot, observations);
+   let planning_index = build_planning_index(snapshot);
+   let stat_summary = render_planning_stat(&planning_index);
+   let snapshot_summary = render_planning_snapshot_summary(snapshot, observations, &planning_index);
+   let planning_targets = render_planning_targets(&planning_index, snapshot);
+   let planning_notes = render_planning_notes(&planning_index);
+   let split_bias = render_split_bias(&planning_index);
    let schema = build_intent_schema(config);
    let parts = templates::render_compose_intent_prompt(&templates::ComposeIntentPromptParams {
       variant: "default",
       max_commits,
-      stat: &snapshot.stat,
+      stat: &stat_summary,
       snapshot_summary: &snapshot_summary,
+      planning_targets: &planning_targets,
+      planning_notes: &planning_notes,
+      split_bias: &split_bias,
    })?;
 
    let response = run_oneshot::<ComposeIntentResponse>(config, &OneShotSpec {
@@ -660,7 +1718,7 @@ async fn analyze_compose_intent(
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "create_compose_intent_plan",
-      tool_description: "Plan logical commit groups over file IDs",
+      tool_description: "Plan logical commit groups over the provided planning target IDs",
       schema:           &schema,
       debug:            debug_dir.map(|dir| OneShotDebug {
          dir:    Some(dir),
@@ -670,14 +1728,34 @@ async fn analyze_compose_intent(
    })
    .await?;
 
-   let (groups, repair_notes) = normalize_intent_plan(snapshot, response.output.groups)?;
+   let (mut groups, repair_notes) =
+      normalize_intent_plan(snapshot, &planning_index, response.output.groups)?;
    for note in &repair_notes {
       eprintln!("{}", style::warning(note));
+   }
+   if should_force_large_patch_fallback(snapshot, &planning_index, &groups, max_commits) {
+      eprintln!(
+         "{}",
+         style::warning(
+            "Compose intent collapsed into a monolithic large-patch group; falling back to \
+             path-based workstream splits."
+         )
+      );
+      groups = build_large_patch_fallback_groups(snapshot, &planning_index, max_commits)?;
    }
    let dependency_order =
       compute_dependency_order(&groups, |group| &group.group_id, |group| &group.dependencies)?;
 
    Ok(ComposeIntentPlan { groups, dependency_order })
+}
+
+fn should_collect_compose_observations(
+   snapshot: &ComposeSnapshot,
+   config: &CommitConfig,
+   counter: &TokenCounter,
+) -> bool {
+   planning_mode_for_snapshot(snapshot) != PlanningMode::Area
+      && should_use_map_reduce(&snapshot.diff, config, counter)
 }
 
 fn auto_assign_hunks(
@@ -798,7 +1876,7 @@ async fn request_binding(
    ambiguous_files: &[AmbiguousFileBinding],
    config: &CommitConfig,
    debug_dir: Option<&Path>,
-   debug_name: &'static str,
+   debug_name: &str,
 ) -> Result<Vec<ComposeBindingAssignment>> {
    let schema = build_binding_schema();
    let groups_text = render_binding_groups(groups);
@@ -943,6 +2021,51 @@ fn filter_ambiguous_files(
             hunk_ids:            matching_hunks,
          })
       })
+      .collect()
+}
+
+fn chunk_ambiguous_files(
+   ambiguous_files: &[AmbiguousFileBinding],
+) -> Vec<Vec<AmbiguousFileBinding>> {
+   if ambiguous_files.is_empty() {
+      return Vec::new();
+   }
+
+   let mut batches = Vec::new();
+   let mut current_batch = Vec::new();
+   let mut current_hunk_count = 0_usize;
+
+   for file in ambiguous_files {
+      let file_hunk_count = file.hunk_ids.len();
+      let should_split = !current_batch.is_empty()
+         && (current_batch.len() >= MAX_BIND_FILES_PER_REQUEST
+            || current_hunk_count.saturating_add(file_hunk_count) > MAX_BIND_HUNKS_PER_REQUEST);
+
+      if should_split {
+         batches.push(current_batch);
+         current_batch = Vec::new();
+         current_hunk_count = 0;
+      }
+
+      current_hunk_count = current_hunk_count.saturating_add(file_hunk_count);
+      current_batch.push(file.clone());
+   }
+
+   if !current_batch.is_empty() {
+      batches.push(current_batch);
+   }
+
+   batches
+}
+
+fn order_hunk_ids(snapshot: &ComposeSnapshot, hunk_ids: &[String]) -> Vec<String> {
+   let hunk_ids: HashSet<&str> = hunk_ids.iter().map(String::as_str).collect();
+
+   snapshot
+      .hunks
+      .iter()
+      .filter(|hunk| hunk_ids.contains(hunk.hunk_id.as_str()))
+      .map(|hunk| hunk.hunk_id.clone())
       .collect()
 }
 
@@ -1251,23 +2374,27 @@ async fn bind_compose_plan(
          .iter()
          .map(|group| group.group_id.as_str())
          .collect();
-      let hunk_context = ambiguous_hunk_context(&ambiguous_files);
+      let binding_batches = chunk_ambiguous_files(&ambiguous_files);
+      let mut unresolved = Vec::new();
 
-      let assignments = request_binding(
-         snapshot,
-         &intent_plan.groups,
-         &ambiguous_files,
-         config,
-         debug_dir,
-         "compose_bind",
-      )
-      .await?;
-      let evaluation = evaluate_binding(&assignments, &hunk_context, &valid_group_ids, snapshot);
-      for (group_id, hunk_ids) in evaluation.assigned {
-         let entry = assigned_by_group.entry(group_id).or_default();
-         for hunk_id in hunk_ids {
-            entry.insert(hunk_id);
+      for (batch_idx, batch) in binding_batches.iter().enumerate() {
+         let hunk_context = ambiguous_hunk_context(batch);
+         let debug_name = if binding_batches.len() == 1 {
+            "compose_bind".to_string()
+         } else {
+            format!("compose_bind_{:02}", batch_idx + 1)
+         };
+         let assignments =
+            request_binding(snapshot, &intent_plan.groups, batch, config, debug_dir, &debug_name)
+               .await?;
+         let evaluation = evaluate_binding(&assignments, &hunk_context, &valid_group_ids, snapshot);
+         for (group_id, hunk_ids) in evaluation.assigned {
+            let entry = assigned_by_group.entry(group_id).or_default();
+            for hunk_id in hunk_ids {
+               entry.insert(hunk_id);
+            }
          }
+         unresolved.extend(evaluation.unresolved);
       }
 
       let group_rank: HashMap<&str, usize> = intent_plan
@@ -1277,28 +2404,40 @@ async fn bind_compose_plan(
          .map(|(position, idx)| (intent_plan.groups[*idx].group_id.as_str(), position))
          .collect();
 
-      let mut unresolved = evaluation.unresolved;
+      let mut unresolved = order_hunk_ids(snapshot, &unresolved);
       if !unresolved.is_empty() {
          let unresolved_files = filter_ambiguous_files(&ambiguous_files, &unresolved);
-         let repair_assignments = request_binding(
-            snapshot,
-            &intent_plan.groups,
-            &unresolved_files,
-            config,
-            debug_dir,
-            "compose_bind_repair",
-         )
-         .await?;
-         let repair_context = ambiguous_hunk_context(&unresolved_files);
-         let repair =
-            evaluate_binding(&repair_assignments, &repair_context, &valid_group_ids, snapshot);
-         for (group_id, hunk_ids) in repair.assigned {
-            let entry = assigned_by_group.entry(group_id).or_default();
-            for hunk_id in hunk_ids {
-               entry.insert(hunk_id);
+         let repair_batches = chunk_ambiguous_files(&unresolved_files);
+         let mut repair_unresolved = Vec::new();
+
+         for (batch_idx, batch) in repair_batches.iter().enumerate() {
+            let debug_name = if repair_batches.len() == 1 {
+               "compose_bind_repair".to_string()
+            } else {
+               format!("compose_bind_repair_{:02}", batch_idx + 1)
+            };
+            let repair_assignments = request_binding(
+               snapshot,
+               &intent_plan.groups,
+               batch,
+               config,
+               debug_dir,
+               &debug_name,
+            )
+            .await?;
+            let repair_context = ambiguous_hunk_context(batch);
+            let repair =
+               evaluate_binding(&repair_assignments, &repair_context, &valid_group_ids, snapshot);
+            for (group_id, hunk_ids) in repair.assigned {
+               let entry = assigned_by_group.entry(group_id).or_default();
+               for hunk_id in hunk_ids {
+                  entry.insert(hunk_id);
+               }
             }
+
+            repair_unresolved.extend(repair.unresolved);
          }
-         unresolved = repair.unresolved;
+         unresolved = order_hunk_ids(snapshot, &repair_unresolved);
 
          if !unresolved.is_empty() {
             assign_unresolved_hunks(
@@ -1658,10 +2797,21 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
    }
 
    let token_counter = create_token_counter(config);
-   let observations = if should_use_map_reduce(&snapshot.diff, config, &token_counter) {
-      println!("{}", style::info("Summarizing large compose snapshot with map-reduce..."));
+   let observations = if should_collect_compose_observations(&snapshot, config, &token_counter) {
+      println!("{}", style::info("Summarizing compose snapshot with map-reduce..."));
       observe_diff_files(&snapshot.diff, &config.analysis_model, config, &token_counter).await?
    } else {
+      if planning_mode_for_snapshot(&snapshot) == PlanningMode::Area
+         && should_use_map_reduce(&snapshot.diff, config, &token_counter)
+      {
+         println!(
+            "{}",
+            style::info(
+               "Skipping per-file observations for very large compose snapshot; using area-level \
+                planning instead."
+            )
+         );
+      }
       Vec::new()
    };
 
@@ -1743,8 +2893,10 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
 
 #[cfg(test)]
 mod tests {
+   use std::fmt::Write;
+
    use super::*;
-   use crate::{patch::build_compose_snapshot, types::CommitType};
+   use crate::{config::CommitConfig, patch::build_compose_snapshot, types::CommitType};
 
    fn shared_file_diff() -> (&'static str, &'static str) {
       (
@@ -1778,6 +2930,52 @@ index 3333333..4444444 100644
    fn build_test_snapshot() -> ComposeSnapshot {
       let (diff, stat) = shared_file_diff();
       build_compose_snapshot(diff, stat).unwrap()
+   }
+
+   fn build_large_snapshot(file_count: usize, hunks_per_file: usize) -> ComposeSnapshot {
+      let mut diff = String::new();
+
+      for file_idx in 0..file_count {
+         let path = format!("src/module_{file_idx:03}.rs");
+         writeln!(diff, "diff --git a/{path} b/{path}").unwrap();
+         diff.push_str("index 1111111..2222222 100644\n");
+         writeln!(diff, "--- a/{path}").unwrap();
+         writeln!(diff, "+++ b/{path}").unwrap();
+
+         for hunk_idx in 0..hunks_per_file {
+            let line_no = (hunk_idx * 4) + 1;
+            writeln!(diff, "@@ -{line_no},1 +{line_no},1 @@").unwrap();
+            writeln!(diff, "-old_{file_idx}_{hunk_idx}").unwrap();
+            writeln!(diff, "+new_{file_idx}_{hunk_idx}").unwrap();
+         }
+      }
+
+      build_compose_snapshot(&diff, "").unwrap()
+   }
+
+   fn build_multi_area_snapshot() -> ComposeSnapshot {
+      let mut diff = String::new();
+      let areas = [
+         ("apps/frontend/src/server", 72),
+         ("packages/model/src/models", 54),
+         ("apps/daemon/src/worker", 43),
+         (".github/workflows", 16),
+      ];
+
+      for (prefix, count) in areas {
+         for file_idx in 0..count {
+            let path = format!("{prefix}/file_{file_idx:03}.rs");
+            writeln!(diff, "diff --git a/{path} b/{path}").unwrap();
+            diff.push_str("index 1111111..2222222 100644\n");
+            writeln!(diff, "--- a/{path}").unwrap();
+            writeln!(diff, "+++ b/{path}").unwrap();
+            diff.push_str("@@ -1,1 +1,1 @@\n");
+            writeln!(diff, "-old_{file_idx}").unwrap();
+            writeln!(diff, "+new_{file_idx}").unwrap();
+         }
+      }
+
+      build_compose_snapshot(&diff, "").unwrap()
    }
 
    fn build_shared_intent_plan(snapshot: &ComposeSnapshot) -> ComposeIntentPlan {
@@ -1916,6 +3114,7 @@ index 3333333..4444444 100644
    #[test]
    fn test_normalize_intent_plan_maps_path_references_to_file_ids() {
       let snapshot = build_test_snapshot();
+      let planning_index = build_planning_index(&snapshot);
       let groups = vec![ComposeIntentGroup {
          group_id:     "G1".to_string(),
          commit_type:  CommitType::new("refactor").unwrap(),
@@ -1925,7 +3124,8 @@ index 3333333..4444444 100644
          dependencies: vec![],
       }];
 
-      let (normalized_groups, repair_notes) = normalize_intent_plan(&snapshot, groups).unwrap();
+      let (normalized_groups, repair_notes) =
+         normalize_intent_plan(&snapshot, &planning_index, groups).unwrap();
 
       assert_eq!(normalized_groups.len(), 1);
       assert_eq!(
@@ -1942,6 +3142,7 @@ index 3333333..4444444 100644
    #[test]
    fn test_normalize_intent_plan_repairs_missing_files() {
       let snapshot = build_test_snapshot();
+      let planning_index = build_planning_index(&snapshot);
       let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
       let test_file = snapshot.file_by_path("tests/lib.rs").unwrap();
       let groups = vec![ComposeIntentGroup {
@@ -1953,7 +3154,8 @@ index 3333333..4444444 100644
          dependencies: vec![],
       }];
 
-      let (normalized_groups, repair_notes) = normalize_intent_plan(&snapshot, groups).unwrap();
+      let (normalized_groups, repair_notes) =
+         normalize_intent_plan(&snapshot, &planning_index, groups).unwrap();
 
       assert_eq!(normalized_groups.len(), 1);
       assert!(
@@ -1966,5 +3168,269 @@ index 3333333..4444444 100644
       );
       assert_eq!(repair_notes.len(), 1);
       assert!(repair_notes[0].contains(&test_file.file_id));
+   }
+
+   #[test]
+   fn test_normalize_intent_plan_drops_placeholder_targets_and_repairs_dependencies() {
+      let snapshot = build_multi_area_snapshot();
+      let planning_index = build_planning_index(&snapshot);
+      let frontend_target = planning_index
+         .targets
+         .iter()
+         .find(|target| target.label.starts_with("apps/frontend"))
+         .unwrap();
+      let model_target = planning_index
+         .targets
+         .iter()
+         .find(|target| target.label.starts_with("packages/model"))
+         .unwrap();
+      let groups = vec![
+         ComposeIntentGroup {
+            group_id:     "G1".to_string(),
+            commit_type:  CommitType::new("refactor").unwrap(),
+            scope:        Scope::new("apps/frontend").ok(),
+            file_ids:     vec!["G3_PLACEHOLDER".to_string(), frontend_target.target_id.clone()],
+            rationale:    "frontend platform updates".to_string(),
+            dependencies: vec!["group 2".to_string(), "G1".to_string()],
+         },
+         ComposeIntentGroup {
+            group_id:     "G2".to_string(),
+            commit_type:  CommitType::new("refactor").unwrap(),
+            scope:        Scope::new("packages/model").ok(),
+            file_ids:     vec!["UNKNOWN_TARGET".to_string(), model_target.target_id.clone()],
+            rationale:    "model storage updates".to_string(),
+            dependencies: vec!["F5".to_string()],
+         },
+      ];
+
+      let (normalized_groups, repair_notes) =
+         normalize_intent_plan(&snapshot, &planning_index, groups).unwrap();
+
+      assert_eq!(normalized_groups.len(), 2);
+      assert!(
+         normalized_groups[0]
+            .file_ids
+            .iter()
+            .all(|file_id| file_id.starts_with('F'))
+      );
+      assert_eq!(normalized_groups[0].dependencies, vec!["G2".to_string()]);
+      assert!(normalized_groups[1].dependencies.is_empty());
+      assert!(
+         repair_notes
+            .iter()
+            .any(|note| note.contains("Dropped unknown planning target"))
+      );
+      assert!(
+         repair_notes
+            .iter()
+            .any(|note| note.contains("Dropped self-dependency"))
+      );
+      assert!(
+         repair_notes
+            .iter()
+            .any(|note| note.contains("Mapped compose planner dependency"))
+      );
+      assert!(
+         repair_notes
+            .iter()
+            .any(|note| note.contains("Dropped unknown dependency"))
+      );
+   }
+
+   #[test]
+   fn test_render_snapshot_summary_keeps_all_hunks_for_small_snapshot() {
+      let snapshot = build_test_snapshot();
+      let summary = render_snapshot_summary(&snapshot, &[]);
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+
+      assert!(!summary.contains("# snapshot compacted"));
+      for hunk_id in &source_file.hunk_ids {
+         assert!(summary.contains(hunk_id));
+      }
+   }
+
+   #[test]
+   fn test_render_snapshot_summary_compacts_large_snapshot() {
+      let snapshot = build_large_snapshot(160, 4);
+      let summary = render_snapshot_summary(&snapshot, &[]);
+
+      assert!(summary.contains("# snapshot compacted"));
+      assert!(summary.contains("- F001 src/module_000.rs (+4/-4, 4 hunks)"));
+      assert!(summary.contains("F001-H001"));
+      assert!(summary.contains("F001-H004"));
+      assert!(!summary.contains("F001-H002"));
+      assert!(!summary.contains("F001-H003"));
+      assert!(summary.contains("... 2 more hunks omitted from F001"));
+   }
+
+   #[test]
+   fn test_build_planning_index_uses_area_targets_for_large_snapshot() {
+      let snapshot = build_multi_area_snapshot();
+      let planning_index = build_planning_index(&snapshot);
+
+      assert_eq!(planning_index.mode, PlanningMode::Area);
+      assert!(planning_index.targets.len() < snapshot.files.len());
+      assert!(
+         planning_index
+            .targets
+            .iter()
+            .any(|target| target.label.starts_with("apps/frontend"))
+      );
+      assert!(
+         render_planning_stat(&planning_index).contains("planning over"),
+         "planning stat should explain the area mode"
+      );
+   }
+
+   #[test]
+   fn test_normalize_intent_plan_expands_area_targets() {
+      let snapshot = build_multi_area_snapshot();
+      let planning_index = build_planning_index(&snapshot);
+      let midpoint = planning_index.targets.len() / 2;
+      let first_group_targets: Vec<String> = planning_index
+         .targets
+         .iter()
+         .take(midpoint)
+         .map(|target| target.label.clone())
+         .collect();
+      let second_group_targets: Vec<String> = planning_index
+         .targets
+         .iter()
+         .skip(midpoint)
+         .map(|target| target.label.clone())
+         .collect();
+      let groups = vec![
+         ComposeIntentGroup {
+            group_id:     "G1".to_string(),
+            commit_type:  CommitType::new("refactor").unwrap(),
+            scope:        None,
+            file_ids:     first_group_targets,
+            rationale:    "frontend and model".to_string(),
+            dependencies: vec![],
+         },
+         ComposeIntentGroup {
+            group_id:     "G2".to_string(),
+            commit_type:  CommitType::new("refactor").unwrap(),
+            scope:        None,
+            file_ids:     second_group_targets,
+            rationale:    "daemon and ci".to_string(),
+            dependencies: vec![],
+         },
+      ];
+
+      let (normalized_groups, repair_notes) =
+         normalize_intent_plan(&snapshot, &planning_index, groups).unwrap();
+
+      assert_eq!(normalized_groups.len(), 2);
+      assert!(
+         normalized_groups
+            .iter()
+            .flat_map(|group| group.file_ids.iter())
+            .all(|file_id| file_id.starts_with('F')),
+         "area targets should expand back to concrete file IDs"
+      );
+      assert!(!repair_notes.is_empty());
+      assert_eq!(
+         normalized_groups
+            .iter()
+            .flat_map(|group| group.file_ids.iter())
+            .collect::<HashSet<_>>()
+            .len(),
+         snapshot.files.len()
+      );
+   }
+
+   #[test]
+   fn test_large_patch_fallback_splits_monolithic_area_plan() {
+      let snapshot = build_multi_area_snapshot();
+      let planning_index = build_planning_index(&snapshot);
+      let monolithic_group = ComposeIntentGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     snapshot
+            .files
+            .iter()
+            .map(|file| file.file_id.clone())
+            .collect(),
+         rationale:    "repo-wide refactor".to_string(),
+         dependencies: vec![],
+      };
+
+      assert!(should_force_large_patch_fallback(
+         &snapshot,
+         &planning_index,
+         &[monolithic_group],
+         6
+      ));
+
+      let fallback_groups =
+         build_large_patch_fallback_groups(&snapshot, &planning_index, 6).unwrap();
+      assert!(fallback_groups.len() >= 3);
+      assert_eq!(
+         fallback_groups
+            .iter()
+            .flat_map(|group| group.file_ids.iter())
+            .collect::<HashSet<_>>()
+            .len(),
+         snapshot.files.len()
+      );
+      assert!(
+         fallback_groups
+            .iter()
+            .any(|group| group.rationale.contains("frontend")),
+         "fallback should preserve workstream identity"
+      );
+   }
+
+   #[test]
+   fn test_should_collect_compose_observations_skips_area_mode() {
+      let snapshot = build_large_snapshot(160, 4);
+      let config = CommitConfig::default();
+      let counter = create_token_counter(&config);
+
+      assert!(should_use_map_reduce(&snapshot.diff, &config, &counter));
+      assert!(!should_collect_compose_observations(&snapshot, &config, &counter));
+   }
+
+   #[test]
+   fn test_chunk_ambiguous_files_splits_large_binding_request() {
+      let ambiguous_files = vec![
+         AmbiguousFileBinding {
+            file_id:             "F001".to_string(),
+            path:                "src/alpha.rs".to_string(),
+            candidate_group_ids: vec!["G1".to_string(), "G2".to_string()],
+            hunk_ids:            (1..=70).map(|idx| format!("F001-H{idx:03}")).collect(),
+         },
+         AmbiguousFileBinding {
+            file_id:             "F002".to_string(),
+            path:                "src/beta.rs".to_string(),
+            candidate_group_ids: vec!["G1".to_string(), "G3".to_string()],
+            hunk_ids:            (1..=60).map(|idx| format!("F002-H{idx:03}")).collect(),
+         },
+         AmbiguousFileBinding {
+            file_id:             "F003".to_string(),
+            path:                "src/gamma.rs".to_string(),
+            candidate_group_ids: vec!["G2".to_string(), "G3".to_string()],
+            hunk_ids:            (1..=10).map(|idx| format!("F003-H{idx:03}")).collect(),
+         },
+      ];
+
+      let batches = chunk_ambiguous_files(&ambiguous_files);
+      let total_hunks: usize = batches
+         .iter()
+         .flatten()
+         .map(|file| file.hunk_ids.len())
+         .sum();
+
+      assert_eq!(batches.len(), 2);
+      assert_eq!(batches[0].len(), 1);
+      assert_eq!(batches[1].len(), 2);
+      assert_eq!(total_hunks, 140);
+      assert!(batches.iter().all(|batch| {
+         batch.len() <= MAX_BIND_FILES_PER_REQUEST
+            && batch.iter().map(|file| file.hunk_ids.len()).sum::<usize>()
+               <= MAX_BIND_HUNKS_PER_REQUEST
+      }));
    }
 }

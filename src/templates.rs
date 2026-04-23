@@ -452,6 +452,9 @@ pub struct ComposeIntentPromptParams<'a> {
    pub max_commits:      usize,
    pub stat:             &'a str,
    pub snapshot_summary: &'a str,
+   pub planning_targets: &'a str,
+   pub planning_notes:   &'a str,
+   pub split_bias:       &'a str,
 }
 
 /// Render compose intent prompt template.
@@ -462,6 +465,9 @@ pub fn render_compose_intent_prompt(p: &ComposeIntentPromptParams<'_>) -> Result
    context.insert("max_commits", &p.max_commits);
    context.insert("stat", p.stat);
    context.insert("snapshot_summary", p.snapshot_summary);
+   context.insert("planning_targets", p.planning_targets);
+   context.insert("planning_notes", p.planning_notes);
+   context.insert("split_bias", p.split_bias);
 
    render_prompt_parts(&format!("compose-intent/{}.md", p.variant), &template_content, &context)
 }
@@ -522,6 +528,9 @@ mod tests {
          max_commits:      3,
          stat:             "src/foo.rs | 10 +++++-----",
          snapshot_summary: "- F1 src/foo.rs",
+         planning_targets: "file IDs",
+         planning_notes:   "Prefer conservative grouping over speculative splitting.",
+         split_bias:       "Prefer fewer groups when the split is uncertain.",
       })
       .unwrap();
 
