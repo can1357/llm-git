@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use tiktoken_rs::{CoreBPE, get_bpe_from_model};
+use tiktoken_rs::{CoreBPE, bpe_for_model};
 
 use crate::config::CommitConfig;
 
@@ -22,7 +22,7 @@ pub struct TokenCounter {
    api_base_url: String,
    api_key:      Option<String>,
    model:        String,
-   tiktoken:     Option<CoreBPE>,
+   tiktoken:     Option<&'static CoreBPE>,
 }
 
 impl fmt::Debug for TokenCounter {
@@ -42,7 +42,7 @@ impl TokenCounter {
          api_base_url: api_base_url.to_string(),
          api_key:      api_key.map(String::from),
          model:        model.to_string(),
-         tiktoken:     get_bpe_from_model(model).ok(),
+         tiktoken:     bpe_for_model(model).ok(),
       }
    }
 

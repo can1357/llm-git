@@ -5,6 +5,7 @@ use std::{
    path::{Path, PathBuf},
 };
 
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -45,6 +46,9 @@ const COMPOSE_MONOLITH_FALLBACK_TARGET_THRESHOLD: usize = 8;
 const COMPOSE_MONOLITH_FALLBACK_WORKSTREAM_THRESHOLD: usize = 3;
 const MAX_BIND_FILES_PER_REQUEST: usize = 18;
 const MAX_BIND_HUNKS_PER_REQUEST: usize = 120;
+/// Maximum number of commit messages to generate concurrently during
+/// `execute_compose`. Matches the per-file fan-out used in `map_reduce`.
+const COMPOSE_MESSAGE_PARALLELISM: usize = 8;
 
 #[derive(Debug, Deserialize)]
 struct ComposeIntentResponse {
@@ -2605,17 +2609,98 @@ pub async fn execute_compose(
    let dir = &args.dir;
    let mut remaining_hunk_ids: HashSet<String> = snapshot.all_hunk_ids().into_iter().collect();
    let mut commit_hashes = Vec::new();
+   let total = plan.dependency_order.len();
 
    println!("{}", style::info("Resetting staging area..."));
    reset_staging(dir)?;
 
+   // Phase 1: capture per-group diff/stat sequentially. Staging is a global
+   // resource so we must serialize git operations, but each group's diff is
+   // independent of the others (no two groups share a hunk).
+   let mut group_diff_stats: Vec<(String, String)> = Vec::with_capacity(total);
+   for (idx, &group_idx) in plan.dependency_order.iter().enumerate() {
+      let group = &plan.groups[group_idx];
+      println!(
+         "  {}",
+         style::info(&format!(
+            "Capturing diff for {} ({}/{})",
+            group.group_id,
+            idx + 1,
+            total,
+         ))
+      );
+      stage_executable_group(snapshot, group, dir)?;
+      let diff = get_git_diff(&Mode::Staged, None, dir, config)?;
+      let stat = get_git_stat(&Mode::Staged, None, dir, config)?;
+      group_diff_stats.push((diff, stat));
+      reset_staging(dir)?;
+   }
+
+   // Phase 2: generate commit messages concurrently. Both LLM calls per group
+   // (analysis + summary) run inside a single async task so the slower of the
+   // two does not block other groups from progressing.
+   println!(
+      "{}",
+      style::info(&format!(
+         "Generating {total} commit message(s) in parallel (up to {} at a time)...",
+         COMPOSE_MESSAGE_PARALLELISM.min(total).max(1)
+      ))
+   );
+
+   let prepared_messages: Vec<(Vec<String>, crate::types::CommitSummary)> =
+      stream::iter(plan.dependency_order.iter().enumerate())
+         .map(|(idx, &group_idx)| {
+            let group = &plan.groups[group_idx];
+            let (diff, stat) = &group_diff_stats[idx];
+            let debug_prefix = format!("compose-{}", idx + 1);
+            async move {
+               let ctx = AnalysisContext {
+                  user_context:    Some(&group.rationale),
+                  recent_commits:  None,
+                  common_scopes:   None,
+                  project_context: None,
+                  debug_output:    args.debug_output.as_deref(),
+                  debug_prefix:    Some(&debug_prefix),
+               };
+               let analysis = generate_conventional_analysis(
+                  stat,
+                  diff,
+                  &config.analysis_model,
+                  "",
+                  &ctx,
+                  config,
+               )
+               .await?;
+               let body = analysis.body_texts();
+               let summary = generate_summary_from_analysis(
+                  stat,
+                  group.commit_type.as_str(),
+                  group.scope.as_ref().map(|scope| scope.as_str()),
+                  &body,
+                  Some(&group.rationale),
+                  config,
+                  args.debug_output.as_deref(),
+                  Some(&debug_prefix),
+               )
+               .await?;
+               Ok::<_, CommitGenError>((body, summary))
+            }
+         })
+         .buffered(COMPOSE_MESSAGE_PARALLELISM.min(total).max(1))
+         .collect::<Vec<_>>()
+         .await
+         .into_iter()
+         .collect::<Result<Vec<_>>>()?;
+
+   // Phase 3: sequential commit loop. Re-stage each group (cheap git ops) and
+   // commit using the message we generated in phase 2.
    for (idx, &group_idx) in plan.dependency_order.iter().enumerate() {
       let group = &plan.groups[group_idx];
 
       println!(
          "\n[{}/{}] Creating commit {}: {}",
          idx + 1,
-         plan.dependency_order.len(),
+         total,
          group.group_id,
          group.rationale
       );
@@ -2632,36 +2717,7 @@ pub async fn execute_compose(
 
       stage_executable_group(snapshot, group, dir)?;
 
-      let diff = get_git_diff(&Mode::Staged, None, dir, config)?;
-      let stat = get_git_stat(&Mode::Staged, None, dir, config)?;
-
-      println!("  {}", style::info("Generating commit message..."));
-      let debug_prefix = format!("compose-{}", idx + 1);
-      let ctx = AnalysisContext {
-         user_context:    Some(&group.rationale),
-         recent_commits:  None,
-         common_scopes:   None,
-         project_context: None,
-         debug_output:    args.debug_output.as_deref(),
-         debug_prefix:    Some(&debug_prefix),
-      };
-      let message_analysis =
-         generate_conventional_analysis(&stat, &diff, &config.analysis_model, "", &ctx, config)
-            .await?;
-
-      let analysis_body = message_analysis.body_texts();
-      let summary = generate_summary_from_analysis(
-         &stat,
-         group.commit_type.as_str(),
-         group.scope.as_ref().map(|scope| scope.as_str()),
-         &analysis_body,
-         Some(&group.rationale),
-         config,
-         args.debug_output.as_deref(),
-         Some(&debug_prefix),
-      )
-      .await?;
-
+      let (analysis_body, summary) = prepared_messages[idx].clone();
       let mut commit = ConventionalCommit {
          commit_type: group.commit_type.clone(),
          scope: group.scope.clone(),
