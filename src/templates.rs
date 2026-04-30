@@ -15,14 +15,43 @@ pub struct PromptParts {
    pub user:   String,
 }
 
-const USER_SEPARATOR: &str = "\n======USER=======\n";
+const USER_SEPARATOR_MARKER: &str = "======USER=======";
+
+/// Locate the USER separator and return (`system_end`, `user_start`) byte
+/// offsets.
+///
+/// The marker may be surrounded by either LF or CRLF line endings — the latter
+/// happens on Windows checkouts where Git's default `core.autocrlf=true`
+/// converts embedded `.md` templates to CRLF. We strip whichever line
+/// terminator wraps the marker so the system section never includes a trailing
+/// blank line and the user section never starts with one.
+fn find_user_separator(content: &str) -> Option<(usize, usize)> {
+   let marker_pos = content.find(USER_SEPARATOR_MARKER)?;
+   // System section ends immediately before the line break that precedes the
+   // marker. Accept CRLF or LF.
+   let system_end = if marker_pos >= 2 && &content[marker_pos - 2..marker_pos] == "\r\n" {
+      marker_pos - 2
+   } else if marker_pos >= 1 && &content[marker_pos - 1..marker_pos] == "\n" {
+      marker_pos - 1
+   } else {
+      // Marker appears at start of file or without preceding newline.
+      marker_pos
+   };
+   let after_marker = marker_pos + USER_SEPARATOR_MARKER.len();
+   let user_start = if content.get(after_marker..after_marker + 2) == Some("\r\n") {
+      after_marker + 2
+   } else if content.get(after_marker..after_marker + 1) == Some("\n") {
+      after_marker + 1
+   } else {
+      after_marker
+   };
+   Some((system_end, user_start))
+}
 
 /// Split a prompt template into static system text and templated user content.
 fn split_prompt_template(template_content: &str) -> (Option<&str>, &str) {
-   if let Some(pos) = template_content.find(USER_SEPARATOR) {
-      let system = &template_content[..pos];
-      let user = &template_content[pos + USER_SEPARATOR.len()..];
-      (Some(system), user)
+   if let Some((system_end, user_start)) = find_user_separator(template_content) {
+      (Some(&template_content[..system_end]), &template_content[user_start..])
    } else {
       (None, template_content)
    }
@@ -518,8 +547,34 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
 mod tests {
    use super::{
       ComposeBindPromptParams, ComposeIntentPromptParams, render_compose_bind_prompt,
-      render_compose_intent_prompt,
+      render_compose_intent_prompt, split_prompt_template,
    };
+
+   #[test]
+   fn test_split_prompt_template_lf() {
+      let content = "system text\nmore system\n======USER=======\nuser body\n";
+      let (system, user) = split_prompt_template(content);
+      assert_eq!(system, Some("system text\nmore system"));
+      assert_eq!(user, "user body\n");
+   }
+
+   #[test]
+   fn test_split_prompt_template_crlf() {
+      // Windows checkouts under Git's default core.autocrlf=true produce CRLF
+      // separators; the splitter must locate the marker line regardless.
+      let content = "system text\r\nmore system\r\n======USER=======\r\nuser body\r\n";
+      let (system, user) = split_prompt_template(content);
+      assert_eq!(system, Some("system text\r\nmore system"));
+      assert_eq!(user, "user body\r\n");
+   }
+
+   #[test]
+   fn test_split_prompt_template_no_separator() {
+      let content = "no separator here";
+      let (system, user) = split_prompt_template(content);
+      assert_eq!(system, None);
+      assert_eq!(user, content);
+   }
 
    #[test]
    fn test_render_compose_intent_prompt() {

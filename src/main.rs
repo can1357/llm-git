@@ -797,7 +797,8 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    })
    .await?;
 
-   // Populate footers from CLI flags (--fixes/--closes/--resolves/--refs/--breaking)
+   // Populate footers from CLI flags
+   // (--fixes/--closes/--resolves/--refs/--breaking)
    commit_msg.footers = build_footers(args);
 
    record_timing(&mut timings, "generate_fast_commit", phase_start.elapsed());

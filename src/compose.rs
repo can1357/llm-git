@@ -1223,7 +1223,9 @@ fn planning_target_match_score(target: &PlanningTarget, group: &ComposeIntentGro
             || Path::new(&target.label)
                .extension()
                .is_some_and(|ext| ext.eq_ignore_ascii_case("md")) =>
-         score += 80,
+      {
+         score += 80;
+      },
       "build" | "chore"
          if target.label.contains("Cargo")
             || target.label.contains("package")
@@ -2622,12 +2624,7 @@ pub async fn execute_compose(
       let group = &plan.groups[group_idx];
       println!(
          "  {}",
-         style::info(&format!(
-            "Capturing diff for {} ({}/{})",
-            group.group_id,
-            idx + 1,
-            total,
-         ))
+         style::info(&format!("Capturing diff for {} ({}/{})", group.group_id, idx + 1, total,))
       );
       stage_executable_group(snapshot, group, dir)?;
       let diff = get_git_diff(&Mode::Staged, None, dir, config)?;
@@ -2697,13 +2694,7 @@ pub async fn execute_compose(
    for (idx, &group_idx) in plan.dependency_order.iter().enumerate() {
       let group = &plan.groups[group_idx];
 
-      println!(
-         "\n[{}/{}] Creating commit {}: {}",
-         idx + 1,
-         total,
-         group.group_id,
-         group.rationale
-      );
+      println!("\n[{}/{}] Creating commit {}: {}", idx + 1, total, group.group_id, group.rationale);
       println!("  Type: {}", style::commit_type(group.commit_type.as_str()));
       if let Some(scope) = &group.scope {
          println!("  Scope: {}", style::scope(scope.as_str()));
