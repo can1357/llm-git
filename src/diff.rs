@@ -105,7 +105,11 @@ impl FileDiff {
             self.content = truncated;
          } else {
             // Just truncate the content
-            self.content.truncate(available);
+            let mut truncate_at = available;
+            while !self.content.is_char_boundary(truncate_at) {
+               truncate_at -= 1;
+            }
+            self.content.truncate(truncate_at);
             self.content.push_str("\n... (truncated)");
          }
       }
@@ -735,6 +739,23 @@ index 123..000 100644
       assert!(file.content.contains("... (truncated"));
       assert!(file.content.contains("line 0")); // First line preserved
       assert!(file.content.contains("line 99")); // Last line preserved
+   }
+   #[test]
+   fn test_file_diff_truncate_utf8_boundary() {
+      let mut file = FileDiff {
+         filename: "test.rs".to_string(),
+         header: "header".to_string(),
+         content: "😀".repeat(80),
+         additions: 0,
+         deletions: 0,
+         is_binary: false,
+      };
+      file.truncate(121);
+
+      assert!(file.content.ends_with("\n... (truncated)"));
+      let truncated_payload = file.content.trim_end_matches("\n... (truncated)");
+      assert!(!truncated_payload.is_empty());
+      assert_eq!(truncated_payload.len() % 4, 0);
    }
 
    #[test]
