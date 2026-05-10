@@ -30,6 +30,16 @@ use crate::{
 struct ChangelogResponse {
    entries: HashMap<String, Vec<String>>,
 }
+fn normalize_changelog_entry(entry: &str) -> Option<String> {
+   let trimmed = entry.trim();
+   let without_bullet = trimmed
+      .strip_prefix("- ")
+      .or_else(|| trimmed.strip_prefix("* "))
+      .unwrap_or(trimmed)
+      .trim();
+
+   (!without_bullet.is_empty()).then(|| format!("- {without_bullet}"))
+}
 
 /// Run the changelog maintenance flow
 ///
@@ -205,14 +215,18 @@ async fn generate_changelog_entries(
 
    let response = call_changelog_api(&parts, config).await?;
 
-   // Convert string keys to ChangelogCategory
+   // Convert string keys to categories and drop empty/whitespace-only entries.
    let mut result = HashMap::new();
    for (key, entries) in response.entries {
-      if entries.is_empty() {
+      let sanitized: Vec<String> = entries
+         .iter()
+         .filter_map(|entry| normalize_changelog_entry(entry))
+         .collect();
+      if sanitized.is_empty() {
          continue;
       }
       let category = ChangelogCategory::from_name(&key);
-      result.insert(category, entries);
+      result.insert(category, sanitized);
    }
 
    Ok(result)
@@ -518,8 +532,10 @@ fn parse_unreleased_section(content: &str, path: &Path) -> Result<UnreleasedSect
          };
       } else if let Some(cat) = current_category {
          // Collect entry lines
-         if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            entries.entry(cat).or_default().push(trimmed.to_string());
+         if (trimmed.starts_with("- ") || trimmed.starts_with("* "))
+            && let Some(entry) = normalize_changelog_entry(trimmed)
+         {
+            entries.entry(cat).or_default().push(entry);
          }
       }
    }
@@ -552,13 +568,16 @@ fn write_entries(
 
    // Write categories in order
    for category in ChangelogCategory::render_order() {
-      let new_in_category = new_entries.get(category);
+      let new_in_category: Vec<String> = new_entries
+         .get(category)
+         .into_iter()
+         .flat_map(|entries| entries.iter())
+         .filter_map(|entry| normalize_changelog_entry(entry))
+         .collect();
       let existing_in_category = unreleased.entries.get(category);
 
-      let has_new = new_in_category.is_some_and(|v| !v.is_empty());
       let has_existing = existing_in_category.is_some_and(|v| !v.is_empty());
-
-      if !has_new && !has_existing {
+      if new_in_category.is_empty() && !has_existing {
          continue;
       }
 
@@ -566,22 +585,11 @@ fn write_entries(
       result.push(String::new());
 
       // New entries first
-      if let Some(entries) = new_in_category {
-         for entry in entries {
-            // Ensure entry starts with "- "
-            if entry.starts_with("- ") || entry.starts_with("* ") {
-               result.push(entry.clone());
-            } else {
-               result.push(format!("- {entry}"));
-            }
-         }
-      }
+      result.extend(new_in_category);
 
       // Then existing entries
       if let Some(entries) = existing_in_category {
-         for entry in entries {
-            result.push(entry.clone());
-         }
+         result.extend(entries.iter().cloned());
       }
 
       result.push(String::new());
@@ -687,6 +695,53 @@ That's all!"#;
       assert!(formatted.contains("- Feature one"));
       assert!(formatted.contains("### Fixed"));
       assert!(formatted.contains("- Bug fix"));
+   }
+
+   #[test]
+   fn test_write_entries_trims_and_skips_empty_bullets() {
+      let content = r"# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2024-01-01
+";
+      let unreleased = parse_unreleased_section(content, Path::new("CHANGELOG.md")).unwrap();
+      let mut new_entries = HashMap::new();
+      new_entries.insert(ChangelogCategory::Added, vec![
+         "  Added configurable power assertions  ".to_string(),
+         " -   ".to_string(),
+         String::new(),
+         "* Fixed prompt cancellation cleanup ".to_string(),
+      ]);
+
+      let updated = write_entries(content, &unreleased, &new_entries);
+
+      assert!(updated.contains("- Added configurable power assertions\n"));
+      assert!(updated.contains("- Fixed prompt cancellation cleanup\n"));
+      assert!(!updated.contains("- \n"));
+      assert!(!updated.contains("* Fixed"));
+   }
+
+   #[test]
+   fn test_parse_unreleased_section_skips_empty_bullets() {
+      let content = r"# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- 
+- Fixed cancellation cleanup
+*    
+
+## [1.0.0] - 2024-01-01
+";
+
+      let section = parse_unreleased_section(content, Path::new("CHANGELOG.md")).unwrap();
+
+      assert_eq!(section.entries.get(&ChangelogCategory::Fixed).unwrap(), &vec![
+         "- Fixed cancellation cleanup".to_string()
+      ]);
    }
 
    #[test]

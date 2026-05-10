@@ -743,9 +743,9 @@ index 123..000 100644
    #[test]
    fn test_file_diff_truncate_utf8_boundary() {
       let mut file = FileDiff {
-         filename: "test.rs".to_string(),
-         header: "header".to_string(),
-         content: "😀".repeat(80),
+         filename:  "test.rs".to_string(),
+         header:    "header".to_string(),
+         content:   "😀".repeat(80),
          additions: 0,
          deletions: 0,
          is_binary: false,
