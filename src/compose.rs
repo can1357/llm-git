@@ -19,16 +19,16 @@ use crate::{
    },
    config::CommitConfig,
    error::{CommitGenError, Result},
-   git::{
-      get_compose_diff, get_compose_stat, get_git_diff, get_git_dir, get_git_stat, get_head_hash,
-      git_commit,
-   },
+   git::{get_compose_diff, get_compose_stat, get_git_dir, get_head_hash, git_commit},
    map_reduce::{FileObservation, observe_diff_files, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
-   patch::{build_compose_snapshot, reset_staging, stage_executable_group},
+   patch::{
+      StageResult, build_compose_snapshot, create_executable_group_patch, reset_staging,
+      stage_executable_group,
+   },
    style, templates,
    tokens::{TokenCounter, create_token_counter},
-   types::{Args, CommitType, ConventionalCommit, Mode, Scope},
+   types::{Args, CommitType, ConventionalCommit, Scope},
    validation::validate_commit_message,
 };
 
@@ -2541,21 +2541,18 @@ pub async fn execute_compose(
    println!("{}", style::info("Resetting staging area..."));
    reset_staging(dir)?;
 
-   // Phase 1: capture per-group diff/stat sequentially. Staging is a global
-   // resource so we must serialize git operations, but each group's diff is
-   // independent of the others (no two groups share a hunk).
+   // Phase 1: derive each group's diff/stat from the immutable compose snapshot.
+   // This avoids mutating the index while commit messages are prepared and keeps
+   // later worktree edits out of already-planned commits.
    let mut group_diff_stats: Vec<(String, String)> = Vec::with_capacity(total);
    for (idx, &group_idx) in plan.dependency_order.iter().enumerate() {
       let group = &plan.groups[group_idx];
       println!(
          "  {}",
-         style::info(&format!("Capturing diff for {} ({}/{})", group.group_id, idx + 1, total,))
+         style::info(&format!("Preparing diff for {} ({}/{})", group.group_id, idx + 1, total,))
       );
-      stage_executable_group(snapshot, group, dir)?;
-      let diff = get_git_diff(&Mode::Staged, None, dir, config)?;
-      let stat = get_git_stat(&Mode::Staged, None, dir, config)?;
-      group_diff_stats.push((diff, stat));
-      reset_staging(dir)?;
+      let group_patch = create_executable_group_patch(snapshot, group)?;
+      group_diff_stats.push((group_patch.diff, group_patch.stat));
    }
 
    // Phase 2: generate commit messages concurrently. Both LLM calls per group
@@ -2631,7 +2628,17 @@ pub async fn execute_compose(
          .collect();
       println!("  Files: {}", paths.join(", "));
 
-      stage_executable_group(snapshot, group, dir)?;
+      let stage_result = stage_executable_group(snapshot, group, dir)?;
+      if stage_result != StageResult::Staged {
+         eprintln!(
+            "  {}",
+            style::warning(&format!(
+               "Skipping {} because its planned patch is already applied ({stage_result:?})",
+               group.group_id
+            ))
+         );
+         continue;
+      }
 
       let (analysis_body, summary) = prepared_messages[idx].clone();
       let mut commit = ConventionalCommit {
