@@ -11,6 +11,7 @@ pub mod config;
 pub mod diff;
 pub mod error;
 pub mod git;
+pub mod llm_cache;
 pub mod map_reduce;
 pub mod normalization;
 pub mod patch;

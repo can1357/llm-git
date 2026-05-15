@@ -909,6 +909,7 @@ async fn main() -> miette::Result<()> {
    // Load config and apply CLI overrides
    let mut config = load_config_from_args(&args)?;
    apply_cli_overrides(&mut config, &args);
+   llm_git::llm_cache::init(&config);
    init_git_command_settings(&config);
 
    let total_start = Instant::now();

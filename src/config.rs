@@ -128,6 +128,21 @@ pub struct CommitConfig {
    #[serde(default = "default_map_reduce_threshold")]
    pub map_reduce_threshold: usize,
 
+   /// Enable the on-disk LLM response cache (default: true). Cache survives
+   /// across runs so reruns reuse parsed call results when prompts match.
+   #[serde(default = "default_cache_enabled")]
+   pub cache_enabled: bool,
+
+   /// TTL in days for cached LLM responses (default: 14). Set to 0 to keep
+   /// entries forever.
+   #[serde(default = "default_cache_ttl_days")]
+   pub cache_ttl_days: u32,
+
+   /// Override directory for the LLM response cache. Defaults to
+   /// `$XDG_CACHE_HOME/llm-git` (or `~/.cache/llm-git`).
+   #[serde(default)]
+   pub cache_dir: Option<String>,
+
    /// Loaded analysis prompt (not in config file)
    #[serde(skip)]
    pub analysis_prompt: String,
@@ -175,6 +190,14 @@ const fn default_gpg_sign() -> bool {
 
 const fn default_signoff() -> bool {
    false
+}
+
+const fn default_cache_enabled() -> bool {
+   true
+}
+
+const fn default_cache_ttl_days() -> u32 {
+   14
 }
 
 const fn default_changelog_enabled() -> bool {
@@ -290,6 +313,9 @@ impl Default for CommitConfig {
          changelog_enabled: default_changelog_enabled(),
          map_reduce_enabled: default_map_reduce_enabled(),
          map_reduce_threshold: default_map_reduce_threshold(),
+         cache_enabled: default_cache_enabled(),
+         cache_ttl_days: default_cache_ttl_days(),
+         cache_dir: None,
          analysis_prompt: String::new(),
          summary_prompt: String::new(),
       }
@@ -359,6 +385,24 @@ impl CommitConfig {
             "0" | "false" | "no" | "off" => config.disable_git_background_features = false,
             _ => {},
          }
+      }
+
+      if let Ok(value) = std::env::var("LLM_GIT_CACHE_DISABLED") {
+         let trimmed = value.trim().to_ascii_lowercase();
+         if matches!(trimmed.as_str(), "1" | "true" | "yes" | "on") {
+            config.cache_enabled = false;
+         }
+      }
+
+      if let Ok(value) = std::env::var("LLM_GIT_CACHE_TTL_DAYS")
+         && let Ok(days) = value.trim().parse::<u32>()
+      {
+         config.cache_ttl_days = days;
+      }
+
+      if let Ok(value) = std::env::var("LLM_GIT_CACHE_DIR") {
+         let trimmed = value.trim();
+         config.cache_dir = (!trimmed.is_empty()).then(|| trimmed.to_string());
       }
    }
 
