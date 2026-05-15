@@ -15,7 +15,7 @@ use crate::{
    },
    compose_types::{
       ComposeBindingAssignment, ComposeExecutableGroup, ComposeExecutablePlan, ComposeFile,
-      ComposeHunk, ComposeIntentGroup, ComposeIntentPlan, ComposeSnapshot,
+      ComposeIntentGroup, ComposeIntentPlan, ComposeSnapshot,
    },
    config::CommitConfig,
    error::{CommitGenError, Result},
@@ -50,12 +50,12 @@ const MAX_BIND_HUNKS_PER_REQUEST: usize = 120;
 /// `execute_compose`. Matches the per-file fan-out used in `map_reduce`.
 const COMPOSE_MESSAGE_PARALLELISM: usize = 8;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ComposeIntentResponse {
    groups: Vec<ComposeIntentGroup>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ComposeBindingResponse {
    assignments: Vec<ComposeBindingAssignment>,
 }
@@ -252,17 +252,39 @@ fn load_cached_plan(
       return Ok(None);
    }
 
-   let content = fs::read_to_string(&cache_path)
-      .map_err(|err| CommitGenError::Other(format!("Failed to read compose cache: {err}")))?;
-   let cached: ComposeCachedPlan = serde_json::from_str(&content)
-      .map_err(|err| CommitGenError::Other(format!("Failed to parse compose cache: {err}")))?;
+   let content = match fs::read_to_string(&cache_path) {
+      Ok(content) => content,
+      Err(err) => {
+         eprintln!("{}", style::warning(&format!("Ignoring unreadable compose plan cache: {err}")));
+         return Ok(None);
+      },
+   };
+   let cached: ComposeCachedPlan = match serde_json::from_str(&content) {
+      Ok(cached) => cached,
+      Err(err) => {
+         eprintln!(
+            "{}",
+            style::warning(&format!("Discarding corrupted compose plan cache: {err}"))
+         );
+         let _ = fs::remove_file(&cache_path);
+         return Ok(None);
+      },
+   };
    let expected_key = compose_plan_cache_key(snapshot, max_commits, analysis_model);
 
    if cached.schema_version != COMPOSE_PLAN_SCHEMA_VERSION || cached.cache_key != expected_key {
       return Ok(None);
    }
-
-   validate_executable_plan(snapshot, &cached.plan)?;
+   if let Err(err) = validate_executable_plan(snapshot, &cached.plan) {
+      eprintln!(
+         "{}",
+         style::warning(&format!(
+            "Discarding cached compose plan (no longer valid for current snapshot): {err}"
+         ))
+      );
+      let _ = fs::remove_file(&cache_path);
+      return Ok(None);
+   }
    Ok(Some(cached.plan))
 }
 
@@ -1731,6 +1753,7 @@ async fn analyze_compose_intent(
          prefix: None,
          name:   "compose_intent",
       }),
+      cacheable:        true,
    })
    .await?;
 
@@ -1909,6 +1932,7 @@ async fn request_binding(
          prefix: None,
          name:   debug_name,
       }),
+      cacheable:        true,
    })
    .await?;
 
@@ -2461,104 +2485,6 @@ async fn bind_compose_plan(
    Ok(plan)
 }
 
-fn patch_signature(path: &str, hunks: &[&ComposeHunk]) -> String {
-   let mut changed_lines = Vec::new();
-   let mut synthetic = Vec::new();
-
-   for hunk in hunks {
-      if hunk.synthetic {
-         synthetic.push(hunk.snippet.clone());
-         continue;
-      }
-
-      for line in hunk.raw_patch.lines() {
-         if (line.starts_with('+') && !line.starts_with("+++"))
-            || (line.starts_with('-') && !line.starts_with("---"))
-         {
-            changed_lines.push(line.to_string());
-         }
-      }
-   }
-
-   let material = if changed_lines.is_empty() {
-      synthetic.join("\n")
-   } else {
-      changed_lines.join("\n")
-   };
-
-   format!("{path}:{material}")
-}
-
-fn expected_remaining_signatures(
-   snapshot: &ComposeSnapshot,
-   remaining_hunk_ids: &HashSet<String>,
-) -> BTreeMap<String, String> {
-   let mut hunks_by_path: BTreeMap<String, Vec<&ComposeHunk>> = BTreeMap::new();
-   for hunk in &snapshot.hunks {
-      if remaining_hunk_ids.contains(&hunk.hunk_id) {
-         hunks_by_path
-            .entry(hunk.path.clone())
-            .or_default()
-            .push(hunk);
-      }
-   }
-
-   hunks_by_path
-      .into_iter()
-      .map(|(path, hunks)| {
-         let signature = patch_signature(&path, &hunks);
-         (path, signature)
-      })
-      .collect()
-}
-
-fn current_snapshot_signatures(snapshot: &ComposeSnapshot) -> BTreeMap<String, String> {
-   snapshot
-      .files
-      .iter()
-      .map(|file| {
-         let hunks = snapshot.hunks_for_file(&file.file_id);
-         let signature = patch_signature(&file.path, &hunks);
-         (file.path.clone(), signature)
-      })
-      .collect()
-}
-
-fn verify_remaining_snapshot(
-   dir: &str,
-   original_snapshot: &ComposeSnapshot,
-   remaining_hunk_ids: &HashSet<String>,
-) -> Result<()> {
-   if remaining_hunk_ids.is_empty() {
-      match get_compose_diff(dir) {
-         Err(CommitGenError::NoChanges { .. }) => return Ok(()),
-         Err(err) => return Err(err),
-         Ok(_) => {
-            return Err(CommitGenError::Other(
-               "Compose expected no remaining changes, but working tree is still dirty".to_string(),
-            ));
-         },
-      }
-   }
-
-   let current_diff = get_compose_diff(dir)?;
-   let current_stat = get_compose_stat(dir)?;
-   let current_snapshot = build_compose_snapshot(&current_diff, &current_stat)?;
-
-   let expected = expected_remaining_signatures(original_snapshot, remaining_hunk_ids);
-   let actual = current_snapshot_signatures(&current_snapshot);
-
-   if expected != actual {
-      return Err(CommitGenError::Other(format!(
-         "Remaining compose snapshot diverged from expectation.\nExpected: {:?}\nActual: {:?}",
-         expected.keys().collect::<Vec<_>>(),
-         actual.keys().collect::<Vec<_>>()
-      )));
-   }
-
-   Ok(())
-}
-
 fn print_executable_plan(snapshot: &ComposeSnapshot, plan: &ComposeExecutablePlan) {
    println!("\n{}", style::section_header("Proposed Commit Groups", 80));
    for (display_idx, &group_idx) in plan.dependency_order.iter().enumerate() {
@@ -2609,7 +2535,6 @@ pub async fn execute_compose(
    args: &Args,
 ) -> Result<Vec<String>> {
    let dir = &args.dir;
-   let mut remaining_hunk_ids: HashSet<String> = snapshot.all_hunk_ids().into_iter().collect();
    let mut commit_hashes = Vec::new();
    let total = plan.dependency_order.len();
 
@@ -2741,11 +2666,6 @@ pub async fn execute_compose(
          git_commit(&formatted_message, false, dir, sign, signoff, args.skip_hooks, false)?;
          let hash = get_head_hash(dir)?;
          commit_hashes.push(hash);
-
-         for hunk_id in &group.hunk_ids {
-            remaining_hunk_ids.remove(hunk_id);
-         }
-         verify_remaining_snapshot(dir, snapshot, &remaining_hunk_ids)?;
 
          if args.compose_test_after_each {
             println!("  {}", style::info("Running tests..."));

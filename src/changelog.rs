@@ -11,7 +11,7 @@ use std::{
    path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
    api::{OneShotSpec, run_oneshot, strict_json_schema},
@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Response from the changelog generation LLM call
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ChangelogResponse {
    entries: HashMap<String, Vec<String>>,
 }
@@ -298,6 +298,7 @@ async fn call_changelog_api(
       tool_description: "Generate changelog entries grouped by category",
       schema:           &changelog_schema,
       debug:            None,
+      cacheable:        true,
    })
    .await?;
 

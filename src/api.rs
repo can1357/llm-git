@@ -267,6 +267,7 @@ pub enum OneShotSource {
    ToolCall,
    OutputJsonParse,
    PlainTextContent,
+   Cache,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,6 +291,9 @@ pub struct OneShotSpec<'a> {
    pub tool_description: &'a str,
    pub schema:           &'a serde_json::Value,
    pub debug:            Option<OneShotDebug<'a>>,
+   /// Look up / store the parsed response in the global LLM cache. Cache
+   /// entries are keyed on a hash of the spec fields plus prompts/schema.
+   pub cacheable:        bool,
 }
 
 #[derive(Debug)]
@@ -1012,9 +1016,24 @@ pub async fn run_oneshot<T>(
    spec: &OneShotSpec<'_>,
 ) -> Result<OneShotResponse<T>>
 where
-   T: DeserializeOwned,
+   T: DeserializeOwned + Serialize,
 {
-   retry_api_call(config, async move || {
+   let cache_entry = build_cache_entry(config, spec);
+   if let Some((cache, key)) = cache_entry.as_ref()
+      && let Some(stored) = cache.get(key)
+      && let Ok(output) = serde_json::from_str::<T>(&stored)
+   {
+      return Ok(OneShotResponse {
+         output,
+         source: OneShotSource::Cache,
+         text_content: None,
+         stop_reason: None,
+      });
+   }
+   // On parse failure (stale schema / wrong T) we silently fall through and
+   // re-fetch — the next successful response will overwrite the stale entry.
+
+   let response: OneShotResponse<T> = retry_api_call(config, async move || {
       let mode = config.resolved_api_mode(spec.model);
       let structured_attempt = if should_attempt_structured_output(config, spec.model) {
          begin_structured_output_attempt(config, spec.model, mode)
@@ -1125,7 +1144,43 @@ where
          OneShotParseOutcome::Fatal(err) => Err(err),
       }
    })
-   .await
+   .await?;
+
+   if let Some((cache, key)) = cache_entry.as_ref()
+      && let Ok(payload) = serde_json::to_string(&response.output)
+   {
+      cache.put(key, spec.model, spec.operation, &payload);
+   }
+
+   Ok(response)
+}
+
+fn build_cache_entry(
+   config: &CommitConfig,
+   spec: &OneShotSpec<'_>,
+) -> Option<(std::sync::Arc<crate::llm_cache::LlmCache>, String)> {
+   if !spec.cacheable {
+      return None;
+   }
+   let cache = crate::llm_cache::global()?;
+   let mode = config.resolved_api_mode(spec.model);
+   let api_mode = match mode {
+      ResolvedApiMode::ChatCompletions => "chat-completions",
+      ResolvedApiMode::AnthropicMessages => "anthropic-messages",
+   };
+   let key = crate::llm_cache::compute_key(&crate::llm_cache::CacheMaterial {
+      operation: spec.operation,
+      model: spec.model,
+      tool_name: spec.tool_name,
+      tool_description: spec.tool_description,
+      system_prompt: spec.system_prompt,
+      user_prompt: spec.user_prompt,
+      schema: spec.schema,
+      temperature: spec.temperature,
+      max_tokens: spec.max_tokens,
+      api_mode,
+   });
+   Some((cache, key))
 }
 
 #[derive(Debug, Serialize)]
@@ -1442,6 +1497,7 @@ pub async fn generate_conventional_analysis<'a>(
          prefix: ctx.debug_prefix,
          name:   "analysis",
       }),
+      cacheable:        true,
    })
    .await?;
 
@@ -1645,6 +1701,7 @@ pub async fn generate_summary_from_analysis<'a>(
             prefix: debug_prefix,
             name:   "summary",
          }),
+         cacheable:        true,
       })
       .await;
 
@@ -1927,6 +1984,7 @@ pub async fn generate_fast_commit(
       tool_description: "Generate a conventional commit from the given diff",
       schema:           &fast_schema,
       debug:            Some(OneShotDebug { dir: debug_dir, prefix: None, name: "fast" }),
+      cacheable:        true,
    })
    .await?;
 

@@ -255,6 +255,7 @@ async fn map_single_file(
       tool_description: "Extract observations from a single file's changes",
       schema:           &observation_schema,
       debug:            None,
+      cacheable:        true,
    })
    .await?;
 
@@ -321,6 +322,7 @@ pub async fn reduce_phase(
                          details, and metadata",
       schema:           &analysis_schema,
       debug:            None,
+      cacheable:        true,
    })
    .await?;
 
@@ -371,7 +373,7 @@ fn parse_observations_from_text(text: &str) -> Vec<String> {
       .collect()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct FileObservationResponse {
    #[serde(deserialize_with = "deserialize_observations")]
    observations: Vec<String>,
