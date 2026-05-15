@@ -26,10 +26,10 @@ struct ParsedFile {
    is_binary:    bool,
 }
 
-/// Apply patch to staging area.
-pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
+/// Run `git apply` with a patch supplied on stdin.
+fn run_git_apply(patch: &str, args: &[&str], dir: &str) -> Result<std::process::Output> {
    let mut child = git_command()
-      .args(["apply", "--cached", "--3way", "--recount"])
+      .args(args)
       .current_dir(dir)
       .stdin(std::process::Stdio::piped())
       .stdout(std::process::Stdio::piped())
@@ -45,18 +45,34 @@ pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
          .map_err(|e| CommitGenError::git(format!("Failed to write patch: {e}")))?;
    }
 
-   let output = child
+   child
       .wait_with_output()
-      .map_err(|e| CommitGenError::git(format!("Failed to wait for git apply: {e}")))?;
+      .map_err(|e| CommitGenError::git(format!("Failed to wait for git apply: {e}")))
+}
 
-   if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::git(format!(
-         "git apply --cached --3way --recount failed: {stderr}"
-      )));
+fn patch_is_already_applied_to_index(patch: &str, dir: &str) -> Result<bool> {
+   let output =
+      run_git_apply(patch, &["apply", "--cached", "--reverse", "--check", "--recount"], dir)?;
+   Ok(output.status.success())
+}
+
+/// Apply patch to staging area.
+pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<()> {
+   if patch.trim().is_empty() {
+      return Ok(());
    }
 
-   Ok(())
+   let output = run_git_apply(patch, &["apply", "--cached", "--3way", "--recount"], dir)?;
+   if output.status.success() {
+      return Ok(());
+   }
+
+   if patch_is_already_applied_to_index(patch, dir)? {
+      return Ok(());
+   }
+
+   let stderr = String::from_utf8_lossy(&output.stderr);
+   Err(CommitGenError::git(format!("git apply --cached --3way --recount failed: {stderr}")))
 }
 
 /// Stage specific files.
@@ -422,24 +438,13 @@ pub fn stage_executable_group(
          .push(hunk);
    }
 
-   let mut full_files = Vec::new();
-   let mut partial_patch = String::new();
+   let mut fallback_files = Vec::new();
+   let mut patch = String::new();
 
    for file in &snapshot.files {
       let Some(selected_for_file) = selected_by_file.get(&file.file_id) else {
          continue;
       };
-
-      let selected_ids: HashSet<&str> = selected_for_file
-         .iter()
-         .map(|hunk| hunk.hunk_id.as_str())
-         .collect();
-      let file_hunk_ids: HashSet<&str> = file.hunk_ids.iter().map(String::as_str).collect();
-
-      if selected_ids == file_hunk_ids {
-         full_files.push(file.path.clone());
-         continue;
-      }
 
       let ordered_hunks: Vec<&ComposeHunk> = file
          .hunk_ids
@@ -459,18 +464,34 @@ pub fn stage_executable_group(
          )));
       }
 
-      partial_patch.push_str(&create_patch_for_file(file, &ordered_hunks));
+      if file.synthetic_only || file.is_binary {
+         let selected_ids: HashSet<&str> = selected_for_file
+            .iter()
+            .map(|hunk| hunk.hunk_id.as_str())
+            .collect();
+         let file_hunk_ids: HashSet<&str> = file.hunk_ids.iter().map(String::as_str).collect();
+
+         if selected_ids == file_hunk_ids {
+            fallback_files.push(file.path.clone());
+            continue;
+         }
+
+         return Err(CommitGenError::Other(format!(
+            "Group {} cannot partially stage unpatchable file {}",
+            group.group_id, file.path
+         )));
+      }
+
+      patch.push_str(&create_patch_for_file(file, &ordered_hunks));
    }
 
-   full_files.sort();
-   full_files.dedup();
-   if !full_files.is_empty() {
-      stage_files(&full_files, dir)?;
+   fallback_files.sort();
+   fallback_files.dedup();
+   if !fallback_files.is_empty() {
+      stage_files(&fallback_files, dir)?;
    }
 
-   if !partial_patch.is_empty() {
-      apply_patch_to_index(&partial_patch, dir)?;
-   }
+   apply_patch_to_index(&patch, dir)?;
 
    Ok(())
 }
@@ -732,5 +753,70 @@ index 3333333..4444444 100644
       let staged = staged_diff(&dir);
       assert!(staged.contains("beta changed"));
       assert!(!staged.contains("alpha changed"));
+   }
+
+   #[test]
+   fn test_stage_executable_group_noops_when_snapshot_patch_already_applied() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_stage_only());
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "all hunks".to_string(),
+         dependencies: vec![],
+         hunk_ids:     source_file.hunk_ids.clone(),
+      };
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+      run_git(&dir, &["commit", "-m", "applied"]);
+
+      stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+      assert!(staged_diff(&dir).trim().is_empty());
+   }
+
+   #[test]
+   fn test_stage_executable_group_reuses_snapshot_patch_not_worktree_contents() {
+      let dir = init_repo();
+      write_file(&dir, "README.md", "initial\n");
+      commit_all(&dir, "initial");
+      write_file(&dir, "notes.txt", "planned\n");
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let notes_file = snapshot.file_by_path("notes.txt").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("docs").unwrap(),
+         scope:        None,
+         file_ids:     vec![notes_file.file_id.clone()],
+         rationale:    "new notes".to_string(),
+         dependencies: vec![],
+         hunk_ids:     notes_file.hunk_ids.clone(),
+      };
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+      let planned_staged = staged_diff(&dir);
+      assert!(planned_staged.contains("+planned"));
+      assert!(!planned_staged.contains("local edit"));
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      write_file(&dir, "notes.txt", "planned\nlocal edit\n");
+      stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+      let reused_staged = staged_diff(&dir);
+
+      assert_eq!(reused_staged, planned_staged);
+      assert!(!reused_staged.contains("local edit"));
    }
 }
