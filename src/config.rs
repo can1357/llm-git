@@ -322,6 +322,45 @@ impl Default for CommitConfig {
    }
 }
 
+fn expand_tilde(raw: &str) -> std::path::PathBuf {
+   if let Some(rest) = raw.strip_prefix("~/")
+      && let Ok(home) = std::env::var("HOME")
+   {
+      return Path::new(&home).join(rest);
+   }
+   PathBuf::from(raw)
+}
+
+/// Resolve a `!`-prefixed config value (already stripped of `!`).
+///
+/// Special-cases `cat <path>` to read the file directly without spawning a
+/// subprocess — the overwhelmingly common case for keys-from-file. Everything
+/// else runs through `/bin/sh -c` and captures stdout, mirroring omp's
+/// `resolveConfigValue`.
+fn resolve_command_value(cmd: &str) -> Result<String> {
+   let trimmed = cmd.trim();
+   if let Some(rest) = trimmed.strip_prefix("cat ") {
+      let path = expand_tilde(rest.trim().trim_matches(|c| c == '\'' || c == '"'));
+      let contents = std::fs::read_to_string(&path).map_err(|e| {
+         CommitGenError::Other(format!("api_key `!cat` failed to read {}: {e}", path.display()))
+      })?;
+      return Ok(contents.trim().to_string());
+   }
+   let output = std::process::Command::new("sh")
+      .arg("-c")
+      .arg(trimmed)
+      .output()
+      .map_err(|e| CommitGenError::Other(format!("api_key `!{trimmed}` failed to spawn: {e}")))?;
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::Other(format!(
+         "api_key `!{trimmed}` exited with status {:?}: {stderr}",
+         output.status.code()
+      )));
+   }
+   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 impl CommitConfig {
    pub fn resolved_api_mode(&self, _model_name: &str) -> ResolvedApiMode {
       match self.api_mode {
@@ -360,6 +399,17 @@ impl CommitConfig {
       // Apply environment variable overrides
       Self::apply_env_overrides(&mut config);
       config.normalize_models();
+
+      // Resolve `!command` / `!cat <path>` syntax in `api_key`. Mirrors omp's
+      // resolve-config-value behavior so users can pull credentials from a
+      // helper file (e.g. `api_key = "!cat ~/.omp/auth-gateway.token"`)
+      // without pasting the secret into config.toml verbatim.
+      if let Some(raw) = config.api_key.as_deref()
+         && let Some(rest) = raw.strip_prefix('!')
+      {
+         let resolved = resolve_command_value(rest.trim())?;
+         config.api_key = Some(resolved);
+      }
 
       config.load_prompts()?;
       Ok(config)
