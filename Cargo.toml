@@ -40,7 +40,7 @@ supports-color = "3"
 terminal_size = "0.4"
 tiktoken-rs = "0.11"
 miette = { version = "7.6.0", features = ["fancy"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 blake3 = "1"
 
 [build-dependencies]
