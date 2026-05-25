@@ -83,16 +83,23 @@ fn append_untracked_diff(
          let file_diff = String::from_utf8_lossy(&file_diff_output.stdout);
          let lines: Vec<&str> = file_diff.lines().collect();
          if lines.len() >= 2 {
+            let mode = lines
+               .iter()
+               .find_map(|line| line.strip_prefix("new file mode "))
+               .unwrap_or("100644");
             use std::fmt::Write;
             if !base_diff.is_empty() {
                base_diff.push('\n');
             }
             writeln!(base_diff, "diff --git a/{file} b/{file}").unwrap();
-            base_diff.push_str("new file mode 100644\n");
+            writeln!(base_diff, "new file mode {mode}").unwrap();
             base_diff.push_str("index 0000000..0000000\n");
             base_diff.push_str("--- /dev/null\n");
             writeln!(base_diff, "+++ b/{file}").unwrap();
-            for line in lines.iter().skip(2) {
+            for line in lines
+               .iter()
+               .skip_while(|line| !line.starts_with("@@") && !line.starts_with("Binary files "))
+            {
                base_diff.push_str(line);
                base_diff.push('\n');
             }

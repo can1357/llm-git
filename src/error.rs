@@ -27,6 +27,24 @@ pub enum CommitGenError {
    #[diagnostic(code(lgit::api))]
    ApiError { status: u16, body: String },
 
+   #[error(
+      "API request exceeded the model context window during {operation} ({model}, HTTP {status}): \
+       {body}"
+   )]
+   #[diagnostic(
+      code(lgit::api::context_length),
+      help(
+         "Reduce or split the diff, enable map-reduce, or use a model with a larger context \
+          window."
+      )
+   )]
+   ApiContextLengthExceeded {
+      operation: String,
+      model:     String,
+      status:    u16,
+      body:      String,
+   },
+
    #[error("API call failed after {retries} retries")]
    #[diagnostic(
       code(lgit::api::retry_exhausted),
@@ -39,6 +57,15 @@ pub enum CommitGenError {
       retries: u32,
       #[source]
       source:  Box<Self>,
+   },
+
+   #[error("Failed to generate compose commit message for {group_id} ({files}): {source}")]
+   #[diagnostic(code(lgit::compose::message))]
+   ComposeMessageError {
+      group_id: String,
+      files:    String,
+      #[source]
+      source:   Box<Self>,
    },
 
    #[error("Validation failed: {0}")]

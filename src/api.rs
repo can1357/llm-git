@@ -570,6 +570,21 @@ fn should_fallback_to_tool(status: reqwest::StatusCode, body: &str) -> bool {
    .any(|needle| lower.contains(needle))
 }
 
+fn is_context_length_error(body: &str) -> bool {
+   let lower = body.to_lowercase();
+   [
+      "context_length_exceeded",
+      "context window",
+      "maximum context length",
+      "exceeds the context",
+      "input exceeds",
+      "prompt is too long",
+      "too many tokens",
+   ]
+   .iter()
+   .any(|needle| lower.contains(needle))
+}
+
 async fn send_oneshot_request(
    config: &CommitConfig,
    spec: &OneShotSpec<'_>,
@@ -627,6 +642,15 @@ async fn send_oneshot_request(
          let (status, response_text) =
             timed_send(request_builder.json(&request), spec.operation, spec.model).await?;
          save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
+
+         if !status.is_success() && is_context_length_error(&response_text) {
+            return Err(CommitGenError::ApiContextLengthExceeded {
+               operation: spec.operation.to_string(),
+               model:     spec.model.to_string(),
+               status:    status.as_u16(),
+               body:      response_text,
+            });
+         }
 
          if status.is_server_error() {
             if kind == OneShotRequestKind::StructuredOutput
@@ -722,6 +746,15 @@ async fn send_oneshot_request(
          let (status, response_text) =
             timed_send(request_builder.json(&request), spec.operation, spec.model).await?;
          save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
+
+         if !status.is_success() && is_context_length_error(&response_text) {
+            return Err(CommitGenError::ApiContextLengthExceeded {
+               operation: spec.operation.to_string(),
+               model:     spec.model.to_string(),
+               status:    status.as_u16(),
+               body:      response_text,
+            });
+         }
 
          if status.is_server_error() {
             if kind == OneShotRequestKind::StructuredOutput
@@ -1044,9 +1077,19 @@ where
       let structured_result = match structured_attempt {
          StructuredOutputAttempt::SkipUnsupported => None,
          StructuredOutputAttempt::Probe | StructuredOutputAttempt::Supported => {
-            match send_oneshot_request(config, spec, mode, OneShotRequestKind::StructuredOutput)
-               .await?
-            {
+            let request_result =
+               send_oneshot_request(config, spec, mode, OneShotRequestKind::StructuredOutput).await;
+            let request_outcome = match request_result {
+               Ok(outcome) => outcome,
+               Err(err) => {
+                  if structured_attempt == StructuredOutputAttempt::Probe {
+                     let _ = update_structured_output_capability(config, spec.model, mode, None);
+                  }
+                  return Err(err);
+               },
+            };
+
+            match request_outcome {
                OneShotRequestOutcome::Response(response_text) => {
                   if structured_attempt == StructuredOutputAttempt::Probe {
                      let _ = update_structured_output_capability(
@@ -1326,6 +1369,10 @@ struct FastCommitOutput {
    #[serde(default)]
    details:     Vec<String>,
 }
+
+const fn should_retry_error(error: &CommitGenError) -> bool {
+   !matches!(error, CommitGenError::ApiContextLengthExceeded { .. })
+}
 /// Retry an API call with exponential backoff
 pub async fn retry_api_call<T>(
    config: &CommitConfig,
@@ -1359,6 +1406,10 @@ pub async fn retry_api_call<T>(
             });
          },
          Err(e) => {
+            if !should_retry_error(&e) {
+               return Err(e);
+            }
+
             if attempt < config.max_retries {
                let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
                eprintln!(
@@ -2025,6 +2076,97 @@ mod tests {
       assert_eq!(response_format["json_schema"]["name"], "commit_summary");
       assert_eq!(response_format["json_schema"]["strict"], serde_json::json!(true));
       assert_eq!(response_format["json_schema"]["schema"], schema);
+   }
+
+   #[test]
+   fn test_context_length_error_detection() {
+      assert!(is_context_length_error(
+         r#"{"error":{"message":"Your input exceeds the context window of this model. (code=context_length_exceeded)"}}"#,
+      ));
+      assert!(is_context_length_error("This model's maximum context length is 128000 tokens.",));
+      assert!(!is_context_length_error("upstream temporarily overloaded"));
+   }
+
+   #[tokio::test]
+   async fn test_retry_api_call_does_not_retry_context_length_errors() {
+      use std::sync::atomic::{AtomicUsize, Ordering};
+
+      let config = CommitConfig { max_retries: 3, initial_backoff_ms: 1, ..Default::default() };
+      let attempts = AtomicUsize::new(0);
+
+      let result = retry_api_call::<()>(&config, async || {
+         attempts.fetch_add(1, Ordering::SeqCst);
+         Err::<(bool, Option<()>), CommitGenError>(CommitGenError::ApiContextLengthExceeded {
+            operation: "analysis".to_string(),
+            model:     "codex".to_string(),
+            status:    502,
+            body:      "context_length_exceeded".to_string(),
+         })
+      })
+      .await;
+
+      assert!(matches!(result, Err(CommitGenError::ApiContextLengthExceeded { .. })));
+      assert_eq!(attempts.load(Ordering::SeqCst), 1);
+   }
+
+   #[tokio::test]
+   async fn test_context_length_error_clears_structured_output_probe() {
+      let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+      let addr = listener.local_addr().unwrap();
+      let server = std::thread::spawn(move || {
+         use std::io::{Read, Write};
+
+         let (mut stream, _) = listener.accept().unwrap();
+         let mut request = [0_u8; 4096];
+         let _ = stream.read(&mut request);
+         let body = r#"{"error":{"message":"context_length_exceeded"}}"#;
+         let response = format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: \
+             {}\r\n\r\n{}",
+            body.len(),
+            body
+         );
+         stream.write_all(response.as_bytes()).unwrap();
+      });
+
+      let model = "gpt-4o-mini-probe-clear-test";
+      let config = CommitConfig {
+         api_base_url: format!("http://{addr}"),
+         max_retries: 3,
+         initial_backoff_ms: 1,
+         ..Default::default()
+      };
+      let schema =
+         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
+
+      let result = run_oneshot::<SummaryOutput>(&config, &OneShotSpec {
+         operation: "summary",
+         model,
+         max_tokens: 32,
+         temperature: 0.0,
+         prompt_family: "summary",
+         prompt_variant: "default",
+         system_prompt: "Summarize.",
+         user_prompt: "A large diff.",
+         tool_name: "create_commit_summary",
+         tool_description: "Create a commit summary",
+         schema: &schema,
+         debug: None,
+         cacheable: false,
+      })
+      .await;
+
+      server.join().unwrap();
+      assert!(matches!(result, Err(CommitGenError::ApiContextLengthExceeded { .. })));
+
+      let mode = config.resolved_api_mode(model);
+      let key = structured_output_cache_key(&config, model, mode);
+      assert!(
+         !STRUCTURED_OUTPUT_CAPABILITIES
+            .states
+            .lock()
+            .contains_key(&key)
+      );
    }
 
    #[test]

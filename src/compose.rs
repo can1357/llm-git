@@ -1,4 +1,5 @@
 use std::{
+   borrow::Cow,
    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
    fmt::Write,
    fs,
@@ -18,9 +19,10 @@ use crate::{
       ComposeIntentGroup, ComposeIntentPlan, ComposeSnapshot,
    },
    config::CommitConfig,
+   diff::smart_truncate_diff,
    error::{CommitGenError, Result},
    git::{get_compose_diff, get_compose_stat, get_git_dir, get_head_hash, git_commit},
-   map_reduce::{FileObservation, observe_diff_files, should_use_map_reduce},
+   map_reduce::{FileObservation, observe_diff_files, run_map_reduce, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
    patch::{
       StageResult, build_compose_snapshot, create_executable_group_patch, reset_staging,
@@ -28,7 +30,7 @@ use crate::{
    },
    style, templates,
    tokens::{TokenCounter, create_token_counter},
-   types::{Args, CommitType, ConventionalCommit, Scope},
+   types::{Args, CommitSummary, CommitType, ConventionalAnalysis, ConventionalCommit, Scope},
    validation::validate_commit_message,
 };
 
@@ -49,6 +51,37 @@ const MAX_BIND_HUNKS_PER_REQUEST: usize = 120;
 /// Maximum number of commit messages to generate concurrently during
 /// `execute_compose`. Matches the per-file fan-out used in `map_reduce`.
 const COMPOSE_MESSAGE_PARALLELISM: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposeAnalysisStrategy {
+   Direct,
+   SmartTruncate,
+   MapReduce,
+}
+
+fn compose_analysis_strategy(
+   diff: &str,
+   config: &CommitConfig,
+   counter: &TokenCounter,
+) -> ComposeAnalysisStrategy {
+   if should_use_map_reduce(diff, config, counter) {
+      return ComposeAnalysisStrategy::MapReduce;
+   }
+
+   let diff_tokens = counter.count_sync(diff);
+   if diff.len() > config.max_diff_length || diff_tokens > config.max_diff_tokens {
+      return ComposeAnalysisStrategy::SmartTruncate;
+   }
+
+   ComposeAnalysisStrategy::Direct
+}
+
+fn compose_truncation_length(config: &CommitConfig) -> usize {
+   config
+      .max_diff_length
+      .min(config.max_diff_tokens.saturating_mul(4))
+      .max(1)
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ComposeIntentResponse {
@@ -2528,6 +2561,81 @@ fn print_executable_plan(snapshot: &ComposeSnapshot, plan: &ComposeExecutablePla
    }
 }
 
+async fn generate_compose_group_analysis(
+   stat: &str,
+   diff: &str,
+   group: &ComposeExecutableGroup,
+   config: &CommitConfig,
+   args: &Args,
+   debug_prefix: &str,
+   counter: &TokenCounter,
+) -> Result<ConventionalAnalysis> {
+   match compose_analysis_strategy(diff, config, counter) {
+      ComposeAnalysisStrategy::MapReduce => {
+         println!(
+            "  {}",
+            style::info(&format!(
+               "Using map-reduce for {} commit analysis (diff exceeds token budget)",
+               group.group_id
+            ))
+         );
+         run_map_reduce(diff, stat, "", &config.analysis_model, config, counter).await
+      },
+      strategy => {
+         let analysis_diff = if strategy == ComposeAnalysisStrategy::SmartTruncate {
+            eprintln!(
+               "  {}",
+               style::warning(&format!(
+                  "Truncating diff for {} commit analysis (diff exceeds configured budget)",
+                  group.group_id
+               ))
+            );
+            Cow::Owned(smart_truncate_diff(
+               diff,
+               compose_truncation_length(config),
+               config,
+               counter,
+            ))
+         } else {
+            Cow::Borrowed(diff)
+         };
+
+         let ctx = AnalysisContext {
+            user_context:    Some(&group.rationale),
+            recent_commits:  None,
+            common_scopes:   None,
+            project_context: None,
+            debug_output:    args.debug_output.as_deref(),
+            debug_prefix:    Some(debug_prefix),
+         };
+
+         generate_conventional_analysis(
+            stat,
+            analysis_diff.as_ref(),
+            &config.analysis_model,
+            "",
+            &ctx,
+            config,
+         )
+         .await
+      },
+   }
+}
+
+fn compose_group_file_list(snapshot: &ComposeSnapshot, group: &ComposeExecutableGroup) -> String {
+   let files: Vec<&str> = group
+      .file_ids
+      .iter()
+      .filter_map(|file_id| snapshot.file_by_id(file_id).map(|file| file.path.as_str()))
+      .collect();
+
+   if files.is_empty() {
+      "no files resolved".to_string()
+   } else {
+      files.join(", ")
+   }
+}
+
 pub async fn execute_compose(
    snapshot: &ComposeSnapshot,
    plan: &ComposeExecutablePlan,
@@ -2566,43 +2674,47 @@ pub async fn execute_compose(
       ))
    );
 
-   let prepared_messages: Vec<(Vec<String>, crate::types::CommitSummary)> =
+   let token_counter = create_token_counter(config);
+   let prepared_messages: Vec<(Vec<String>, CommitSummary)> =
       stream::iter(plan.dependency_order.iter().enumerate())
          .map(|(idx, &group_idx)| {
             let group = &plan.groups[group_idx];
             let (diff, stat) = &group_diff_stats[idx];
             let debug_prefix = format!("compose-{}", idx + 1);
+            let token_counter = &token_counter;
             async move {
-               let ctx = AnalysisContext {
-                  user_context:    Some(&group.rationale),
-                  recent_commits:  None,
-                  common_scopes:   None,
-                  project_context: None,
-                  debug_output:    args.debug_output.as_deref(),
-                  debug_prefix:    Some(&debug_prefix),
-               };
-               let analysis = generate_conventional_analysis(
-                  stat,
-                  diff,
-                  &config.analysis_model,
-                  "",
-                  &ctx,
-                  config,
-               )
-               .await?;
-               let body = analysis.body_texts();
-               let summary = generate_summary_from_analysis(
-                  stat,
-                  group.commit_type.as_str(),
-                  group.scope.as_ref().map(|scope| scope.as_str()),
-                  &body,
-                  Some(&group.rationale),
-                  config,
-                  args.debug_output.as_deref(),
-                  Some(&debug_prefix),
-               )
-               .await?;
-               Ok::<_, CommitGenError>((body, summary))
+               let result = async {
+                  let analysis = generate_compose_group_analysis(
+                     stat,
+                     diff,
+                     group,
+                     config,
+                     args,
+                     &debug_prefix,
+                     token_counter,
+                  )
+                  .await?;
+                  let body = analysis.body_texts();
+                  let summary = generate_summary_from_analysis(
+                     stat,
+                     group.commit_type.as_str(),
+                     group.scope.as_ref().map(|scope| scope.as_str()),
+                     &body,
+                     Some(&group.rationale),
+                     config,
+                     args.debug_output.as_deref(),
+                     Some(&debug_prefix),
+                  )
+                  .await?;
+                  Ok::<_, CommitGenError>((body, summary))
+               }
+               .await;
+
+               result.map_err(|source| CommitGenError::ComposeMessageError {
+                  group_id: group.group_id.clone(),
+                  files:    compose_group_file_list(snapshot, group),
+                  source:   Box::new(source),
+               })
             }
          })
          .buffered(COMPOSE_MESSAGE_PARALLELISM.min(total).max(1))
@@ -3365,6 +3477,61 @@ index 3333333..4444444 100644
 
       assert!(should_use_map_reduce(&snapshot.diff, &config, &counter));
       assert!(!should_collect_compose_observations(&snapshot, &config, &counter));
+   }
+
+   #[test]
+   fn test_compose_analysis_strategy_uses_map_reduce_for_multi_file_group_diff() {
+      let config = CommitConfig::default();
+      let counter = create_token_counter(&config);
+      let diff = [
+         "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-a\n+b",
+         "diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n-a\n+b",
+         "diff --git a/c.rs b/c.rs\n@@ -1 +1 @@\n-a\n+b",
+         "diff --git a/d.rs b/d.rs\n@@ -1 +1 @@\n-a\n+b",
+      ]
+      .join("\n");
+
+      assert_eq!(
+         compose_analysis_strategy(&diff, &config, &counter),
+         ComposeAnalysisStrategy::MapReduce
+      );
+   }
+
+   #[test]
+   fn test_compose_analysis_strategy_truncates_when_map_reduce_disabled() {
+      let config = CommitConfig {
+         map_reduce_enabled: false,
+         max_diff_tokens: 1,
+         max_diff_length: 10_000,
+         ..Default::default()
+      };
+      let counter = create_token_counter(&config);
+      assert_eq!(compose_truncation_length(&config), 4);
+
+      assert_eq!(
+         compose_analysis_strategy(
+            "diff --git a/models.json b/models.json\n+large",
+            &config,
+            &counter
+         ),
+         ComposeAnalysisStrategy::SmartTruncate
+      );
+   }
+
+   #[test]
+   fn test_compose_analysis_strategy_keeps_small_group_direct() {
+      let config = CommitConfig {
+         map_reduce_threshold: 1_000,
+         max_diff_tokens: 1_000,
+         max_diff_length: 10_000,
+         ..Default::default()
+      };
+      let counter = create_token_counter(&config);
+
+      assert_eq!(
+         compose_analysis_strategy("diff --git a/a.rs b/a.rs\n+a", &config, &counter),
+         ComposeAnalysisStrategy::Direct
+      );
    }
 
    #[test]

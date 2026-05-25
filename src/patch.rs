@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+   borrow::Cow,
+   collections::{BTreeMap, HashSet},
+};
 
 use crate::{
    compose_types::{ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot},
@@ -32,6 +35,20 @@ pub struct ComposeGroupPatch {
    pub stat:       String,
    apply_patch:    String,
    fallback_files: Vec<String>,
+   index_blobs:    Vec<IndexBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexBlob {
+   path:   String,
+   mode:   String,
+   object: IndexObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IndexObject {
+   BlobContents(String),
+   ExistingObject(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +137,98 @@ pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
    }
 
    Ok(())
+}
+
+fn hash_blob(contents: &str, path: &str, dir: &str) -> Result<String> {
+   let mut child = git_command()
+      .args(["hash-object", "-w", "--stdin"])
+      .current_dir(dir)
+      .stdin(std::process::Stdio::piped())
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::piped())
+      .spawn()
+      .map_err(|e| CommitGenError::git(format!("Failed to spawn git hash-object: {e}")))?;
+
+   {
+      let Some(mut stdin) = child.stdin.take() else {
+         return Err(CommitGenError::git("Failed to open git hash-object stdin".to_string()));
+      };
+
+      use std::io::Write;
+
+      stdin
+         .write_all(contents.as_bytes())
+         .map_err(|e| CommitGenError::git(format!("Failed to write blob for {path}: {e}")))?;
+   }
+
+   let output = child
+      .wait_with_output()
+      .map_err(|e| CommitGenError::git(format!("Failed to wait for git hash-object: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git hash-object failed for {path}: {stderr}")));
+   }
+
+   let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+   if oid.is_empty() {
+      return Err(CommitGenError::git(format!("git hash-object returned empty oid for {path}")));
+   }
+
+   Ok(oid)
+}
+
+fn index_blob_oid<'a>(blob: &'a IndexBlob, dir: &str) -> Result<Cow<'a, str>> {
+   match &blob.object {
+      IndexObject::BlobContents(contents) => Ok(Cow::Owned(hash_blob(contents, &blob.path, dir)?)),
+      IndexObject::ExistingObject(oid) => Ok(Cow::Borrowed(oid.as_str())),
+   }
+}
+
+fn index_entry_matches(path: &str, mode: &str, oid: &str, dir: &str) -> Result<bool> {
+   let output = git_command()
+      .args(["ls-files", "-s", "--"])
+      .arg(path)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to inspect index entry {path}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git ls-files failed for {path}: {stderr}")));
+   }
+
+   let stdout = String::from_utf8_lossy(&output.stdout);
+   let Some(line) = stdout.lines().next() else {
+      return Ok(false);
+   };
+   let mut parts = line.split_whitespace();
+   Ok(parts.next() == Some(mode) && parts.next() == Some(oid))
+}
+
+fn stage_index_blob(blob: &IndexBlob, dir: &str) -> Result<StageResult> {
+   let oid = index_blob_oid(blob, dir)?;
+   if index_entry_matches(&blob.path, &blob.mode, oid.as_ref(), dir)? {
+      return Ok(StageResult::AlreadyApplied);
+   }
+
+   let cacheinfo = format!("{},{},{}", blob.mode, oid, blob.path);
+   let output = git_command()
+      .args(["update-index", "--add", "--cacheinfo"])
+      .arg(cacheinfo)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to stage blob {}: {e}", blob.path)))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!(
+         "git update-index failed for {}: {stderr}",
+         blob.path
+      )));
+   }
+
+   Ok(StageResult::Staged)
 }
 
 /// Reset staging area.
@@ -220,10 +329,7 @@ fn build_hunk_snippet(lines: &[String], fallback: &str) -> String {
    let interesting: Vec<String> = lines
       .iter()
       .skip(1)
-      .filter(|line| {
-         (line.starts_with('+') && !line.starts_with("+++"))
-            || (line.starts_with('-') && !line.starts_with("---"))
-      })
+      .filter(|line| line.starts_with('+') || line.starts_with('-'))
       .take(3)
       .map(|line| truncate_snippet(line.trim_start_matches(['+', '-']), 80))
       .collect();
@@ -321,9 +427,9 @@ pub fn build_compose_snapshot(diff: &str, stat: &str) -> Result<ComposeSnapshot>
       }
 
       if let Some(hunk) = &mut current_hunk {
-         if line.starts_with('+') && !line.starts_with("+++") {
+         if line.starts_with('+') {
             file.additions += 1;
-         } else if line.starts_with('-') && !line.starts_with("---") {
+         } else if line.starts_with('-') {
             file.deletions += 1;
          }
 
@@ -494,9 +600,9 @@ fn count_hunk_changes(hunk: &ComposeHunk) -> (usize, usize) {
    let mut deletions = 0_usize;
 
    for line in hunk.raw_patch.lines() {
-      if line.starts_with('+') && !line.starts_with("+++") {
+      if line.starts_with('+') {
          additions += 1;
-      } else if line.starts_with('-') && !line.starts_with("---") {
+      } else if line.starts_with('-') {
          deletions += 1;
       }
    }
@@ -524,6 +630,106 @@ fn push_stat_line(
    writeln!(stat, " {path} | {change_count} {pluses}{minuses}").unwrap();
 }
 
+fn new_file_mode(file: &ComposeFile) -> Option<&str> {
+   file
+      .patch_header
+      .lines()
+      .find_map(|line| line.strip_prefix("new file mode ").map(str::trim))
+}
+
+fn validate_new_file_mode(file: &ComposeFile) -> Result<String> {
+   let mode = new_file_mode(file).unwrap_or("100644");
+   if matches!(mode, "100644" | "100755" | "120000" | "160000") {
+      Ok(mode.to_string())
+   } else {
+      Err(CommitGenError::Other(format!("Invalid new file mode {mode:?} for {}", file.path)))
+   }
+}
+
+fn materialize_new_file_contents(hunks: &[&ComposeHunk]) -> String {
+   let mut contents = String::new();
+   let mut last_emitted_line_had_newline = false;
+
+   for hunk in hunks {
+      for line in hunk.raw_patch.lines() {
+         if line.starts_with("@@") {
+            last_emitted_line_had_newline = false;
+            continue;
+         }
+
+         if line == r"\ No newline at end of file" {
+            if last_emitted_line_had_newline {
+               contents.pop();
+               last_emitted_line_had_newline = false;
+            }
+            continue;
+         }
+
+         if let Some(added) = line.strip_prefix('+') {
+            contents.push_str(added);
+            contents.push('\n');
+            last_emitted_line_had_newline = true;
+         } else if let Some(context) = line.strip_prefix(' ') {
+            contents.push_str(context);
+            contents.push('\n');
+            last_emitted_line_had_newline = true;
+         } else {
+            last_emitted_line_had_newline = false;
+         }
+      }
+   }
+
+   contents
+}
+
+fn new_file_index_oid(file: &ComposeFile) -> Option<&str> {
+   file.patch_header.lines().find_map(|line| {
+      let index_range = line.strip_prefix("index ")?;
+      let (_, new_oid) = index_range.split_once("..")?;
+      new_oid.split_whitespace().next()
+   })
+}
+
+fn validate_git_object_id(oid: &str, file: &ComposeFile) -> Result<String> {
+   let oid = oid.trim();
+   if !oid.is_empty()
+      && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+      && oid.bytes().any(|byte| byte != b'0')
+   {
+      Ok(oid.to_string())
+   } else {
+      Err(CommitGenError::Other(format!("Invalid gitlink object id {oid:?} for {}", file.path)))
+   }
+}
+
+fn materialize_gitlink_oid(file: &ComposeFile, hunks: &[&ComposeHunk]) -> Result<String> {
+   let contents = materialize_new_file_contents(hunks);
+   if let Some(oid) = contents.lines().find_map(|line| {
+      line
+         .strip_prefix("Subproject commit ")
+         .and_then(|rest| rest.split_whitespace().next())
+   }) {
+      return validate_git_object_id(oid, file);
+   }
+
+   if let Some(oid) = new_file_index_oid(file) {
+      return validate_git_object_id(oid, file);
+   }
+
+   Err(CommitGenError::Other(format!("Missing gitlink object id for {}", file.path)))
+}
+
+fn new_file_index_blob(file: &ComposeFile, hunks: &[&ComposeHunk]) -> Result<IndexBlob> {
+   let mode = validate_new_file_mode(file)?;
+   let object = if mode == "160000" {
+      IndexObject::ExistingObject(materialize_gitlink_oid(file, hunks)?)
+   } else {
+      IndexObject::BlobContents(materialize_new_file_contents(hunks))
+   };
+
+   Ok(IndexBlob { path: file.path.clone(), mode, object })
+}
+
 pub fn create_executable_group_patch(
    snapshot: &ComposeSnapshot,
    group: &ComposeExecutableGroup,
@@ -533,6 +739,7 @@ pub fn create_executable_group_patch(
    let mut diff = String::new();
    let mut stat = String::new();
    let mut apply_patch = String::new();
+   let mut index_blobs = Vec::new();
 
    for file in &snapshot.files {
       let Some(selected_for_file) = selected_by_file.get(&file.file_id) else {
@@ -548,7 +755,11 @@ pub fn create_executable_group_patch(
 
       if file.synthetic_only || file.is_binary {
          if selected_hunks_cover_file(file, selected_for_file) {
-            fallback_files.push(file.path.clone());
+            if file.synthetic_only && !file.is_binary && new_file_mode(file).is_some() {
+               index_blobs.push(new_file_index_blob(file, &ordered_hunks)?);
+            } else {
+               fallback_files.push(file.path.clone());
+            }
             diff.push_str(&file.full_patch);
             push_stat_line(&mut stat, &file.path, file.additions, file.deletions, file.is_binary);
             continue;
@@ -569,14 +780,18 @@ pub fn create_executable_group_patch(
          },
       );
       diff.push_str(&file_patch);
-      apply_patch.push_str(&file_patch);
+      if new_file_mode(file).is_some() && selected_hunks_cover_file(file, selected_for_file) {
+         index_blobs.push(new_file_index_blob(file, &ordered_hunks)?);
+      } else {
+         apply_patch.push_str(&file_patch);
+      }
       push_stat_line(&mut stat, &file.path, additions, deletions, false);
    }
 
    fallback_files.sort();
    fallback_files.dedup();
 
-   Ok(ComposeGroupPatch { diff, stat, apply_patch, fallback_files })
+   Ok(ComposeGroupPatch { diff, stat, apply_patch, fallback_files, index_blobs })
 }
 
 pub fn stage_executable_group(
@@ -587,13 +802,17 @@ pub fn stage_executable_group(
    let group_patch = create_executable_group_patch(snapshot, group)?;
    let mut result = StageResult::EmptyPatch;
 
+   let patch_result = apply_patch_to_index(&group_patch.apply_patch, dir)?;
+   result = result.combine(patch_result);
+
    if !group_patch.fallback_files.is_empty() {
       stage_files(&group_patch.fallback_files, dir)?;
       result = result.combine(StageResult::Staged);
    }
 
-   let patch_result = apply_patch_to_index(&group_patch.apply_patch, dir)?;
-   result = result.combine(patch_result);
+   for blob in &group_patch.index_blobs {
+      result = result.combine(stage_index_blob(blob, dir)?);
+   }
 
    Ok(result)
 }
@@ -1060,5 +1279,118 @@ index 3333333..4444444 100644
 
       assert_eq!(reused_staged, planned_staged);
       assert!(!reused_staged.contains("local edit"));
+   }
+
+   #[test]
+   fn test_stage_executable_group_materializes_new_file_from_snapshot() {
+      let dir = init_repo();
+      write_file(&dir, "README.md", "initial\n");
+      commit_all(&dir, "initial");
+
+      let diff = r"diff --git a/notes.txt b/notes.txt
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/notes.txt
+@@ -1,1 +1,3 @@
+-old
++old
++new
++++literal plus
+";
+      let stat = " notes.txt | 4 +++-\n";
+      let snapshot = build_compose_snapshot(diff, stat).unwrap();
+      let notes_file = snapshot.file_by_path("notes.txt").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("docs").unwrap(),
+         scope:        None,
+         file_ids:     vec![notes_file.file_id.clone()],
+         rationale:    "new notes".to_string(),
+         dependencies: vec![],
+         hunk_ids:     notes_file.hunk_ids.clone(),
+      };
+
+      write_file(&dir, "notes.txt", "worktree edit\n");
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      let result = stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+
+      assert_eq!(result, StageResult::Staged);
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("+old"));
+      assert!(staged.contains("+new"));
+      assert!(staged.contains("+++literal plus"));
+      assert!(!staged.contains("worktree edit"));
+      let second_result =
+         stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+      assert_eq!(second_result, StageResult::AlreadyApplied);
+   }
+
+   #[test]
+   fn test_stage_executable_group_materializes_empty_new_file_from_snapshot() {
+      let dir = init_repo();
+      write_file(&dir, "README.md", "initial\n");
+      commit_all(&dir, "initial");
+
+      let diff = r"diff --git a/empty.txt b/empty.txt
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/empty.txt
+";
+      let stat = " empty.txt | 0\n";
+      let snapshot = build_compose_snapshot(diff, stat).unwrap();
+      let empty_file = snapshot.file_by_path("empty.txt").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("docs").unwrap(),
+         scope:        None,
+         file_ids:     vec![empty_file.file_id.clone()],
+         rationale:    "empty notes".to_string(),
+         dependencies: vec![],
+         hunk_ids:     empty_file.hunk_ids.clone(),
+      };
+
+      write_file(&dir, "empty.txt", "worktree edit\n");
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      let result = stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+
+      assert_eq!(result, StageResult::Staged);
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("new file mode 100644"));
+      assert!(!staged.contains("worktree edit"));
+   }
+
+   #[test]
+   fn test_stage_executable_group_materializes_new_gitlink_from_snapshot() {
+      let dir = init_repo();
+      write_file(&dir, "README.md", "initial\n");
+      commit_all(&dir, "initial");
+
+      let oid = "1234567890abcdef1234567890abcdef12345678";
+      let diff = format!(
+         "diff --git a/vendor/lib b/vendor/lib\nnew file mode 160000\nindex 0000000..{oid}\n--- \
+          /dev/null\n+++ b/vendor/lib\n@@ -0,0 +1 @@\n+Subproject commit {oid}\n"
+      );
+      let stat = " vendor/lib | 1 +\n";
+      let snapshot = build_compose_snapshot(&diff, stat).unwrap();
+      let gitlink_file = snapshot.file_by_path("vendor/lib").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("chore").unwrap(),
+         scope:        None,
+         file_ids:     vec![gitlink_file.file_id.clone()],
+         rationale:    "add submodule".to_string(),
+         dependencies: vec![],
+         hunk_ids:     gitlink_file.hunk_ids.clone(),
+      };
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      let result = stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+
+      assert_eq!(result, StageResult::Staged);
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("new file mode 160000"));
+      assert!(staged.contains(&format!("+Subproject commit {oid}")));
    }
 }
