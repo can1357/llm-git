@@ -9,7 +9,7 @@ use api::{
    generate_summary_from_analysis,
 };
 use arboard::Clipboard;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use compose::run_compose_mode;
 use config::CommitConfig;
 use diff::{smart_truncate_diff, truncate_diff_by_lines};
@@ -40,6 +40,15 @@ fn save_debug_output(dir: &Path, filename: &str, content: &str) -> Result<()> {
    let path = dir.join(filename);
    std::fs::write(&path, content)?;
    Ok(())
+}
+
+/// Generate a shell completion script for `shell` and write it to stdout.
+///
+/// Uses the real installed binary name (`lgit`) rather than the crate name so
+/// the emitted script wires up against the command users actually invoke.
+fn print_completions(shell: clap_complete::Shell) {
+   let mut cmd = Args::command();
+   clap_complete::generate(shell, &mut cmd, "lgit", &mut std::io::stdout());
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -906,6 +915,13 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 async fn main() -> miette::Result<()> {
    let args = Args::parse();
 
+   // Emit a completion script and exit before any config/git work so it works
+   // outside a repository and without a configured API endpoint.
+   if let Some(shell) = args.completions {
+      print_completions(shell);
+      return Ok(());
+   }
+
    // Load config and apply CLI overrides
    let mut config = load_config_from_args(&args)?;
    apply_cli_overrides(&mut config, &args);
@@ -1110,6 +1126,31 @@ async fn main() -> miette::Result<()> {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   // ========== CLI / completions Tests ==========
+
+   #[test]
+   fn cli_definition_is_valid() {
+      // clap's own consistency checks: catches conflicting attrs, duplicate
+      // flags, bad value parsers, etc. across the whole Args definition.
+      Args::command().debug_assert();
+   }
+
+   #[test]
+   fn completions_generate_for_all_shells() {
+      use clap_complete::Shell;
+      for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell, Shell::Elvish] {
+         let mut cmd = Args::command();
+         let mut buf = Vec::new();
+         clap_complete::generate(shell, &mut cmd, "lgit", &mut buf);
+         let script = String::from_utf8(buf).expect("completion script must be valid UTF-8");
+         assert!(!script.is_empty(), "{shell} completion script must not be empty");
+         assert!(
+            script.contains("lgit"),
+            "{shell} completion should reference the lgit binary name"
+         );
+      }
+   }
 
    // ========== build_footers Tests ==========
 

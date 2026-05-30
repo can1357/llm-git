@@ -1107,6 +1107,11 @@ pub struct Args {
    #[arg(long)]
    pub config: Option<PathBuf>,
 
+   /// Generate a shell completion script for the given shell and print it to
+   /// stdout (bash, zsh, fish, powershell, elvish)
+   #[arg(long, value_enum, value_name = "SHELL")]
+   pub completions: Option<clap_complete::Shell>,
+
    /// Additional context to provide to the analysis model (all trailing
    /// non-flag text)
    #[arg(trailing_var_arg = true)]
@@ -1231,6 +1236,7 @@ impl Default for Args {
          skip_hooks:              false,
          config:                  None,
          context:                 vec![],
+         completions:             None,
          rewrite:                 false,
          rewrite_preview:         None,
          rewrite_start:           None,
