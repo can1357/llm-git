@@ -1,4 +1,12 @@
-use std::{collections::HashMap, path::PathBuf, process::Command, sync::OnceLock};
+use std::{
+   collections::HashMap,
+   fs,
+   io::Write,
+   path::{Path, PathBuf},
+   process::{Command, Stdio},
+   sync::OnceLock,
+   time::{SystemTime, UNIX_EPOCH},
+};
 
 pub use self::git_push as push;
 use crate::{
@@ -41,10 +49,79 @@ pub fn git_command() -> Command {
    git_command_with_settings(current_git_command_settings())
 }
 
+/// A temporary Git index file under `.git/llm-git/`.
+///
+/// The file is removed on drop, along with Git's sibling lock file if one was
+/// left behind by an interrupted command.
+pub struct TempGitIndex {
+   path: PathBuf,
+}
+
+impl TempGitIndex {
+   pub fn new(dir: &str) -> Result<Self> {
+      let temp_dir = get_git_dir(dir)?.join("llm-git");
+      fs::create_dir_all(&temp_dir).map_err(|e| {
+         CommitGenError::git(format!("Failed to create temporary git index directory: {e}"))
+      })?;
+
+      let pid = std::process::id();
+      let nanos = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+         .map(|duration| duration.as_nanos())
+         .unwrap_or(0);
+
+      for attempt in 0..100_u32 {
+         let path = temp_dir.join(format!("index-{pid}-{nanos}-{attempt}"));
+         match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+         {
+            Ok(_) => {
+               let _ = fs::remove_file(&path);
+               return Ok(Self { path });
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(err) => {
+               return Err(CommitGenError::git(format!(
+                  "Failed to create temporary git index: {err}"
+               )));
+            },
+         }
+      }
+
+      Err(CommitGenError::git("Failed to allocate unique temporary git index path".to_string()))
+   }
+
+   pub fn path(&self) -> &Path {
+      &self.path
+   }
+}
+
+impl Drop for TempGitIndex {
+   fn drop(&mut self) {
+      let _ = fs::remove_file(&self.path);
+      let lock_path = self.path.with_extension("lock");
+      let _ = fs::remove_file(lock_path);
+   }
+}
+
+pub fn git_command_with_index(index_file: &Path) -> Command {
+   let mut cmd = git_command();
+   cmd.env("GIT_INDEX_FILE", index_file);
+   cmd
+}
+
 fn git_command_with_settings(settings: GitCommandSettings) -> Command {
    let mut cmd = Command::new("git");
    apply_git_command_overrides(&mut cmd, settings);
    cmd
+}
+
+fn diff_lines_preserve_cr(input: &str) -> impl Iterator<Item = &str> {
+   input
+      .split_inclusive('\n')
+      .map(|line| line.strip_suffix('\n').unwrap_or(line))
 }
 
 fn list_untracked_files(dir: &str) -> Result<Vec<String>> {
@@ -73,7 +150,17 @@ fn append_untracked_diff(
 ) -> Result<String> {
    for file in untracked_files {
       let file_diff_output = git_command()
-         .args(["diff", "--no-index", "/dev/null", file])
+         .args([
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "/dev/null",
+            file,
+         ])
          .current_dir(dir)
          .output()
          .map_err(|e| CommitGenError::git(format!("Failed to diff untracked file {file}: {e}")))?;
@@ -81,7 +168,7 @@ fn append_untracked_diff(
       // `git diff --no-index` exits with 1 when files differ, which is expected.
       if file_diff_output.status.success() || file_diff_output.status.code() == Some(1) {
          let file_diff = String::from_utf8_lossy(&file_diff_output.stdout);
-         let lines: Vec<&str> = file_diff.lines().collect();
+         let lines: Vec<&str> = diff_lines_preserve_cr(&file_diff).collect();
          if lines.len() >= 2 {
             let mode = lines
                .iter()
@@ -413,7 +500,15 @@ pub fn get_git_numstat(
 
 pub fn get_compose_diff(dir: &str) -> Result<String> {
    let output = git_command()
-      .args(["diff", "HEAD"])
+      .args([
+         "diff",
+         "--no-ext-diff",
+         "--no-textconv",
+         "--no-color",
+         "--src-prefix=a/",
+         "--dst-prefix=b/",
+         "HEAD",
+      ])
       .current_dir(dir)
       .output()
       .map_err(|e| CommitGenError::git(format!("Failed to run git diff HEAD: {e}")))?;
@@ -436,7 +531,7 @@ pub fn get_compose_diff(dir: &str) -> Result<String> {
 
 pub fn get_compose_stat(dir: &str) -> Result<String> {
    let output = git_command()
-      .args(["diff", "HEAD", "--stat"])
+      .args(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--stat"])
       .current_dir(dir)
       .output()
       .map_err(|e| CommitGenError::git(format!("Failed to run git diff HEAD --stat: {e}")))?;
@@ -603,6 +698,178 @@ pub fn get_head_hash(dir: &str) -> Result<String> {
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn current_head_ref(dir: &str) -> Result<String> {
+   let output = git_command()
+      .args(["symbolic-ref", "-q", "HEAD"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to resolve HEAD ref: {e}")))?;
+
+   if output.status.success() {
+      let refname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+      if !refname.is_empty() {
+         return Ok(refname);
+      }
+   }
+
+   Ok("HEAD".to_string())
+}
+
+pub fn write_real_index_tree(dir: &str) -> Result<String> {
+   let output = git_command()
+      .arg("write-tree")
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to write real index tree: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git write-tree failed: {stderr}")));
+   }
+
+   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn read_tree_into_index(index_file: &Path, treeish: &str, dir: &str) -> Result<()> {
+   let output = git_command_with_index(index_file)
+      .arg("read-tree")
+      .arg(treeish)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to read tree into temporary index: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git read-tree {treeish} failed: {stderr}")));
+   }
+
+   Ok(())
+}
+
+pub fn write_index_tree(index_file: &Path, dir: &str) -> Result<String> {
+   let output = git_command_with_index(index_file)
+      .arg("write-tree")
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to write temporary index tree: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!(
+         "git write-tree failed for temporary index: {stderr}"
+      )));
+   }
+
+   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn commit_tree(
+   tree: &str,
+   parent: &str,
+   message: &str,
+   dir: &str,
+   sign: bool,
+) -> Result<String> {
+   let mut cmd = git_command();
+   cmd.arg("commit-tree");
+   if sign {
+      cmd.arg("-S");
+   }
+   cmd.arg(tree).arg("-p").arg(parent).arg("-F").arg("-");
+
+   let mut child = cmd
+      .current_dir(dir)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .map_err(|e| CommitGenError::git(format!("Failed to spawn git commit-tree: {e}")))?;
+
+   {
+      let Some(mut stdin) = child.stdin.take() else {
+         return Err(CommitGenError::git("Failed to open git commit-tree stdin".to_string()));
+      };
+      stdin
+         .write_all(message.as_bytes())
+         .map_err(|e| CommitGenError::git(format!("Failed to write commit message: {e}")))?;
+   }
+
+   let output = child
+      .wait_with_output()
+      .map_err(|e| CommitGenError::git(format!("Failed to wait for git commit-tree: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git commit-tree failed: {stderr}")));
+   }
+
+   let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+   if hash.is_empty() {
+      return Err(CommitGenError::git("git commit-tree returned an empty hash".to_string()));
+   }
+
+   Ok(hash)
+}
+
+pub fn update_ref_checked(refname: &str, new: &str, old: &str, dir: &str) -> Result<()> {
+   let output = git_command()
+      .args(["update-ref", refname, new, old])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to update {refname}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git update-ref failed for {refname}: {stderr}")));
+   }
+
+   Ok(())
+}
+
+pub fn reset_mixed_to(treeish: &str, dir: &str) -> Result<()> {
+   let output = git_command()
+      .args(["reset", "--mixed", "-q", treeish])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to reset index to {treeish}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git reset --mixed failed: {stderr}")));
+   }
+
+   Ok(())
+}
+
+pub fn append_signoff_trailer(message: &str, dir: &str) -> Result<String> {
+   let output = git_command()
+      .args(["var", "GIT_COMMITTER_IDENT"])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to read committer identity: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git var GIT_COMMITTER_IDENT failed: {stderr}")));
+   }
+
+   let ident = String::from_utf8_lossy(&output.stdout);
+   let Some(end) = ident.find('>') else {
+      return Err(CommitGenError::git(format!(
+         "Could not parse committer identity: {}",
+         ident.trim()
+      )));
+   };
+   let signer = ident[..=end].trim();
+   let trailer = format!("Signed-off-by: {signer}");
+   let trimmed = message.trim_end();
+   let mut signed = String::with_capacity(trimmed.len() + trailer.len() + 3);
+   signed.push_str(trimmed);
+   signed.push_str("\n\n");
+   signed.push_str(&trailer);
+   Ok(signed)
 }
 
 // === History Rewrite Operations ===

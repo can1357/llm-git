@@ -1,12 +1,13 @@
 use std::{
    borrow::Cow,
    collections::{BTreeMap, HashSet},
+   path::Path,
 };
 
 use crate::{
    compose_types::{ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot},
    error::{CommitGenError, Result},
-   git::git_command,
+   git::{git_command, git_command_with_index},
 };
 
 #[derive(Debug, Clone)]
@@ -101,8 +102,21 @@ pub struct ComposeStageOutcome {
 }
 
 /// Run `git apply` with a patch supplied on stdin.
-fn run_git_apply(patch: &str, args: &[&str], dir: &str) -> Result<std::process::Output> {
-   let mut child = git_command()
+fn git_command_for_index(index_file: Option<&Path>) -> std::process::Command {
+   if let Some(index_file) = index_file {
+      git_command_with_index(index_file)
+   } else {
+      git_command()
+   }
+}
+
+fn run_git_apply(
+   patch: &str,
+   args: &[&str],
+   dir: &str,
+   index_file: Option<&Path>,
+) -> Result<std::process::Output> {
+   let mut child = git_command_for_index(index_file)
       .args(args)
       .current_dir(dir)
       .stdin(std::process::Stdio::piped())
@@ -124,9 +138,17 @@ fn run_git_apply(patch: &str, args: &[&str], dir: &str) -> Result<std::process::
       .map_err(|e| CommitGenError::git(format!("Failed to wait for git apply: {e}")))
 }
 
-fn patch_is_already_applied_to_index(patch: &str, dir: &str) -> Result<bool> {
-   let output =
-      run_git_apply(patch, &["apply", "--cached", "--reverse", "--check", "--recount"], dir)?;
+fn patch_is_already_applied_to_index(
+   patch: &str,
+   dir: &str,
+   index_file: Option<&Path>,
+) -> Result<bool> {
+   let output = run_git_apply(
+      patch,
+      &["apply", "--cached", "--reverse", "--check", "--recount"],
+      dir,
+      index_file,
+   )?;
    Ok(output.status.success())
 }
 
@@ -135,16 +157,21 @@ fn patch_is_already_applied_to_index(patch: &str, dir: &str) -> Result<bool> {
 /// A patch that no longer applies against the current index/worktree is
 /// reported as [`FilePatchOutcome::Failed`] instead of erroring, so callers can
 /// stage the files that do apply and leave the rest untouched in the worktree.
-fn apply_file_patch_to_index(patch: &str, dir: &str) -> Result<FilePatchOutcome> {
+fn apply_file_patch_to_index(
+   patch: &str,
+   dir: &str,
+   index_file: Option<&Path>,
+) -> Result<FilePatchOutcome> {
    if patch.trim().is_empty() {
       return Ok(FilePatchOutcome::Empty);
    }
 
-   if patch_is_already_applied_to_index(patch, dir)? {
+   if patch_is_already_applied_to_index(patch, dir, index_file)? {
       return Ok(FilePatchOutcome::AlreadyApplied);
    }
 
-   let output = run_git_apply(patch, &["apply", "--cached", "--3way", "--recount"], dir)?;
+   let output =
+      run_git_apply(patch, &["apply", "--cached", "--3way", "--recount"], dir, index_file)?;
    if output.status.success() {
       return Ok(FilePatchOutcome::Staged);
    }
@@ -156,8 +183,8 @@ fn apply_file_patch_to_index(patch: &str, dir: &str) -> Result<FilePatchOutcome>
 /// conflicted staging left behind by a failed `git apply` (a 3-way apply leaves
 /// unmerged index entries on conflict). The working-tree copy, holding the
 /// user's divergent changes, is deliberately left untouched.
-fn restore_index_path_to_head(path: &str, dir: &str) -> Result<()> {
-   let output = git_command()
+fn restore_index_path_to_head(path: &str, dir: &str, index_file: Option<&Path>) -> Result<()> {
+   let output = git_command_for_index(index_file)
       .args(["reset", "-q", "HEAD", "--"])
       .arg(path)
       .current_dir(dir)
@@ -253,14 +280,40 @@ pub fn force_stage_file_from_base(
    selected_hunk_ids: &[String],
    dir: &str,
 ) -> Result<()> {
+   force_stage_file_from_base_with_index(snapshot, file_id, selected_hunk_ids, dir, None)
+}
+
+pub fn force_stage_file_from_base_in_index(
+   snapshot: &ComposeSnapshot,
+   file_id: &str,
+   selected_hunk_ids: &[String],
+   dir: &str,
+   index_file: &Path,
+) -> Result<()> {
+   force_stage_file_from_base_with_index(
+      snapshot,
+      file_id,
+      selected_hunk_ids,
+      dir,
+      Some(index_file),
+   )
+}
+
+fn force_stage_file_from_base_with_index(
+   snapshot: &ComposeSnapshot,
+   file_id: &str,
+   selected_hunk_ids: &[String],
+   dir: &str,
+   index_file: Option<&Path>,
+) -> Result<()> {
    let file = snapshot
       .file_by_id(file_id)
       .ok_or_else(|| CommitGenError::Other(format!("Unknown compose file id {file_id}")))?;
 
    // Clear any conflicted residue, then pin the entry to the base blob.
-   restore_index_path_to_head(&file.path, dir)?;
+   restore_index_path_to_head(&file.path, dir, index_file)?;
    let base = base_index_blob(file, dir)?;
-   stage_index_blob(&base, dir)?;
+   stage_index_blob(&base, dir, index_file)?;
 
    let ordered: Vec<&ComposeHunk> = file
       .hunk_ids
@@ -278,7 +331,7 @@ pub fn force_stage_file_from_base(
    }
 
    let patch = create_patch_for_file(file, &ordered);
-   let output = run_git_apply(&patch, &["apply", "--cached", "--recount"], dir)?;
+   let output = run_git_apply(&patch, &["apply", "--cached", "--recount"], dir, index_file)?;
    if output.status.success() {
       return Ok(());
    }
@@ -293,11 +346,15 @@ pub fn force_stage_file_from_base(
 
 /// Stage specific files.
 pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
+   stage_files_with_index(files, dir, None)
+}
+
+fn stage_files_with_index(files: &[String], dir: &str, index_file: Option<&Path>) -> Result<()> {
    if files.is_empty() {
       return Ok(());
    }
 
-   let output = git_command()
+   let output = git_command_for_index(index_file)
       .arg("add")
       .arg("--")
       .args(files)
@@ -359,8 +416,14 @@ fn index_blob_oid<'a>(blob: &'a IndexBlob, dir: &str) -> Result<Cow<'a, str>> {
    }
 }
 
-fn index_entry_matches(path: &str, mode: &str, oid: &str, dir: &str) -> Result<bool> {
-   let output = git_command()
+fn index_entry_matches(
+   path: &str,
+   mode: &str,
+   oid: &str,
+   dir: &str,
+   index_file: Option<&Path>,
+) -> Result<bool> {
+   let output = git_command_for_index(index_file)
       .args(["ls-files", "-s", "--"])
       .arg(path)
       .current_dir(dir)
@@ -380,14 +443,14 @@ fn index_entry_matches(path: &str, mode: &str, oid: &str, dir: &str) -> Result<b
    Ok(parts.next() == Some(mode) && parts.next() == Some(oid))
 }
 
-fn stage_index_blob(blob: &IndexBlob, dir: &str) -> Result<StageResult> {
+fn stage_index_blob(blob: &IndexBlob, dir: &str, index_file: Option<&Path>) -> Result<StageResult> {
    let oid = index_blob_oid(blob, dir)?;
-   if index_entry_matches(&blob.path, &blob.mode, oid.as_ref(), dir)? {
+   if index_entry_matches(&blob.path, &blob.mode, oid.as_ref(), dir, index_file)? {
       return Ok(StageResult::AlreadyApplied);
    }
 
    let cacheinfo = format!("{},{},{}", blob.mode, oid, blob.path);
-   let output = git_command()
+   let output = git_command_for_index(index_file)
       .args(["update-index", "--add", "--cacheinfo"])
       .arg(cacheinfo)
       .current_dir(dir)
@@ -488,6 +551,12 @@ fn join_lines(lines: &[String]) -> String {
    }
 }
 
+fn diff_lines_preserve_cr(input: &str) -> impl Iterator<Item = &str> {
+   input
+      .split_inclusive('\n')
+      .map(|line| line.strip_suffix('\n').unwrap_or(line))
+}
+
 fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
    let trimmed = snippet.trim();
    if trimmed.chars().count() <= max_chars {
@@ -565,7 +634,7 @@ pub fn build_compose_snapshot(diff: &str, stat: &str) -> Result<ComposeSnapshot>
    let mut current_file: Option<ParsedFile> = None;
    let mut current_hunk: Option<ParsedHunk> = None;
 
-   for line in diff.lines() {
+   for line in diff_lines_preserve_cr(diff) {
       if line.starts_with("diff --git ") {
          finalize_current_file(&mut files, &mut current_file, &mut current_hunk);
          current_file = Some(ParsedFile {
@@ -825,7 +894,7 @@ fn materialize_new_file_contents(hunks: &[&ComposeHunk]) -> String {
    let mut last_emitted_line_had_newline = false;
 
    for hunk in hunks {
-      for line in hunk.raw_patch.lines() {
+      for line in diff_lines_preserve_cr(&hunk.raw_patch) {
          if line.starts_with("@@") {
             last_emitted_line_had_newline = false;
             continue;
@@ -973,12 +1042,30 @@ pub fn stage_executable_group(
    group: &ComposeExecutableGroup,
    dir: &str,
 ) -> Result<ComposeStageOutcome> {
+   stage_executable_group_with_index(snapshot, group, dir, None)
+}
+
+pub fn stage_executable_group_in_index(
+   snapshot: &ComposeSnapshot,
+   group: &ComposeExecutableGroup,
+   dir: &str,
+   index_file: &Path,
+) -> Result<ComposeStageOutcome> {
+   stage_executable_group_with_index(snapshot, group, dir, Some(index_file))
+}
+
+fn stage_executable_group_with_index(
+   snapshot: &ComposeSnapshot,
+   group: &ComposeExecutableGroup,
+   dir: &str,
+   index_file: Option<&Path>,
+) -> Result<ComposeStageOutcome> {
    let group_patch = create_executable_group_patch(snapshot, group)?;
    let mut result = StageResult::EmptyPatch;
    let mut skipped = Vec::new();
 
    for file_patch in &group_patch.apply_patches {
-      match apply_file_patch_to_index(&file_patch.patch, dir)? {
+      match apply_file_patch_to_index(&file_patch.patch, dir, index_file)? {
          FilePatchOutcome::Staged => result = result.combine(StageResult::Staged),
          FilePatchOutcome::AlreadyApplied => {
             result = result.combine(StageResult::AlreadyApplied);
@@ -987,19 +1074,19 @@ pub fn stage_executable_group(
          FilePatchOutcome::Failed(reason) => {
             // The planned patch no longer applies against the current state.
             // Drop any conflicted index residue and keep the worktree change.
-            restore_index_path_to_head(&file_patch.path, dir)?;
+            restore_index_path_to_head(&file_patch.path, dir, index_file)?;
             skipped.push(SkippedFile { path: file_patch.path.clone(), reason });
          },
       }
    }
 
    if !group_patch.fallback_files.is_empty() {
-      stage_files(&group_patch.fallback_files, dir)?;
+      stage_files_with_index(&group_patch.fallback_files, dir, index_file)?;
       result = result.combine(StageResult::Staged);
    }
 
    for blob in &group_patch.index_blobs {
-      result = result.combine(stage_index_blob(blob, dir)?);
+      result = result.combine(stage_index_blob(blob, dir, index_file)?);
    }
 
    Ok(ComposeStageOutcome { result, skipped })
@@ -1014,7 +1101,7 @@ mod tests {
    use super::*;
    use crate::{
       compose_types::ComposeExecutableGroup,
-      git::{get_compose_diff, get_compose_stat},
+      git::{TempGitIndex, get_compose_diff, get_compose_stat, read_tree_into_index},
       types::CommitType,
    };
 
@@ -1112,6 +1199,20 @@ mod tests {
 
    fn staged_diff(dir: &TempDir) -> String {
       run_git(dir, &["diff", "--cached"])
+   }
+
+   fn staged_diff_in_index(dir: &TempDir, index: &TempGitIndex) -> String {
+      let output = crate::git::git_command_with_index(index.path())
+         .args(["diff", "--cached"])
+         .current_dir(dir.path())
+         .output()
+         .unwrap();
+      assert!(
+         output.status.success(),
+         "git diff --cached with temp index failed: {}",
+         String::from_utf8_lossy(&output.stderr)
+      );
+      String::from_utf8_lossy(&output.stdout).to_string()
    }
 
    #[test]
@@ -1640,6 +1741,140 @@ index 0000000..0000000
       assert!(!staged.contains("src/a.rs"));
    }
 
+   #[test]
+   fn test_stage_executable_group_in_index_preserves_real_staged_diff() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      write_file(&dir, "sentinel.txt", "base\n");
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_stage_only());
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "source change".to_string(),
+         dependencies: vec![],
+         hunk_ids:     source_file.hunk_ids.clone(),
+      };
+
+      write_file(&dir, "sentinel.txt", "base\nstaged sentinel\n");
+      run_git(&dir, &["add", "sentinel.txt"]);
+      let real_staged_before = staged_diff(&dir);
+      assert!(real_staged_before.contains("staged sentinel"));
+
+      let index = TempGitIndex::new(dir.path().to_str().unwrap()).unwrap();
+      read_tree_into_index(index.path(), "HEAD", dir.path().to_str().unwrap()).unwrap();
+      let outcome = stage_executable_group_in_index(
+         &snapshot,
+         &group,
+         dir.path().to_str().unwrap(),
+         index.path(),
+      )
+      .unwrap();
+
+      assert_eq!(outcome.result, StageResult::Staged);
+      assert_eq!(staged_diff(&dir), real_staged_before);
+      let temp_staged = staged_diff_in_index(&dir, &index);
+      assert!(temp_staged.contains("alpha staged"));
+      assert!(!temp_staged.contains("staged sentinel"));
+   }
+
+   #[test]
+   fn test_force_stage_file_from_base_in_index_preserves_real_staged_diff() {
+      let dir = init_repo();
+      run_git(&dir, &["config", "core.autocrlf", "false"]);
+      let original = [
+         "fn alpha() {",
+         "    println!(\"alpha\");",
+         "}",
+         "",
+         "fn beta() {",
+         "    println!(\"beta\");",
+         "}",
+         "",
+      ]
+      .join("\r\n");
+      let modified = original.replace("println!(\"beta\")", "println!(\"beta changed\")");
+      write_file(&dir, "src/crlf.rs", &original);
+      write_file(&dir, "sentinel.txt", "base\n");
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/crlf.rs", &modified);
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/crlf.rs").unwrap();
+
+      write_file(&dir, "sentinel.txt", "base\nstaged sentinel\n");
+      run_git(&dir, &["add", "sentinel.txt"]);
+      let real_staged_before = staged_diff(&dir);
+
+      let index = TempGitIndex::new(dir.path().to_str().unwrap()).unwrap();
+      read_tree_into_index(index.path(), "HEAD", dir.path().to_str().unwrap()).unwrap();
+      force_stage_file_from_base_in_index(
+         &snapshot,
+         &source_file.file_id,
+         &source_file.hunk_ids.clone(),
+         dir.path().to_str().unwrap(),
+         index.path(),
+      )
+      .unwrap();
+
+      assert_eq!(staged_diff(&dir), real_staged_before);
+      let staged_blob = crate::git::git_command_with_index(index.path())
+         .args(["show", ":src/crlf.rs"])
+         .current_dir(dir.path())
+         .output()
+         .unwrap();
+      assert!(staged_blob.status.success());
+      assert_eq!(String::from_utf8_lossy(&staged_blob.stdout).to_string(), modified);
+   }
+
+   #[test]
+   fn test_force_stage_file_from_base_preserves_crlf_patch_lines() {
+      let dir = init_repo();
+      run_git(&dir, &["config", "core.autocrlf", "false"]);
+      let original = [
+         "fn alpha() {",
+         "    println!(\"alpha\");",
+         "}",
+         "",
+         "fn beta() {",
+         "    println!(\"beta\");",
+         "}",
+         "",
+      ]
+      .join("\r\n");
+      let modified = original.replace("println!(\"beta\")", "println!(\"beta changed\")");
+      write_file(&dir, "src/crlf.rs", &original);
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/crlf.rs", &modified);
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      assert!(diff.contains("-    println!(\"beta\");\r\n"));
+      assert!(diff.contains("+    println!(\"beta changed\");\r\n"));
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/crlf.rs").unwrap();
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      force_stage_file_from_base(
+         &snapshot,
+         &source_file.file_id,
+         &source_file.hunk_ids.clone(),
+         dir.path().to_str().unwrap(),
+      )
+      .unwrap();
+
+      let staged_blob = run_git(&dir, &["show", ":src/crlf.rs"]);
+      assert_eq!(staged_blob, modified);
+   }
    #[test]
    fn test_force_stage_file_from_base_ignores_index_drift() {
       let dir = init_repo();

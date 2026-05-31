@@ -21,12 +21,16 @@ use crate::{
    config::CommitConfig,
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
-   git::{get_compose_diff, get_compose_stat, get_git_dir, get_head_hash, git_commit},
+   git::{
+      TempGitIndex, append_signoff_trailer, commit_tree, current_head_ref, get_compose_diff,
+      get_compose_stat, get_git_dir, get_head_hash, read_tree_into_index, reset_mixed_to,
+      update_ref_checked, write_index_tree, write_real_index_tree,
+   },
    map_reduce::{FileObservation, observe_diff_files, run_map_reduce, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
    patch::{
       StageResult, build_compose_snapshot, create_executable_group_patch,
-      force_stage_file_from_base, reset_staging, stage_executable_group,
+      force_stage_file_from_base_in_index, stage_executable_group_in_index,
    },
    style, templates,
    tokens::{TokenCounter, create_token_counter},
@@ -51,6 +55,21 @@ const MAX_BIND_HUNKS_PER_REQUEST: usize = 120;
 /// Maximum number of commit messages to generate concurrently during
 /// `execute_compose`. Matches the per-file fan-out used in `map_reduce`.
 const COMPOSE_MESSAGE_PARALLELISM: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposeBaseState {
+   head_hash:  String,
+   head_ref:   String,
+   index_tree: String,
+}
+
+pub fn capture_compose_base_state(dir: &str) -> Result<ComposeBaseState> {
+   Ok(ComposeBaseState {
+      head_hash:  get_head_hash(dir)?,
+      head_ref:   current_head_ref(dir)?,
+      index_tree: write_real_index_tree(dir)?,
+   })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComposeAnalysisStrategy {
@@ -2667,13 +2686,9 @@ pub async fn execute_compose(
    plan: &ComposeExecutablePlan,
    config: &CommitConfig,
    args: &Args,
+   base_state: &ComposeBaseState,
 ) -> Result<Vec<String>> {
-   let dir = &args.dir;
-   let mut commit_hashes = Vec::new();
    let total = plan.dependency_order.len();
-
-   println!("{}", style::info("Resetting staging area..."));
-   reset_staging(dir)?;
 
    // Phase 1: derive each group's diff/stat from the immutable compose snapshot.
    // This avoids mutating the index while commit messages are prepared and keeps
@@ -2749,8 +2764,39 @@ pub async fn execute_compose(
          .into_iter()
          .collect::<Result<Vec<_>>>()?;
 
-   // Phase 3: sequential commit loop. Re-stage each group (cheap git ops) and
-   // commit using the message we generated in phase 2.
+   execute_compose_with_prepared_messages(
+      snapshot,
+      plan,
+      config,
+      args,
+      base_state,
+      prepared_messages,
+   )
+}
+
+fn execute_compose_with_prepared_messages(
+   snapshot: &ComposeSnapshot,
+   plan: &ComposeExecutablePlan,
+   config: &CommitConfig,
+   args: &Args,
+   base_state: &ComposeBaseState,
+   prepared_messages: Vec<(Vec<String>, CommitSummary)>,
+) -> Result<Vec<String>> {
+   let dir = &args.dir;
+   let total = plan.dependency_order.len();
+   if args.compose_preview {
+      return Ok(Vec::new());
+   }
+
+   let index = TempGitIndex::new(dir)?;
+   read_tree_into_index(index.path(), &base_state.head_hash, dir)?;
+
+   let mut commit_hashes = Vec::new();
+   let mut parent_hash = base_state.head_hash.clone();
+
+   // Phase 3: sequential commit-object loop. Re-stage each group into an
+   // isolated temporary index, then create commit objects parented in memory.
+   // The real branch and index are not updated until every group succeeds.
    for (idx, &group_idx) in plan.dependency_order.iter().enumerate() {
       let group = &plan.groups[group_idx];
 
@@ -2766,18 +2812,24 @@ pub async fn execute_compose(
          .collect();
       println!("  Files: {}", paths.join(", "));
 
-      let outcome = stage_executable_group(snapshot, group, dir)?;
+      let outcome = stage_executable_group_in_index(snapshot, group, dir, index.path())?;
       let mut staged_anything = outcome.result == StageResult::Staged;
 
-      // Any file whose planned patch no longer applies against the live index is
-      // re-staged from its snapshot base rather than left on disk: the working
-      // tree is never touched, and the change is attached to this commit.
+      // Any file whose planned patch no longer applies against the temporary
+      // index is reconstructed from the immutable snapshot base and cumulative
+      // hunk selection. The real index and worktree are never touched here.
       for skipped in &outcome.skipped {
          let Some(file) = snapshot.file_by_path(&skipped.path) else {
             continue;
          };
          let cumulative = cumulative_file_hunk_ids(plan, idx, snapshot, &file.file_id);
-         force_stage_file_from_base(snapshot, &file.file_id, &cumulative, dir)?;
+         force_stage_file_from_base_in_index(
+            snapshot,
+            &file.file_id,
+            &cumulative,
+            dir,
+            index.path(),
+         )?;
          staged_anything = true;
          eprintln!(
             "  {}",
@@ -2822,7 +2874,10 @@ pub async fn execute_compose(
          );
       }
 
-      let formatted_message = format_commit_message(&commit);
+      let mut formatted_message = format_commit_message(&commit);
+      if args.signoff || config.signoff {
+         formatted_message = append_signoff_trailer(&formatted_message, dir)?;
+      }
       println!(
          "  Message:\n{}",
          formatted_message
@@ -2832,33 +2887,32 @@ pub async fn execute_compose(
             .join("\n")
       );
 
-      if !args.compose_preview {
-         let sign = args.sign || config.gpg_sign;
-         let signoff = args.signoff || config.signoff;
-         git_commit(&formatted_message, false, dir, sign, signoff, args.skip_hooks, false)?;
-         let hash = get_head_hash(dir)?;
-         commit_hashes.push(hash);
+      let tree = write_index_tree(index.path(), dir)?;
+      let sign = args.sign || config.gpg_sign;
+      let hash = commit_tree(&tree, &parent_hash, &formatted_message, dir, sign)?;
+      parent_hash.clone_from(&hash);
+      commit_hashes.push(hash);
 
-         if args.compose_test_after_each {
-            println!("  {}", style::info("Running tests..."));
-            let status = std::process::Command::new("cargo")
-               .arg("test")
-               .current_dir(dir)
-               .status();
-
-            if let Ok(status) = status {
-               if !status.success() {
-                  return Err(CommitGenError::Other(format!(
-                     "Tests failed after commit {} ({})",
-                     idx + 1,
-                     group.group_id
-                  )));
-               }
-               println!("  {}", style::success(&format!("{} Tests passed", style::icons::SUCCESS)));
-            }
-         }
+      if args.compose_test_after_each {
+         return Err(CommitGenError::Other(
+            "--compose-test-after-each is incompatible with isolated compose execution".to_string(),
+         ));
       }
    }
+
+   if commit_hashes.is_empty() {
+      return Ok(commit_hashes);
+   }
+
+   let current_index_tree = write_real_index_tree(dir)?;
+   if current_index_tree != base_state.index_tree {
+      return Err(CommitGenError::Other(
+         "Real git index changed during compose; aborting before updating HEAD".to_string(),
+      ));
+   }
+
+   update_ref_checked(&base_state.head_ref, &parent_hash, &base_state.head_hash, dir)?;
+   reset_mixed_to(&parent_hash, dir)?;
 
    Ok(commit_hashes)
 }
@@ -2923,6 +2977,7 @@ pub async fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> 
 }
 
 async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result<()> {
+   let base_state = capture_compose_base_state(&args.dir)?;
    let diff = get_compose_diff(&args.dir)?;
    let stat = get_compose_stat(&args.dir)?;
    let snapshot = build_compose_snapshot(&diff, &stat)?;
@@ -3018,7 +3073,7 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
    }
 
    println!("\n{}", style::info(&format!("Executing compose (round {round})...")));
-   let hashes = execute_compose(&snapshot, &executable_plan, config, args).await?;
+   let hashes = execute_compose(&snapshot, &executable_plan, config, args, &base_state).await?;
    println!(
       "{}",
       style::success(&format!(
@@ -3032,7 +3087,9 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
 
 #[cfg(test)]
 mod tests {
-   use std::fmt::Write;
+   use std::{fmt::Write, fs};
+
+   use tempfile::TempDir;
 
    use super::*;
    use crate::{config::CommitConfig, patch::build_compose_snapshot, types::CommitType};
@@ -3069,6 +3126,50 @@ index 3333333..4444444 100644
    fn build_test_snapshot() -> ComposeSnapshot {
       let (diff, stat) = shared_file_diff();
       build_compose_snapshot(diff, stat).unwrap()
+   }
+
+   fn write_file(dir: &TempDir, path: &str, contents: &str) {
+      let full_path = dir.path().join(path);
+      if let Some(parent) = full_path.parent() {
+         fs::create_dir_all(parent).unwrap();
+      }
+      fs::write(full_path, contents).unwrap();
+   }
+
+   fn run_git(dir: &TempDir, args: &[&str]) -> String {
+      let output = crate::git::git_command()
+         .args(args)
+         .current_dir(dir.path())
+         .output()
+         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+
+      assert!(
+         output.status.success(),
+         "git {:?} failed: stdout={} stderr={}",
+         args,
+         String::from_utf8_lossy(&output.stdout),
+         String::from_utf8_lossy(&output.stderr)
+      );
+
+      String::from_utf8_lossy(&output.stdout).to_string()
+   }
+
+   fn init_repo() -> TempDir {
+      let dir = TempDir::new().unwrap();
+      run_git(&dir, &["init"]);
+      run_git(&dir, &["config", "user.name", "Compose Test"]);
+      run_git(&dir, &["config", "user.email", "compose@test.local"]);
+      run_git(&dir, &["config", "commit.gpgsign", "false"]);
+      dir
+   }
+
+   fn commit_all(dir: &TempDir, message: &str) {
+      run_git(dir, &["add", "."]);
+      run_git(dir, &["commit", "-m", message]);
+   }
+
+   fn canned_message(summary: &str) -> (Vec<String>, CommitSummary) {
+      (vec![], CommitSummary::new_unchecked(summary, 128).unwrap())
    }
 
    fn build_large_snapshot(file_count: usize, hunks_per_file: usize) -> ComposeSnapshot {
@@ -3142,6 +3243,118 @@ index 3333333..4444444 100644
          compute_dependency_order(&groups, |group| &group.group_id, |group| &group.dependencies)
             .unwrap();
       ComposeIntentPlan { groups, dependency_order }
+   }
+
+   #[test]
+   fn test_execute_compose_with_temp_index_applies_two_group_plan() {
+      let dir = init_repo();
+      write_file(&dir, "src/a.rs", "fn a() {}\n");
+      write_file(&dir, "src/b.rs", "fn b() {}\n");
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/a.rs", "fn a_changed() {}\n");
+      write_file(&dir, "src/b.rs", "fn b_changed() {}\n");
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let a_file = snapshot.file_by_path("src/a.rs").unwrap();
+      let b_file = snapshot.file_by_path("src/b.rs").unwrap();
+      let plan = ComposeExecutablePlan {
+         groups:           vec![
+            ComposeExecutableGroup {
+               group_id:     "G1".to_string(),
+               commit_type:  CommitType::new("refactor").unwrap(),
+               scope:        None,
+               file_ids:     vec![a_file.file_id.clone()],
+               rationale:    "change a".to_string(),
+               dependencies: vec![],
+               hunk_ids:     a_file.hunk_ids.clone(),
+            },
+            ComposeExecutableGroup {
+               group_id:     "G2".to_string(),
+               commit_type:  CommitType::new("refactor").unwrap(),
+               scope:        None,
+               file_ids:     vec![b_file.file_id.clone()],
+               rationale:    "change b".to_string(),
+               dependencies: vec!["G1".to_string()],
+               hunk_ids:     b_file.hunk_ids.clone(),
+            },
+         ],
+         dependency_order: vec![0, 1],
+      };
+      let config = CommitConfig::default();
+      let args = Args {
+         dir: dir.path().to_string_lossy().to_string(),
+         compose: true,
+         ..Default::default()
+      };
+      let base_state = capture_compose_base_state(&args.dir).unwrap();
+
+      let hashes = execute_compose_with_prepared_messages(
+         &snapshot,
+         &plan,
+         &config,
+         &args,
+         &base_state,
+         vec![canned_message("change a"), canned_message("change b")],
+      )
+      .unwrap();
+
+      assert_eq!(hashes.len(), 2);
+      assert_eq!(get_head_hash(&args.dir).unwrap(), hashes[1]);
+      assert!(run_git(&dir, &["diff", "--cached"]).trim().is_empty());
+   }
+
+   #[test]
+   fn test_execute_compose_failure_before_update_ref_preserves_real_index() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", "old\n");
+      write_file(&dir, "sentinel.txt", "base\n");
+      commit_all(&dir, "initial");
+      let initial_head = get_head_hash(dir.path().to_str().unwrap()).unwrap();
+
+      write_file(&dir, "sentinel.txt", "base\nstaged sentinel\n");
+      run_git(&dir, &["add", "sentinel.txt"]);
+      let staged_before = run_git(&dir, &["diff", "--cached"]);
+      assert!(staged_before.contains("staged sentinel"));
+
+      let diff = "diff --git a/src/lib.rs b/src/lib.rs\nindex deadbee..badcafe 100644\n--- \
+                  a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-missing\n+changed\n";
+      let snapshot = build_compose_snapshot(diff, " src/lib.rs | 2 +-\n").unwrap();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let plan = ComposeExecutablePlan {
+         groups:           vec![ComposeExecutableGroup {
+            group_id:     "G1".to_string(),
+            commit_type:  CommitType::new("fix").unwrap(),
+            scope:        None,
+            file_ids:     vec![source_file.file_id.clone()],
+            rationale:    "broken patch".to_string(),
+            dependencies: vec![],
+            hunk_ids:     source_file.hunk_ids.clone(),
+         }],
+         dependency_order: vec![0],
+      };
+      let config = CommitConfig::default();
+      let args = Args {
+         dir: dir.path().to_string_lossy().to_string(),
+         compose: true,
+         ..Default::default()
+      };
+      let base_state = capture_compose_base_state(&args.dir).unwrap();
+
+      let err = execute_compose_with_prepared_messages(
+         &snapshot,
+         &plan,
+         &config,
+         &args,
+         &base_state,
+         vec![canned_message("broken patch")],
+      )
+      .unwrap_err();
+
+      assert!(err.to_string().contains("Cannot resolve base blob"));
+      assert_eq!(get_head_hash(&args.dir).unwrap(), initial_head);
+      assert_eq!(run_git(&dir, &["diff", "--cached"]), staged_before);
    }
 
    #[test]
