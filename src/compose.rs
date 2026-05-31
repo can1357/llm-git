@@ -25,8 +25,8 @@ use crate::{
    map_reduce::{FileObservation, observe_diff_files, run_map_reduce, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
    patch::{
-      StageResult, build_compose_snapshot, create_executable_group_patch, reset_staging,
-      stage_executable_group,
+      StageResult, build_compose_snapshot, create_executable_group_patch,
+      force_stage_file_from_base, reset_staging, stage_executable_group,
    },
    style, templates,
    tokens::{TokenCounter, create_token_counter},
@@ -2636,6 +2636,32 @@ fn compose_group_file_list(snapshot: &ComposeSnapshot, group: &ComposeExecutable
    }
 }
 
+/// Hunk ids for `file_id` planned by every group up to and including the group
+/// at `position` in the dependency order. Used to reconstruct a file's intended
+/// index content at a given commit from its base, independent of apply order.
+fn cumulative_file_hunk_ids(
+   plan: &ComposeExecutablePlan,
+   position: usize,
+   snapshot: &ComposeSnapshot,
+   file_id: &str,
+) -> Vec<String> {
+   let mut hunk_ids = Vec::new();
+   for &group_idx in plan.dependency_order.iter().take(position + 1) {
+      let Some(group) = plan.groups.get(group_idx) else {
+         continue;
+      };
+      for hunk_id in &group.hunk_ids {
+         if snapshot
+            .hunk_by_id(hunk_id)
+            .is_some_and(|hunk| hunk.file_id == file_id)
+         {
+            hunk_ids.push(hunk_id.clone());
+         }
+      }
+   }
+   hunk_ids
+}
+
 pub async fn execute_compose(
    snapshot: &ComposeSnapshot,
    plan: &ComposeExecutablePlan,
@@ -2740,13 +2766,40 @@ pub async fn execute_compose(
          .collect();
       println!("  Files: {}", paths.join(", "));
 
-      let stage_result = stage_executable_group(snapshot, group, dir)?;
-      if stage_result != StageResult::Staged {
+      let outcome = stage_executable_group(snapshot, group, dir)?;
+      let mut staged_anything = outcome.result == StageResult::Staged;
+
+      // Any file whose planned patch no longer applies against the live index is
+      // re-staged from its snapshot base rather than left on disk: the working
+      // tree is never touched, and the change is attached to this commit.
+      for skipped in &outcome.skipped {
+         let Some(file) = snapshot.file_by_path(&skipped.path) else {
+            continue;
+         };
+         let cumulative = cumulative_file_hunk_ids(plan, idx, snapshot, &file.file_id);
+         force_stage_file_from_base(snapshot, &file.file_id, &cumulative, dir)?;
+         staged_anything = true;
+         eprintln!(
+            "  {}",
+            style::info(&format!(
+               "Re-staged {} from base; planned patch did not apply against current state ({})",
+               skipped.path,
+               skipped
+                  .reason
+                  .lines()
+                  .next()
+                  .unwrap_or("patch does not apply")
+                  .trim()
+            ))
+         );
+      }
+
+      if !staged_anything {
          eprintln!(
             "  {}",
             style::warning(&format!(
-               "Skipping {} because its planned patch is already applied ({stage_result:?})",
-               group.group_id
+               "Skipping commit {}: its planned patch is already applied ({:?})",
+               group.group_id, outcome.result
             ))
          );
          continue;

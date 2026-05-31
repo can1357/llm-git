@@ -33,9 +33,15 @@ struct ParsedFile {
 pub struct ComposeGroupPatch {
    pub diff:       String,
    pub stat:       String,
-   apply_patch:    String,
+   apply_patches:  Vec<FilePatch>,
    fallback_files: Vec<String>,
    index_blobs:    Vec<IndexBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilePatch {
+   path:  String,
+   patch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +74,32 @@ impl StageResult {
    }
 }
 
+/// Outcome of attempting to apply a single file's patch to the index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FilePatchOutcome {
+   Staged,
+   AlreadyApplied,
+   Empty,
+   Failed(String),
+}
+
+/// A planned file whose patch could not be applied against the current state.
+///
+/// Its changes are intentionally left untouched in the working tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedFile {
+   pub path:   String,
+   pub reason: String,
+}
+
+/// Result of staging a compose group, including any files whose planned patch
+/// no longer applies and were therefore left uncommitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposeStageOutcome {
+   pub result:  StageResult,
+   pub skipped: Vec<SkippedFile>,
+}
+
 /// Run `git apply` with a patch supplied on stdin.
 fn run_git_apply(patch: &str, args: &[&str], dir: &str) -> Result<std::process::Output> {
    let mut child = git_command()
@@ -98,23 +130,165 @@ fn patch_is_already_applied_to_index(patch: &str, dir: &str) -> Result<bool> {
    Ok(output.status.success())
 }
 
-/// Apply patch to staging area.
-pub fn apply_patch_to_index(patch: &str, dir: &str) -> Result<StageResult> {
+/// Apply a single file's patch to the staging area.
+///
+/// A patch that no longer applies against the current index/worktree is
+/// reported as [`FilePatchOutcome::Failed`] instead of erroring, so callers can
+/// stage the files that do apply and leave the rest untouched in the worktree.
+fn apply_file_patch_to_index(patch: &str, dir: &str) -> Result<FilePatchOutcome> {
    if patch.trim().is_empty() {
-      return Ok(StageResult::EmptyPatch);
+      return Ok(FilePatchOutcome::Empty);
    }
 
    if patch_is_already_applied_to_index(patch, dir)? {
-      return Ok(StageResult::AlreadyApplied);
+      return Ok(FilePatchOutcome::AlreadyApplied);
    }
 
    let output = run_git_apply(patch, &["apply", "--cached", "--3way", "--recount"], dir)?;
    if output.status.success() {
-      return Ok(StageResult::Staged);
+      return Ok(FilePatchOutcome::Staged);
+   }
+
+   Ok(FilePatchOutcome::Failed(String::from_utf8_lossy(&output.stderr).trim().to_string()))
+}
+
+/// Restore a single path's index entry to HEAD, discarding any partial or
+/// conflicted staging left behind by a failed `git apply` (a 3-way apply leaves
+/// unmerged index entries on conflict). The working-tree copy, holding the
+/// user's divergent changes, is deliberately left untouched.
+fn restore_index_path_to_head(path: &str, dir: &str) -> Result<()> {
+   let output = git_command()
+      .args(["reset", "-q", "HEAD", "--"])
+      .arg(path)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to reset index entry {path}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git reset failed for {path}: {stderr}")));
+   }
+
+   Ok(())
+}
+
+/// Resolve a (possibly abbreviated) blob id from a diff header to its full oid.
+fn resolve_blob_oid(oid: &str, path: &str, dir: &str) -> Result<String> {
+   let output = git_command()
+      .args(["rev-parse", "--verify", "--quiet"])
+      .arg(format!("{oid}^{{blob}}"))
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to resolve base blob for {path}: {e}")))?;
+
+   let full = String::from_utf8_lossy(&output.stdout).trim().to_string();
+   if !output.status.success() || full.is_empty() {
+      return Err(CommitGenError::git(format!(
+         "Cannot resolve base blob {oid} for {path}: object not found"
+      )));
+   }
+
+   Ok(full)
+}
+
+/// Build the index entry that restores a file to its pre-change (base) blob,
+/// taken from the snapshot's `index <base>..<target>` diff header.
+fn base_index_blob(file: &ComposeFile, dir: &str) -> Result<IndexBlob> {
+   let index_line = file
+      .patch_header
+      .lines()
+      .find(|line| line.starts_with("index "))
+      .ok_or_else(|| {
+         CommitGenError::Other(format!("Cannot reset {} from base: no diff index line", file.path))
+      })?;
+
+   let rest = index_line.strip_prefix("index ").unwrap_or_default();
+   let mut tokens = rest.split_whitespace();
+   let range = tokens.next().unwrap_or_default();
+   let mode_token = tokens.next();
+
+   let base_oid = range
+      .split_once("..")
+      .map(|(base, _)| base)
+      .ok_or_else(|| {
+         CommitGenError::Other(format!(
+            "Cannot parse base blob for {} from '{index_line}'",
+            file.path
+         ))
+      })?;
+
+   if base_oid.is_empty() || base_oid.bytes().all(|byte| byte == b'0') {
+      return Err(CommitGenError::Other(format!(
+         "{} is newly added and has no base blob to reset from",
+         file.path
+      )));
+   }
+
+   let mode = mode_token
+      .map(str::to_string)
+      .or_else(|| {
+         file.patch_header.lines().find_map(|line| {
+            line
+               .strip_prefix("old mode ")
+               .map(|mode| mode.trim().to_string())
+         })
+      })
+      .unwrap_or_else(|| "100644".to_string());
+
+   let full_oid = resolve_blob_oid(base_oid, &file.path, dir)?;
+   Ok(IndexBlob { path: file.path.clone(), mode, object: IndexObject::ExistingObject(full_oid) })
+}
+
+/// Force a file's index entry to `base + the selected hunks`, ignoring the
+/// current index/worktree state entirely.
+///
+/// The entry is pinned to the snapshot's base blob (the file's original HEAD
+/// content) and the selected hunks are applied against that base. Because every
+/// hunk is anchored in the base it was generated from, this applies cleanly
+/// where a state-sensitive `git apply` against the live index would conflict.
+/// The working tree is never touched: only the index is rewritten.
+pub fn force_stage_file_from_base(
+   snapshot: &ComposeSnapshot,
+   file_id: &str,
+   selected_hunk_ids: &[String],
+   dir: &str,
+) -> Result<()> {
+   let file = snapshot
+      .file_by_id(file_id)
+      .ok_or_else(|| CommitGenError::Other(format!("Unknown compose file id {file_id}")))?;
+
+   // Clear any conflicted residue, then pin the entry to the base blob.
+   restore_index_path_to_head(&file.path, dir)?;
+   let base = base_index_blob(file, dir)?;
+   stage_index_blob(&base, dir)?;
+
+   let ordered: Vec<&ComposeHunk> = file
+      .hunk_ids
+      .iter()
+      .filter(|hunk_id| {
+         selected_hunk_ids
+            .iter()
+            .any(|selected| selected == *hunk_id)
+      })
+      .filter_map(|hunk_id| snapshot.hunk_by_id(hunk_id))
+      .collect();
+
+   if ordered.is_empty() {
+      return Ok(());
+   }
+
+   let patch = create_patch_for_file(file, &ordered);
+   let output = run_git_apply(&patch, &["apply", "--cached", "--recount"], dir)?;
+   if output.status.success() {
+      return Ok(());
    }
 
    let stderr = String::from_utf8_lossy(&output.stderr);
-   Err(CommitGenError::git(format!("git apply --cached --3way --recount failed: {stderr}")))
+   Err(CommitGenError::git(format!(
+      "Failed to force-stage {} from base: {}",
+      file.path,
+      stderr.trim()
+   )))
 }
 
 /// Stage specific files.
@@ -738,7 +912,7 @@ pub fn create_executable_group_patch(
    let mut fallback_files = Vec::new();
    let mut diff = String::new();
    let mut stat = String::new();
-   let mut apply_patch = String::new();
+   let mut apply_patches: Vec<FilePatch> = Vec::new();
    let mut index_blobs = Vec::new();
 
    for file in &snapshot.files {
@@ -783,7 +957,7 @@ pub fn create_executable_group_patch(
       if new_file_mode(file).is_some() && selected_hunks_cover_file(file, selected_for_file) {
          index_blobs.push(new_file_index_blob(file, &ordered_hunks)?);
       } else {
-         apply_patch.push_str(&file_patch);
+         apply_patches.push(FilePatch { path: file.path.clone(), patch: file_patch });
       }
       push_stat_line(&mut stat, &file.path, additions, deletions, false);
    }
@@ -791,19 +965,33 @@ pub fn create_executable_group_patch(
    fallback_files.sort();
    fallback_files.dedup();
 
-   Ok(ComposeGroupPatch { diff, stat, apply_patch, fallback_files, index_blobs })
+   Ok(ComposeGroupPatch { diff, stat, apply_patches, fallback_files, index_blobs })
 }
 
 pub fn stage_executable_group(
    snapshot: &ComposeSnapshot,
    group: &ComposeExecutableGroup,
    dir: &str,
-) -> Result<StageResult> {
+) -> Result<ComposeStageOutcome> {
    let group_patch = create_executable_group_patch(snapshot, group)?;
    let mut result = StageResult::EmptyPatch;
+   let mut skipped = Vec::new();
 
-   let patch_result = apply_patch_to_index(&group_patch.apply_patch, dir)?;
-   result = result.combine(patch_result);
+   for file_patch in &group_patch.apply_patches {
+      match apply_file_patch_to_index(&file_patch.patch, dir)? {
+         FilePatchOutcome::Staged => result = result.combine(StageResult::Staged),
+         FilePatchOutcome::AlreadyApplied => {
+            result = result.combine(StageResult::AlreadyApplied);
+         },
+         FilePatchOutcome::Empty => result = result.combine(StageResult::EmptyPatch),
+         FilePatchOutcome::Failed(reason) => {
+            // The planned patch no longer applies against the current state.
+            // Drop any conflicted index residue and keep the worktree change.
+            restore_index_path_to_head(&file_patch.path, dir)?;
+            skipped.push(SkippedFile { path: file_patch.path.clone(), reason });
+         },
+      }
+   }
 
    if !group_patch.fallback_files.is_empty() {
       stage_files(&group_patch.fallback_files, dir)?;
@@ -814,7 +1002,7 @@ pub fn stage_executable_group(
       result = result.combine(stage_index_blob(blob, dir)?);
    }
 
-   Ok(result)
+   Ok(ComposeStageOutcome { result, skipped })
 }
 
 #[cfg(test)]
@@ -1141,14 +1329,18 @@ index 3333333..4444444 100644
 
       reset_staging(dir.path().to_str().unwrap()).unwrap();
       assert_eq!(
-         stage_executable_group(&snapshot, &first_group, dir.path().to_str().unwrap()).unwrap(),
+         stage_executable_group(&snapshot, &first_group, dir.path().to_str().unwrap())
+            .unwrap()
+            .result,
          StageResult::Staged
       );
       run_git(&dir, &["commit", "-m", "first"]);
       write_file(&dir, "Dockerfile", "FROM scratch\n");
 
       assert_eq!(
-         stage_executable_group(&snapshot, &second_group, dir.path().to_str().unwrap()).unwrap(),
+         stage_executable_group(&snapshot, &second_group, dir.path().to_str().unwrap())
+            .unwrap()
+            .result,
          StageResult::Staged
       );
       let staged = staged_diff(&dir);
@@ -1232,12 +1424,12 @@ index 3333333..4444444 100644
       reset_staging(dir.path().to_str().unwrap()).unwrap();
       let first_result =
          stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
-      assert_eq!(first_result, StageResult::Staged);
+      assert_eq!(first_result.result, StageResult::Staged);
       run_git(&dir, &["commit", "-m", "applied"]);
 
       let second_result =
          stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
-      assert_eq!(second_result, StageResult::AlreadyApplied);
+      assert_eq!(second_result.result, StageResult::AlreadyApplied);
       assert!(staged_diff(&dir).trim().is_empty());
    }
 
@@ -1265,7 +1457,7 @@ index 3333333..4444444 100644
       reset_staging(dir.path().to_str().unwrap()).unwrap();
       let planned_result =
          stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
-      assert_eq!(planned_result, StageResult::Staged);
+      assert_eq!(planned_result.result, StageResult::Staged);
       let planned_staged = staged_diff(&dir);
       assert!(planned_staged.contains("+planned"));
       assert!(!planned_staged.contains("local edit"));
@@ -1274,7 +1466,7 @@ index 3333333..4444444 100644
       write_file(&dir, "notes.txt", "planned\nlocal edit\n");
       let reused_result =
          stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
-      assert_eq!(reused_result, StageResult::Staged);
+      assert_eq!(reused_result.result, StageResult::Staged);
       let reused_staged = staged_diff(&dir);
 
       assert_eq!(reused_staged, planned_staged);
@@ -1315,7 +1507,7 @@ index 0000000..0000000
       reset_staging(dir.path().to_str().unwrap()).unwrap();
       let result = stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
 
-      assert_eq!(result, StageResult::Staged);
+      assert_eq!(result.result, StageResult::Staged);
       let staged = staged_diff(&dir);
       assert!(staged.contains("+old"));
       assert!(staged.contains("+new"));
@@ -1323,7 +1515,7 @@ index 0000000..0000000
       assert!(!staged.contains("worktree edit"));
       let second_result =
          stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
-      assert_eq!(second_result, StageResult::AlreadyApplied);
+      assert_eq!(second_result.result, StageResult::AlreadyApplied);
    }
 
    #[test]
@@ -1355,7 +1547,7 @@ index 0000000..0000000
       reset_staging(dir.path().to_str().unwrap()).unwrap();
       let result = stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
 
-      assert_eq!(result, StageResult::Staged);
+      assert_eq!(result.result, StageResult::Staged);
       let staged = staged_diff(&dir);
       assert!(staged.contains("new file mode 100644"));
       assert!(!staged.contains("worktree edit"));
@@ -1388,9 +1580,141 @@ index 0000000..0000000
       reset_staging(dir.path().to_str().unwrap()).unwrap();
       let result = stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
 
-      assert_eq!(result, StageResult::Staged);
+      assert_eq!(result.result, StageResult::Staged);
       let staged = staged_diff(&dir);
       assert!(staged.contains("new file mode 160000"));
       assert!(staged.contains(&format!("+Subproject commit {oid}")));
+   }
+
+   #[test]
+   fn test_stage_executable_group_skips_file_whose_patch_no_longer_applies() {
+      let dir = init_repo();
+      write_file(&dir, "src/a.rs", &fixture_file_original());
+      write_file(&dir, "src/b.rs", "fn b() {}\n");
+      commit_all(&dir, "initial");
+
+      write_file(&dir, "src/a.rs", &fixture_file_two_hunks());
+      write_file(&dir, "src/b.rs", "fn b_changed() {}\n");
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let a_file = snapshot.file_by_path("src/a.rs").unwrap();
+      let b_file = snapshot.file_by_path("src/b.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![a_file.file_id.clone(), b_file.file_id.clone()],
+         rationale:    "both files".to_string(),
+         dependencies: vec![],
+         hunk_ids:     a_file
+            .hunk_ids
+            .iter()
+            .chain(b_file.hunk_ids.iter())
+            .cloned()
+            .collect(),
+      };
+
+      // Diverge src/a.rs at the same lines the plan touches and commit it, so the
+      // planned hunks for that file no longer apply (3-way merge conflicts).
+      write_file(&dir, "src/a.rs", &fixture_file_original().replace("alpha", "alpha diverged"));
+      run_git(&dir, &["add", "src/a.rs"]);
+      run_git(&dir, &["commit", "-m", "diverge a"]);
+
+      reset_staging(dir.path().to_str().unwrap()).unwrap();
+      write_file(&dir, "src/b.rs", "fn b_changed() {}\n");
+
+      let outcome =
+         stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
+
+      // src/b.rs still applies, so the group is committable; src/a.rs is skipped.
+      assert_eq!(outcome.result, StageResult::Staged);
+      assert_eq!(outcome.skipped.len(), 1);
+      assert_eq!(outcome.skipped[0].path, "src/a.rs");
+
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("b_changed"));
+      assert!(!staged.contains("alpha changed"));
+      // The skipped file's index entry is restored to HEAD: no conflict residue.
+      assert!(!staged.contains("src/a.rs"));
+   }
+
+   #[test]
+   fn test_force_stage_file_from_base_ignores_index_drift() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_two_hunks());
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      assert_eq!(source_file.hunk_ids.len(), 2);
+
+      // Drift the index far from base: stage an unrelated full-file rewrite, so a
+      // normal `git apply` of the planned hunks against this index would fail.
+      write_file(&dir, "src/lib.rs", "fn totally_different() {}\n");
+      run_git(&dir, &["add", "src/lib.rs"]);
+
+      // Force-stage only the first planned hunk from base, ignoring the drift.
+      force_stage_file_from_base(
+         &snapshot,
+         &source_file.file_id,
+         &[source_file.hunk_ids[0].clone()],
+         dir.path().to_str().unwrap(),
+      )
+      .unwrap();
+
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("alpha changed"));
+      assert!(!staged.contains("beta changed"));
+      assert!(!staged.contains("totally_different"));
+
+      // Applying both hunks reconstructs the full planned target from base.
+      force_stage_file_from_base(
+         &snapshot,
+         &source_file.file_id,
+         &source_file.hunk_ids.clone(),
+         dir.path().to_str().unwrap(),
+      )
+      .unwrap();
+      let staged = staged_diff(&dir);
+      assert!(staged.contains("alpha changed"));
+      assert!(staged.contains("beta changed"));
+      assert!(!staged.contains("totally_different"));
+   }
+
+   #[test]
+   fn test_force_stage_split_across_commits_leaves_worktree_clean() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      // The working tree holds the full planned change and is never rewritten.
+      write_file(&dir, "src/lib.rs", &fixture_file_two_hunks());
+
+      let dirs = dir.path().to_str().unwrap();
+      let diff = get_compose_diff(dirs).unwrap();
+      let stat = get_compose_stat(dirs).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let file = snapshot.file_by_path("src/lib.rs").unwrap();
+      assert_eq!(file.hunk_ids.len(), 2);
+
+      reset_staging(dirs).unwrap();
+
+      // Commit 1 takes the first hunk (cumulative = [h0]).
+      force_stage_file_from_base(&snapshot, &file.file_id, &[file.hunk_ids[0].clone()], dirs)
+         .unwrap();
+      run_git(&dir, &["commit", "-m", "first"]);
+
+      // Commit 2 takes both hunks (cumulative = [h0, h1]).
+      force_stage_file_from_base(&snapshot, &file.file_id, &file.hunk_ids.clone(), dirs).unwrap();
+      run_git(&dir, &["commit", "-m", "second"]);
+
+      // The two commits together reproduce the working tree exactly: nothing is
+      // left uncommitted on disk and no file was modified by staging.
+      let status = run_git(&dir, &["status", "--porcelain"]);
+      assert!(status.trim().is_empty(), "working tree should be clean, got: {status:?}");
    }
 }
