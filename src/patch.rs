@@ -55,6 +55,7 @@ struct IndexBlob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IndexObject {
    BlobContents(String),
+   BlobBytes(Vec<u8>),
    ExistingObject(String),
 }
 
@@ -218,52 +219,178 @@ fn resolve_blob_oid(oid: &str, path: &str, dir: &str) -> Result<String> {
    Ok(full)
 }
 
-/// Build the index entry that restores a file to its pre-change (base) blob,
-/// taken from the snapshot's `index <base>..<target>` diff header.
-fn base_index_blob(file: &ComposeFile, dir: &str) -> Result<IndexBlob> {
+/// Read a blob's raw bytes by object id.
+fn cat_file_blob(oid: &str, path: &str, dir: &str) -> Result<Vec<u8>> {
+   let output = git_command()
+      .args(["cat-file", "blob", oid])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to read base blob for {path}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git cat-file blob failed for {path}: {stderr}")));
+   }
+
+   Ok(output.stdout)
+}
+
+/// Resolve a file's base (pre-change) blob bytes and index mode from its diff
+/// header. New files (all-zero base oid, or no usable `index` line) resolve to
+/// empty bytes so the splice can build their contents from scratch.
+fn resolve_base_blob(file: &ComposeFile, dir: &str) -> Result<(Vec<u8>, String)> {
    let index_line = file
       .patch_header
       .lines()
-      .find(|line| line.starts_with("index "))
-      .ok_or_else(|| {
-         CommitGenError::Other(format!("Cannot reset {} from base: no diff index line", file.path))
-      })?;
+      .find(|line| line.starts_with("index "));
 
-   let rest = index_line.strip_prefix("index ").unwrap_or_default();
-   let mut tokens = rest.split_whitespace();
-   let range = tokens.next().unwrap_or_default();
-   let mode_token = tokens.next();
+   let base_oid = index_line.and_then(|line| {
+      let rest = line.strip_prefix("index ")?;
+      let range = rest.split_whitespace().next()?;
+      range.split_once("..").map(|(base, _)| base)
+   });
 
-   let base_oid = range
-      .split_once("..")
-      .map(|(base, _)| base)
-      .ok_or_else(|| {
-         CommitGenError::Other(format!(
-            "Cannot parse base blob for {} from '{index_line}'",
-            file.path
-         ))
-      })?;
+   match base_oid {
+      Some(oid) if !oid.is_empty() && oid.bytes().any(|byte| byte != b'0') => {
+         let full = resolve_blob_oid(oid, &file.path, dir)?;
+         let bytes = cat_file_blob(&full, &file.path, dir)?;
+         let mode = index_line
+            .and_then(|line| line.strip_prefix("index "))
+            .and_then(|rest| rest.split_whitespace().nth(1))
+            .map(str::to_string)
+            .or_else(|| {
+               file.patch_header.lines().find_map(|line| {
+                  line
+                     .strip_prefix("old mode ")
+                     .map(|mode| mode.trim().to_string())
+               })
+            })
+            .unwrap_or_else(|| "100644".to_string());
+         Ok((bytes, mode))
+      },
+      _ => {
+         let mode = new_file_mode(file).unwrap_or("100644").to_string();
+         Ok((Vec::new(), mode))
+      },
+   }
+}
 
-   if base_oid.is_empty() || base_oid.bytes().all(|byte| byte == b'0') {
-      return Err(CommitGenError::Other(format!(
-         "{} is newly added and has no base blob to reset from",
-         file.path
-      )));
+/// Split bytes into lines, each retaining its terminator (`\r\n`, `\n`, or none
+/// at EOF).
+fn split_lines_keep_eol(data: &[u8]) -> Vec<&[u8]> {
+   let mut lines = Vec::new();
+   let mut start = 0usize;
+   while start < data.len() {
+      if let Some(rel) = data[start..].iter().position(|&byte| byte == b'\n') {
+         lines.push(&data[start..=start + rel]);
+         start += rel + 1;
+      } else {
+         lines.push(&data[start..]);
+         break;
+      }
+   }
+   lines
+}
+
+/// The file's dominant line ending, used for added lines (whose EOL the diff
+/// text does not reliably carry).
+fn dominant_eol(lines: &[&[u8]]) -> &'static [u8] {
+   let mut crlf = 0usize;
+   let mut lf = 0usize;
+   for line in lines {
+      if line.ends_with(b"\r\n") {
+         crlf += 1;
+      } else if line.ends_with(b"\n") {
+         lf += 1;
+      }
+   }
+   if crlf > 0 && crlf >= lf {
+      b"\r\n"
+   } else {
+      b"\n"
+   }
+}
+
+/// Drop a trailing `\n` (and a preceding `\r`) from the buffer's last line.
+fn strip_trailing_eol(buf: &mut Vec<u8>) {
+   if buf.last() == Some(&b'\n') {
+      buf.pop();
+      if buf.last() == Some(&b'\r') {
+         buf.pop();
+      }
+   }
+}
+
+/// Reconstruct a file's content from its base blob plus the selected hunks,
+/// without `git apply`. Context and deleted lines are taken verbatim from the
+/// base (so exact byte content and line endings survive even when the diff text
+/// normalizes them); added lines use the file's dominant EOL. Hunks are applied
+/// in base-coordinate order, so a subset of a file's hunks splices correctly.
+fn splice_hunks_into_base(base: &[u8], hunks: &[&ComposeHunk]) -> Vec<u8> {
+   let base_lines = split_lines_keep_eol(base);
+   let eol = dominant_eol(&base_lines);
+
+   let mut ordered: Vec<&&ComposeHunk> = hunks.iter().collect();
+   ordered.sort_by_key(|hunk| hunk.old_start);
+
+   let mut out: Vec<u8> = Vec::with_capacity(base.len());
+   let mut cursor = 0usize; // 0-based index into base_lines
+
+   for hunk in ordered {
+      let start = hunk.old_start.saturating_sub(1);
+      while cursor < start && cursor < base_lines.len() {
+         out.extend_from_slice(base_lines[cursor]);
+         cursor += 1;
+      }
+
+      let mut prev: u8 = 0;
+      for (idx, line) in diff_lines_preserve_cr(&hunk.raw_patch).enumerate() {
+         if idx == 0 {
+            // hunk header (`@@ ... @@`)
+            continue;
+         }
+         let bytes = line.as_bytes();
+         if bytes.first() == Some(&b'\\') {
+            // "\ No newline at end of file": only meaningful when it follows an
+            // output-producing line (added/context); after a deletion it refers
+            // to the old side and must not alter the output.
+            if prev == b'+' || prev == b' ' {
+               strip_trailing_eol(&mut out);
+            }
+            continue;
+         }
+         match bytes.first() {
+            Some(b'-') => {
+               cursor += 1;
+               prev = b'-';
+            },
+            Some(b'+') => {
+               let mut content = &bytes[1..];
+               if content.last() == Some(&b'\r') {
+                  content = &content[..content.len() - 1];
+               }
+               out.extend_from_slice(content);
+               out.extend_from_slice(eol);
+               prev = b'+';
+            },
+            _ => {
+               // context line (leading space) or stray line: copy from base
+               if cursor < base_lines.len() {
+                  out.extend_from_slice(base_lines[cursor]);
+                  cursor += 1;
+               }
+               prev = b' ';
+            },
+         }
+      }
    }
 
-   let mode = mode_token
-      .map(str::to_string)
-      .or_else(|| {
-         file.patch_header.lines().find_map(|line| {
-            line
-               .strip_prefix("old mode ")
-               .map(|mode| mode.trim().to_string())
-         })
-      })
-      .unwrap_or_else(|| "100644".to_string());
+   while cursor < base_lines.len() {
+      out.extend_from_slice(base_lines[cursor]);
+      cursor += 1;
+   }
 
-   let full_oid = resolve_blob_oid(base_oid, &file.path, dir)?;
-   Ok(IndexBlob { path: file.path.clone(), mode, object: IndexObject::ExistingObject(full_oid) })
+   out
 }
 
 /// Force a file's index entry to `base + the selected hunks`, ignoring the
@@ -310,11 +437,6 @@ fn force_stage_file_from_base_with_index(
       .file_by_id(file_id)
       .ok_or_else(|| CommitGenError::Other(format!("Unknown compose file id {file_id}")))?;
 
-   // Clear any conflicted residue, then pin the entry to the base blob.
-   restore_index_path_to_head(&file.path, dir, index_file)?;
-   let base = base_index_blob(file, dir)?;
-   stage_index_blob(&base, dir, index_file)?;
-
    let ordered: Vec<&ComposeHunk> = file
       .hunk_ids
       .iter()
@@ -324,24 +446,23 @@ fn force_stage_file_from_base_with_index(
             .any(|selected| selected == *hunk_id)
       })
       .filter_map(|hunk_id| snapshot.hunk_by_id(hunk_id))
+      .filter(|hunk| !hunk.raw_patch.is_empty())
       .collect();
 
    if ordered.is_empty() {
       return Ok(());
    }
 
-   let patch = create_patch_for_file(file, &ordered);
-   let output = run_git_apply(&patch, &["apply", "--cached", "--recount"], dir, index_file)?;
-   if output.status.success() {
-      return Ok(());
-   }
+   // Clear any residue, then rewrite the index entry to the deterministically
+   // spliced target blob. No `git apply`: context/deleted lines come straight
+   // from the base blob, so line endings and exact bytes are preserved.
+   restore_index_path_to_head(&file.path, dir, index_file)?;
+   let (base_bytes, mode) = resolve_base_blob(file, dir)?;
+   let target = splice_hunks_into_base(&base_bytes, &ordered);
+   let blob = IndexBlob { path: file.path.clone(), mode, object: IndexObject::BlobBytes(target) };
+   stage_index_blob(&blob, dir, index_file)?;
 
-   let stderr = String::from_utf8_lossy(&output.stderr);
-   Err(CommitGenError::git(format!(
-      "Failed to force-stage {} from base: {}",
-      file.path,
-      stderr.trim()
-   )))
+   Ok(())
 }
 
 /// Stage specific files.
@@ -370,7 +491,7 @@ fn stage_files_with_index(files: &[String], dir: &str, index_file: Option<&Path>
    Ok(())
 }
 
-fn hash_blob(contents: &str, path: &str, dir: &str) -> Result<String> {
+fn hash_blob_bytes(contents: &[u8], path: &str, dir: &str) -> Result<String> {
    let mut child = git_command()
       .args(["hash-object", "-w", "--stdin"])
       .current_dir(dir)
@@ -388,7 +509,7 @@ fn hash_blob(contents: &str, path: &str, dir: &str) -> Result<String> {
       use std::io::Write;
 
       stdin
-         .write_all(contents.as_bytes())
+         .write_all(contents)
          .map_err(|e| CommitGenError::git(format!("Failed to write blob for {path}: {e}")))?;
    }
 
@@ -411,7 +532,10 @@ fn hash_blob(contents: &str, path: &str, dir: &str) -> Result<String> {
 
 fn index_blob_oid<'a>(blob: &'a IndexBlob, dir: &str) -> Result<Cow<'a, str>> {
    match &blob.object {
-      IndexObject::BlobContents(contents) => Ok(Cow::Owned(hash_blob(contents, &blob.path, dir)?)),
+      IndexObject::BlobContents(contents) => {
+         Ok(Cow::Owned(hash_blob_bytes(contents.as_bytes(), &blob.path, dir)?))
+      },
+      IndexObject::BlobBytes(bytes) => Ok(Cow::Owned(hash_blob_bytes(bytes, &blob.path, dir)?)),
       IndexObject::ExistingObject(oid) => Ok(Cow::Borrowed(oid.as_str())),
    }
 }
@@ -1023,9 +1147,22 @@ pub fn create_executable_group_patch(
          },
       );
       diff.push_str(&file_patch);
-      if new_file_mode(file).is_some() && selected_hunks_cover_file(file, selected_for_file) {
-         index_blobs.push(new_file_index_blob(file, &ordered_hunks)?);
+      if new_file_mode(file).is_some() {
+         // New files (and submodule gitlinks) keep their existing handling:
+         // covers-all builds the blob from the diff; partial falls back to apply.
+         if selected_hunks_cover_file(file, selected_for_file) {
+            index_blobs.push(new_file_index_blob(file, &ordered_hunks)?);
+         } else {
+            apply_patches.push(FilePatch { path: file.path.clone(), patch: file_patch });
+         }
+      } else if selected_hunks_cover_file(file, selected_for_file) {
+         // Whole-file change: stage straight from the working tree. No patch is
+         // reconstructed or applied, so line-ending/whitespace normalization can
+         // never make git reject its own diff.
+         fallback_files.push(file.path.clone());
       } else {
+         // Partial change to a shared file: apply just these hunks; if the apply
+         // is refused, the caller re-stages from base via splice.
          apply_patches.push(FilePatch { path: file.path.clone(), patch: file_patch });
       }
       push_stat_line(&mut stat, &file.path, additions, deletions, false);
@@ -1528,9 +1665,11 @@ index 3333333..4444444 100644
       assert_eq!(first_result.result, StageResult::Staged);
       run_git(&dir, &["commit", "-m", "applied"]);
 
+      // Re-staging the same whole-file change is idempotent: `git add` restages
+      // identical worktree content, so the index still matches HEAD afterward.
       let second_result =
          stage_executable_group(&snapshot, &group, dir.path().to_str().unwrap()).unwrap();
-      assert_eq!(second_result.result, StageResult::AlreadyApplied);
+      assert_eq!(second_result.result, StageResult::Staged);
       assert!(staged_diff(&dir).trim().is_empty());
    }
 
@@ -1709,11 +1848,10 @@ index 0000000..0000000
          file_ids:     vec![a_file.file_id.clone(), b_file.file_id.clone()],
          rationale:    "both files".to_string(),
          dependencies: vec![],
-         hunk_ids:     a_file
-            .hunk_ids
-            .iter()
-            .chain(b_file.hunk_ids.iter())
-            .cloned()
+         // Select only a's first hunk (partial) so it routes through git apply
+         // (covers-all files are staged via git add and never "skip").
+         hunk_ids:     std::iter::once(a_file.hunk_ids[0].clone())
+            .chain(b_file.hunk_ids.iter().cloned())
             .collect(),
       };
 
@@ -1739,6 +1877,191 @@ index 0000000..0000000
       assert!(!staged.contains("alpha changed"));
       // The skipped file's index entry is restored to HEAD: no conflict residue.
       assert!(!staged.contains("src/a.rs"));
+   }
+
+   #[test]
+   fn test_covers_all_modified_file_routes_to_git_add() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_two_hunks());
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![file.file_id.clone()],
+         rationale:    "all hunks".to_string(),
+         dependencies: vec![],
+         hunk_ids:     file.hunk_ids.clone(),
+      };
+
+      let group_patch = create_executable_group_patch(&snapshot, &group).unwrap();
+      // Whole-file change must be staged via git add, never via git apply.
+      assert!(group_patch.apply_patches.is_empty());
+      assert_eq!(group_patch.fallback_files, vec!["src/lib.rs".to_string()]);
+   }
+
+   #[test]
+   fn test_stage_executable_group_in_index_stages_crlf_file_via_git_add() {
+      let dir = init_repo();
+      run_git(&dir, &["config", "core.autocrlf", "false"]);
+      let original = [
+         "fn alpha() {",
+         "    println!(\"alpha\");",
+         "}",
+         "",
+         "// spacer 1",
+         "// spacer 2",
+         "// spacer 3",
+         "// spacer 4",
+         "fn beta() {",
+         "    println!(\"beta\");",
+         "}",
+         "",
+      ]
+      .join("\r\n");
+      let modified = original.replace("println!(\"beta\")", "println!(\"beta changed\")");
+      write_file(&dir, "src/crlf.rs", &original);
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/crlf.rs", &modified);
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let file = snapshot.file_by_path("src/crlf.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("fix").unwrap(),
+         scope:        None,
+         file_ids:     vec![file.file_id.clone()],
+         rationale:    "crlf change".to_string(),
+         dependencies: vec![],
+         hunk_ids:     file.hunk_ids.clone(),
+      };
+
+      let index = TempGitIndex::new(dir.path().to_str().unwrap()).unwrap();
+      read_tree_into_index(index.path(), "HEAD", dir.path().to_str().unwrap()).unwrap();
+      let outcome = stage_executable_group_in_index(
+         &snapshot,
+         &group,
+         dir.path().to_str().unwrap(),
+         index.path(),
+      )
+      .unwrap();
+      assert!(outcome.skipped.is_empty());
+
+      let staged = crate::git::git_command_with_index(index.path())
+         .args(["show", ":src/crlf.rs"])
+         .current_dir(dir.path())
+         .output()
+         .unwrap();
+      assert!(staged.status.success());
+      // CRLF preserved exactly, identical to the working tree.
+      assert_eq!(String::from_utf8_lossy(&staged.stdout), modified);
+   }
+
+   #[test]
+   fn test_force_stage_splice_partial_crlf_preserves_eol() {
+      let dir = init_repo();
+      run_git(&dir, &["config", "core.autocrlf", "false"]);
+      let original = [
+         "fn alpha() {",
+         "    println!(\"alpha\");",
+         "}",
+         "",
+         "// spacer 1",
+         "// spacer 2",
+         "// spacer 3",
+         "// spacer 4",
+         "// spacer 5",
+         "// spacer 6",
+         "fn beta() {",
+         "    println!(\"beta\");",
+         "}",
+         "",
+      ]
+      .join("\r\n");
+      // Change both alpha and beta so there are two separate hunks.
+      let modified = original
+         .replace("println!(\"alpha\")", "println!(\"alpha changed\")")
+         .replace("println!(\"beta\")", "println!(\"beta changed\")");
+      write_file(&dir, "src/crlf.rs", &original);
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/crlf.rs", &modified);
+
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      let file = snapshot.file_by_path("src/crlf.rs").unwrap();
+      assert!(file.hunk_ids.len() >= 2, "need at least two hunks for a partial test");
+
+      // Force-stage only the FIRST hunk (alpha) -> base + alpha hunk, CRLF kept.
+      let first_hunk = vec![file.hunk_ids[0].clone()];
+      let index = TempGitIndex::new(dir.path().to_str().unwrap()).unwrap();
+      read_tree_into_index(index.path(), "HEAD", dir.path().to_str().unwrap()).unwrap();
+      force_stage_file_from_base_in_index(
+         &snapshot,
+         &file.file_id,
+         &first_hunk,
+         dir.path().to_str().unwrap(),
+         index.path(),
+      )
+      .unwrap();
+
+      let staged = crate::git::git_command_with_index(index.path())
+         .args(["show", ":src/crlf.rs"])
+         .current_dir(dir.path())
+         .output()
+         .unwrap();
+      let staged = String::from_utf8_lossy(&staged.stdout).to_string();
+      let expected = original.replace("println!(\"alpha\")", "println!(\"alpha changed\")");
+      assert_eq!(staged, expected);
+      // Added line carries the file's CRLF (not the diff's normalization).
+      assert!(staged.contains("println!(\"alpha changed\");\r\n"));
+      assert!(!staged.contains("beta changed"));
+      assert!(staged.contains("println!(\"beta\");\r\n"));
+      assert!(!staged.contains("\r\r"));
+   }
+
+   #[test]
+   fn test_splice_hunks_unit_lf_and_crlf() {
+      // Direct unit test of the splicer against synthetic hunks.
+      use crate::compose_types::ComposeHunk;
+      fn hunk(old_start: usize, raw: &str) -> ComposeHunk {
+         ComposeHunk {
+            hunk_id: "H".to_string(),
+            file_id: "F".to_string(),
+            path: "f".to_string(),
+            old_start,
+            old_count: 0,
+            new_start: 0,
+            new_count: 0,
+            header: String::new(),
+            raw_patch: raw.to_string(),
+            snippet: String::new(),
+            semantic_key: String::new(),
+            synthetic: false,
+         }
+      }
+      // LF base, change middle line.
+      let base = b"a\nb\nc\n";
+      let h = hunk(1, "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n");
+      assert_eq!(splice_hunks_into_base(base, &[&h]), b"a\nB\nc\n");
+
+      // CRLF base, change middle line; added line must get CRLF, no double CR.
+      let base_cr = b"a\r\nb\r\nc\r\n";
+      let h_cr = hunk(1, "@@ -1,3 +1,3 @@\n a\r\n-b\r\n+B\r\n c\r\n");
+      assert_eq!(splice_hunks_into_base(base_cr, &[&h_cr]), b"a\r\nB\r\nc\r\n");
+
+      // No trailing newline at EOF on the new side.
+      let base2 = b"a\nb\nc\n";
+      let h2 = hunk(3, "@@ -3 +3 @@\n-c\n+c2\n\\ No newline at end of file\n");
+      assert_eq!(splice_hunks_into_base(base2, &[&h2]), b"a\nb\nc2");
    }
 
    #[test]

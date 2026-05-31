@@ -2834,14 +2834,8 @@ fn execute_compose_with_prepared_messages(
          eprintln!(
             "  {}",
             style::info(&format!(
-               "Re-staged {} from base; planned patch did not apply against current state ({})",
-               skipped.path,
-               skipped
-                  .reason
-                  .lines()
-                  .next()
-                  .unwrap_or("patch does not apply")
-                  .trim()
+               "Re-staged {} from base via splice (whole-file apply not used for partial hunks)",
+               skipped.path
             ))
          );
       }
@@ -3313,24 +3307,30 @@ index 3333333..4444444 100644
       commit_all(&dir, "initial");
       let initial_head = get_head_hash(dir.path().to_str().unwrap()).unwrap();
 
+      // A real change so the snapshot is valid.
+      write_file(&dir, "src/lib.rs", "changed\n");
+
+      // A pre-existing staged change that MUST survive a failed compose run.
       write_file(&dir, "sentinel.txt", "base\nstaged sentinel\n");
       run_git(&dir, &["add", "sentinel.txt"]);
       let staged_before = run_git(&dir, &["diff", "--cached"]);
       assert!(staged_before.contains("staged sentinel"));
 
-      let diff = "diff --git a/src/lib.rs b/src/lib.rs\nindex deadbee..badcafe 100644\n--- \
-                  a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-missing\n+changed\n";
-      let snapshot = build_compose_snapshot(diff, " src/lib.rs | 2 +-\n").unwrap();
+      let diff = get_compose_diff(dir.path().to_str().unwrap()).unwrap();
+      let stat = get_compose_stat(dir.path().to_str().unwrap()).unwrap();
+      let snapshot = build_compose_snapshot(&diff, &stat).unwrap();
       let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      // The plan references a hunk id that does not exist, so staging fails
+      // before any commit object is created or any ref is updated.
       let plan = ComposeExecutablePlan {
          groups:           vec![ComposeExecutableGroup {
             group_id:     "G1".to_string(),
             commit_type:  CommitType::new("fix").unwrap(),
             scope:        None,
             file_ids:     vec![source_file.file_id.clone()],
-            rationale:    "broken patch".to_string(),
+            rationale:    "unstageable group".to_string(),
             dependencies: vec![],
-            hunk_ids:     source_file.hunk_ids.clone(),
+            hunk_ids:     vec!["F999-H001".to_string()],
          }],
          dependency_order: vec![0],
       };
@@ -3348,11 +3348,11 @@ index 3333333..4444444 100644
          &config,
          &args,
          &base_state,
-         vec![canned_message("broken patch")],
+         vec![canned_message("unstageable group")],
       )
       .unwrap_err();
 
-      assert!(err.to_string().contains("Cannot resolve base blob"));
+      assert!(err.to_string().contains("unknown hunk id"));
       assert_eq!(get_head_hash(&args.dir).unwrap(), initial_head);
       assert_eq!(run_git(&dir, &["diff", "--cached"]), staged_before);
    }
