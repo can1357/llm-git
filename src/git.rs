@@ -279,6 +279,7 @@ fn check_index_lock(stderr: &str, dir: &str) -> Option<CommitGenError> {
 ///
 /// # Errors
 /// Returns an error when the directory is not part of a git repository.
+#[tracing::instrument(target = "lgit", name = "git.ensure_repo", skip_all, fields(dir))]
 pub fn ensure_git_repo(dir: &str) -> Result<()> {
    let output = git_command()
       .args(["rev-parse", "--show-toplevel"])
@@ -300,6 +301,7 @@ pub fn ensure_git_repo(dir: &str) -> Result<()> {
    Err(CommitGenError::git(format!("Failed to detect git repository: {stderr}")))
 }
 
+#[tracing::instrument(target = "lgit", name = "git.get_git_dir", skip_all, fields(dir))]
 pub fn get_git_dir(dir: &str) -> Result<PathBuf> {
    let output = git_command()
       .args(["rev-parse", "--absolute-git-dir"])
@@ -318,6 +320,7 @@ pub fn get_git_dir(dir: &str) -> Result<PathBuf> {
 }
 
 /// Get git diff based on the specified mode
+#[tracing::instrument(target = "lgit", name = "git.diff", skip_all, fields(mode = ?mode, target = ?target, dir))]
 pub fn get_git_diff(
    mode: &Mode,
    target: Option<&str>,
@@ -385,6 +388,7 @@ pub fn get_git_diff(
 }
 
 /// Get git diff --stat to show file-level changes summary
+#[tracing::instrument(target = "lgit", name = "git.stat", skip_all, fields(mode = ?mode, target = ?target, dir))]
 pub fn get_git_stat(
    mode: &Mode,
    target: Option<&str>,
@@ -442,6 +446,7 @@ pub fn get_git_stat(
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.numstat", skip_all, fields(mode = ?mode, target = ?target, dir))]
 pub fn get_git_numstat(
    mode: &Mode,
    target: Option<&str>,
@@ -498,6 +503,7 @@ pub fn get_git_numstat(
    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.compose_diff", skip_all, fields(dir))]
 pub fn get_compose_diff(dir: &str) -> Result<String> {
    let output = git_command()
       .args([
@@ -529,6 +535,7 @@ pub fn get_compose_diff(dir: &str) -> Result<String> {
    Ok(diff)
 }
 
+#[tracing::instrument(target = "lgit", name = "git.compose_stat", skip_all, fields(dir))]
 pub fn get_compose_stat(dir: &str) -> Result<String> {
    let output = git_command()
       .args(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--stat"])
@@ -554,6 +561,12 @@ pub fn get_compose_stat(dir: &str) -> Result<String> {
 
 /// Execute git commit with the given message
 #[allow(clippy::fn_params_excessive_bools, reason = "commit flags are naturally boolean")]
+#[tracing::instrument(
+   target = "lgit",
+   name = "git.commit",
+   skip_all,
+   fields(dir, dry_run, sign, signoff, skip_hooks, amend)
+)]
 pub fn git_commit(
    message: &str,
    dry_run: bool,
@@ -632,6 +645,7 @@ pub fn git_commit(
 }
 
 /// Execute git push
+#[tracing::instrument(target = "lgit", name = "git.push", skip_all, fields(dir))]
 pub fn git_push(dir: &str) -> Result<()> {
    if style::pipe_mode() {
       eprintln!("\n{}", style::info("Pushing changes..."));
@@ -685,6 +699,7 @@ pub fn git_push(dir: &str) -> Result<()> {
 }
 
 /// Get the current HEAD commit hash
+#[tracing::instrument(target = "lgit", name = "git.head_hash", skip_all, fields(dir))]
 pub fn get_head_hash(dir: &str) -> Result<String> {
    let output = git_command()
       .args(["rev-parse", "HEAD"])
@@ -700,6 +715,7 @@ pub fn get_head_hash(dir: &str) -> Result<String> {
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.current_head_ref", skip_all, fields(dir))]
 pub fn current_head_ref(dir: &str) -> Result<String> {
    let output = git_command()
       .args(["symbolic-ref", "-q", "HEAD"])
@@ -717,6 +733,7 @@ pub fn current_head_ref(dir: &str) -> Result<String> {
    Ok("HEAD".to_string())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.write_real_index_tree", skip_all, fields(dir))]
 pub fn write_real_index_tree(dir: &str) -> Result<String> {
    let output = git_command()
       .arg("write-tree")
@@ -732,6 +749,7 @@ pub fn write_real_index_tree(dir: &str) -> Result<String> {
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.read_tree_into_index", skip_all, fields(dir, treeish, index = %index_file.display()))]
 pub fn read_tree_into_index(index_file: &Path, treeish: &str, dir: &str) -> Result<()> {
    let output = git_command_with_index(index_file)
       .arg("read-tree")
@@ -748,6 +766,7 @@ pub fn read_tree_into_index(index_file: &Path, treeish: &str, dir: &str) -> Resu
    Ok(())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.write_index_tree", skip_all, fields(dir, index = %index_file.display()))]
 pub fn write_index_tree(index_file: &Path, dir: &str) -> Result<String> {
    let output = git_command_with_index(index_file)
       .arg("write-tree")
@@ -765,6 +784,12 @@ pub fn write_index_tree(index_file: &Path, dir: &str) -> Result<String> {
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[tracing::instrument(
+   target = "lgit",
+   name = "git.commit_tree",
+   skip_all,
+   fields(dir, parent, tree, sign)
+)]
 pub fn commit_tree(
    tree: &str,
    parent: &str,
@@ -813,6 +838,12 @@ pub fn commit_tree(
    Ok(hash)
 }
 
+#[tracing::instrument(
+   target = "lgit",
+   name = "git.update_ref_checked",
+   skip_all,
+   fields(dir, refname, new, old)
+)]
 pub fn update_ref_checked(refname: &str, new: &str, old: &str, dir: &str) -> Result<()> {
    let output = git_command()
       .args(["update-ref", refname, new, old])
@@ -828,6 +859,7 @@ pub fn update_ref_checked(refname: &str, new: &str, old: &str, dir: &str) -> Res
    Ok(())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.reset_mixed", skip_all, fields(dir, treeish))]
 pub fn reset_mixed_to(treeish: &str, dir: &str) -> Result<()> {
    let output = git_command()
       .args(["reset", "--mixed", "-q", treeish])
@@ -843,6 +875,7 @@ pub fn reset_mixed_to(treeish: &str, dir: &str) -> Result<()> {
    Ok(())
 }
 
+#[tracing::instrument(target = "lgit", name = "git.append_signoff", skip_all, fields(dir))]
 pub fn append_signoff_trailer(message: &str, dir: &str) -> Result<String> {
    let output = git_command()
       .args(["var", "GIT_COMMITTER_IDENT"])
@@ -875,6 +908,7 @@ pub fn append_signoff_trailer(message: &str, dir: &str) -> Result<String> {
 // === History Rewrite Operations ===
 
 /// Get list of commit hashes to rewrite (in chronological order)
+#[tracing::instrument(target = "lgit", name = "git.commit_list", skip_all, fields(dir, start_ref = ?start_ref))]
 pub fn get_commit_list(start_ref: Option<&str>, dir: &str) -> Result<Vec<String>> {
    let mut args = vec!["rev-list", "--reverse"];
    let range;
@@ -901,6 +935,7 @@ pub fn get_commit_list(start_ref: Option<&str>, dir: &str) -> Result<Vec<String>
 }
 
 /// Extract complete metadata for a commit (for rewriting)
+#[tracing::instrument(target = "lgit", name = "git.commit_metadata", skip_all, fields(dir, hash))]
 pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
    // Format: author_name\0author_email\0author_date\0committer_name\
    // 0committer_email\0committer_date\0message
@@ -962,6 +997,7 @@ pub fn get_commit_metadata(hash: &str, dir: &str) -> Result<CommitMetadata> {
 }
 
 /// Check if working directory is clean
+#[tracing::instrument(target = "lgit", name = "git.check_worktree_clean", skip_all, fields(dir))]
 pub fn check_working_tree_clean(dir: &str) -> Result<bool> {
    let output = git_command()
       .args(["status", "--porcelain"])
@@ -973,6 +1009,7 @@ pub fn check_working_tree_clean(dir: &str) -> Result<bool> {
 }
 
 /// Create timestamped backup branch
+#[tracing::instrument(target = "lgit", name = "git.create_backup_branch", skip_all, fields(dir))]
 pub fn create_backup_branch(dir: &str) -> Result<String> {
    use chrono::Local;
 
@@ -994,6 +1031,7 @@ pub fn create_backup_branch(dir: &str) -> Result<String> {
 }
 
 /// Get recent commit messages for style consistency (last N commits)
+#[tracing::instrument(target = "lgit", name = "git.recent_commits", skip_all, fields(dir, count))]
 pub fn get_recent_commits(dir: &str, count: usize) -> Result<Vec<String>> {
    let output = git_command()
       .args(["log", &format!("-{count}"), "--pretty=format:%s"])
@@ -1011,6 +1049,7 @@ pub fn get_recent_commits(dir: &str, count: usize) -> Result<Vec<String>> {
 }
 
 /// Extract common scopes from git history by parsing commit messages
+#[tracing::instrument(target = "lgit", name = "git.common_scopes", skip_all, fields(dir, limit))]
 pub fn get_common_scopes(dir: &str, limit: usize) -> Result<Vec<(String, usize)>> {
    let output = git_command()
       .args(["log", &format!("-{limit}"), "--pretty=format:%s"])
@@ -1193,6 +1232,7 @@ pub fn extract_style_patterns(commits: &[String]) -> Option<StylePatterns> {
 }
 
 /// Rewrite git history with new commit messages
+#[tracing::instrument(target = "lgit", name = "git.rewrite_history", skip_all, fields(dir, commit_count = commits.len()))]
 pub fn rewrite_history(
    commits: &[CommitMetadata],
    new_messages: &[String],

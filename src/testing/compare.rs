@@ -111,6 +111,7 @@ mod tests {
       let golden = ConventionalAnalysis {
          commit_type: CommitType::new("feat").unwrap(),
          scope:       Some(Scope::new("api").unwrap()),
+         summary:     None,
          details:     vec![],
          issue_refs:  vec![],
       };
@@ -127,12 +128,14 @@ mod tests {
       let golden = ConventionalAnalysis {
          commit_type: CommitType::new("feat").unwrap(),
          scope:       None,
+         summary:     None,
          details:     vec![],
          issue_refs:  vec![],
       };
       let actual = ConventionalAnalysis {
          commit_type: CommitType::new("fix").unwrap(),
          scope:       None,
+         summary:     None,
          details:     vec![],
          issue_refs:  vec![],
       };
@@ -147,12 +150,14 @@ mod tests {
       let golden = ConventionalAnalysis {
          commit_type: CommitType::new("feat").unwrap(),
          scope:       Some(Scope::new("api").unwrap()),
+         summary:     None,
          details:     vec![],
          issue_refs:  vec![],
       };
       let actual = ConventionalAnalysis {
          commit_type: CommitType::new("feat").unwrap(),
          scope:       Some(Scope::new("api/client").unwrap()),
+         summary:     None,
          details:     vec![],
          issue_refs:  vec![],
       };

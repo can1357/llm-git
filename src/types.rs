@@ -831,6 +831,8 @@ pub struct ConventionalAnalysis {
    pub commit_type: CommitType,
    #[serde(default, deserialize_with = "deserialize_optional_scope")]
    pub scope:       Option<Scope>,
+   #[serde(default, skip_serializing_if = "Option::is_none")]
+   pub summary:     Option<String>,
    /// Structured detail points with optional changelog metadata
    #[serde(default, deserialize_with = "deserialize_analysis_details")]
    pub details:     Vec<AnalysisDetail>,
@@ -1180,6 +1182,10 @@ pub struct Args {
    #[arg(long)]
    pub debug_output: Option<PathBuf>,
 
+   /// Write detailed profiling trace events as JSON lines to this file
+   #[arg(long, value_name = "FILE")]
+   pub trace_output: Option<PathBuf>,
+
    // === Test mode args ===
    /// Run fixture-based tests
    #[arg(long, conflicts_with_all = ["target", "rewrite", "compose"])]
@@ -1251,6 +1257,7 @@ impl Default for Args {
          compose_test_after_each: false,
          no_changelog:            false,
          debug_output:            None,
+         trace_output:            None,
          test:                    false,
          test_update:             false,
          test_add:                None,
@@ -1829,6 +1836,23 @@ mod tests {
             },
          }
       }
+   }
+
+   #[test]
+   fn test_conventional_analysis_summary_roundtrip() {
+      let json = r##"{
+         "type": "feat",
+         "scope": "api",
+         "summary": "added holistic commit titles",
+         "details": [{"text": "Added summary generation to holistic analysis.", "user_visible": false}],
+         "issue_refs": ["#123"]
+      }"##;
+
+      let analysis: ConventionalAnalysis = serde_json::from_str(json).unwrap();
+      assert_eq!(analysis.summary.as_deref(), Some("added holistic commit titles"));
+
+      let serialized = serde_json::to_value(&analysis).unwrap();
+      assert_eq!(serialized["summary"], "added holistic commit titles");
    }
 
    #[test]

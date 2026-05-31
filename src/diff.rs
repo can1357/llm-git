@@ -117,6 +117,7 @@ impl FileDiff {
 }
 
 /// Parse a git diff into individual file diffs
+#[tracing::instrument(target = "lgit", name = "diff.parse", skip_all, fields(diff_bytes = diff.len()))]
 pub fn parse_diff(diff: &str) -> Vec<FileDiff> {
    let mut file_diffs = Vec::new();
    let mut current_file: Option<FileDiff> = None;
@@ -199,6 +200,7 @@ pub fn parse_diff(diff: &str) -> Vec<FileDiff> {
 }
 
 /// Smart truncation of git diff with token-aware budgeting
+#[tracing::instrument(target = "lgit", name = "diff.smart_truncate", skip_all, fields(diff_bytes = diff.len(), max_length))]
 pub fn smart_truncate_diff(
    diff: &str,
    max_length: usize,
@@ -319,6 +321,7 @@ pub fn smart_truncate_diff(
 }
 
 /// Reconstruct a diff from `FileDiff` objects
+#[tracing::instrument(target = "lgit", name = "diff.reconstruct", skip_all, fields(file_count = files.len()))]
 pub fn reconstruct_diff(files: &[FileDiff]) -> String {
    // Pre-allocate capacity based on file sizes
    let capacity: usize = files.iter().map(|f| f.size() + 1).sum();
@@ -343,6 +346,7 @@ pub fn reconstruct_diff(files: &[FileDiff]) -> String {
 ///
 /// Unlike `smart_truncate_diff` which works on byte budgets, this operates on
 /// line counts for simpler/faster context window management in fast mode.
+#[tracing::instrument(target = "lgit", name = "diff.truncate_by_lines", skip_all, fields(diff_bytes = diff.len(), max_lines))]
 pub fn truncate_diff_by_lines(diff: &str, max_lines: usize, config: &CommitConfig) -> String {
    let files = parse_diff(diff);
 

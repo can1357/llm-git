@@ -1,12 +1,12 @@
 use std::{
-   path::Path,
+   path::{Path, PathBuf},
    time::{Duration, Instant},
 };
 
 use analysis::{ScopeAnalyzer, extract_scope_candidates};
 use api::{
    AnalysisContext, fallback_summary, generate_analysis_with_map_reduce, generate_fast_commit,
-   generate_summary_from_analysis,
+   generate_summary_from_analysis, summary_from_holistic_analysis,
 };
 use arboard::Clipboard;
 use clap::{CommandFactory, Parser};
@@ -35,6 +35,7 @@ macro_rules! status {
 }
 
 /// Save debug output to the specified directory
+#[tracing::instrument(target = "lgit", name = "io.save_debug_output", skip_all, fields(path = %dir.join(filename).display()))]
 fn save_debug_output(dir: &Path, filename: &str, content: &str) -> Result<()> {
    std::fs::create_dir_all(dir)?;
    let path = dir.join(filename);
@@ -69,19 +70,36 @@ fn round_ms(duration: Duration) -> f64 {
 }
 
 fn record_timing(phases: &mut Option<Vec<TimingPhase>>, phase: &str, duration: Duration) {
+   let duration_ms = round_ms(duration);
+   if profile::enabled() {
+      tracing::info!(
+         target: profile::TARGET,
+         event = "timing_recorded",
+         section = phase,
+         elapsed_ms = duration.as_secs_f64() * 1000.0,
+         elapsed_us = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX),
+      );
+   }
+
    let Some(phases) = phases.as_mut() else {
       return;
    };
 
-   phases.push(TimingPhase {
-      phase:       phase.to_string(),
-      duration_ms: round_ms(duration),
-      share_pct:   0.0,
-   });
+   phases.push(TimingPhase { phase: phase.to_string(), duration_ms, share_pct: 0.0 });
 }
 
 fn timings_enabled(args: &Args) -> bool {
-   args.debug_output.is_some() || std::env::var("LLM_GIT_TRACE").is_ok()
+   args.debug_output.is_some()
+      || args.trace_output.is_some()
+      || std::env::var_os("LLM_GIT_TRACE_FILE").is_some_and(|path| !path.is_empty())
+      || std::env::var("LLM_GIT_TRACE").is_ok()
+}
+
+fn trace_output_path(args: &Args) -> Option<PathBuf> {
+   args.trace_output.clone().or_else(|| {
+      std::env::var_os("LLM_GIT_TRACE_FILE")
+         .and_then(|path| (!path.is_empty()).then(|| PathBuf::from(path)))
+   })
 }
 
 fn finalize_timings(mut phases: Vec<TimingPhase>, total: Duration) -> TimingReport {
@@ -103,6 +121,15 @@ fn emit_timing_report(args: &Args, report: &TimingReport) -> Result<()> {
       save_debug_output(debug_dir, "timings.json", &report_json)?;
    }
 
+   if profile::enabled() {
+      tracing::info!(
+         target: profile::TARGET,
+         event = "timing_report_finished",
+         total_ms = report.total_ms,
+         phase_count = report.phases.len(),
+      );
+   }
+
    if std::env::var("LLM_GIT_TRACE").is_ok() {
       eprintln!("[TIMING] total={:.1}ms", report.total_ms);
       for phase in &report.phases {
@@ -117,6 +144,7 @@ fn emit_timing_report(args: &Args, report: &TimingReport) -> Result<()> {
 }
 
 /// Run test mode for fixture-based testing
+#[tracing::instrument(target = "lgit", name = "test.run_test_mode", skip_all)]
 async fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    use llm_git::testing::{self, TestRunner, TestSummary};
 
@@ -222,6 +250,7 @@ async fn run_test_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 }
 
 /// Add a new fixture from a commit
+#[tracing::instrument(target = "lgit", name = "test.add_fixture", skip_all, fields(commit = commit_hash, name, repo_dir))]
 fn add_fixture(
    fixtures_dir: &Path,
    commit_hash: &str,
@@ -334,6 +363,7 @@ fn apply_cli_overrides(config: &mut CommitConfig, args: &Args) {
 }
 
 /// Load config from args or default
+#[tracing::instrument(target = "lgit", name = "config.load", skip_all)]
 fn load_config_from_args(args: &Args) -> Result<CommitConfig> {
    if let Some(config_path) = &args.config {
       CommitConfig::from_file(config_path)
@@ -395,6 +425,7 @@ fn auto_fast_changed_lines(numstat: &str, config: &CommitConfig) -> Option<usize
 
 /// Main generation pipeline: get diff/stat → truncate → analyze → summarize →
 /// build commit
+#[tracing::instrument(target = "lgit", name = "standard.run_generation", skip_all, fields(mode = ?args.mode, dir = %args.dir))]
 async fn run_generation(
    config: &CommitConfig,
    args: &Args,
@@ -418,10 +449,13 @@ async fn run_generation(
    }
 
    status!(
-      "{} {} {} {}",
+      "{} {} {} {} {} {} {}",
       style::dim("›"),
-      style::dim("model:"),
+      style::dim("models:"),
+      style::dim("analysis"),
       style::model(&config.analysis_model),
+      style::dim("summary"),
+      style::model(&config.summary_model),
       style::dim(&format!("(temp: {})", config.temperature))
    );
 
@@ -501,7 +535,7 @@ async fn run_generation(
       debug_output:    args.debug_output.as_deref(),
       debug_prefix:    None,
    };
-   let analysis = style::with_spinner("Generating conventional commit analysis", async {
+   let analysis = style::with_spinner("Analysis phase: waiting for LLM response", async {
       generate_analysis_with_map_reduce(
          &stat,
          &diff,
@@ -533,28 +567,44 @@ async fn run_generation(
 
    let detail_points = analysis.body_texts();
    let phase_start = Instant::now();
-   let summary = style::with_spinner("Creating summary", async {
-      generate_summary_from_analysis(
-         &stat,
-         analysis.commit_type.as_str(),
-         analysis.scope.as_ref().map(|s| s.as_str()),
-         &detail_points,
-         context.as_deref(),
-         config,
-         args.debug_output.as_deref(),
-         None,
-      )
-      .await
-   })
-   .await
-   .unwrap_or_else(|err| {
-      eprintln!(
-         "{}",
-         style::warning(&format!("Failed to create summary with {}: {err}", config.summary_model))
-      );
-      fallback_summary(&stat, &detail_points, analysis.commit_type.as_str(), config)
-   });
-   record_timing(timings, "generate_summary", phase_start.elapsed());
+   let (summary, summary_phase) = match summary_from_holistic_analysis(&analysis, config) {
+      Ok(Some(summary)) => (summary, "use_analysis_summary"),
+      Ok(None) => {
+         let summary = style::with_spinner("Summary phase: waiting for LLM response", async {
+            generate_summary_from_analysis(
+               &stat,
+               analysis.commit_type.as_str(),
+               analysis.scope.as_ref().map(|s| s.as_str()),
+               &detail_points,
+               context.as_deref(),
+               config,
+               args.debug_output.as_deref(),
+               None,
+            )
+            .await
+         })
+         .await
+         .unwrap_or_else(|err| {
+            eprintln!(
+               "{}",
+               style::warning(&format!(
+                  "Failed to create summary with {}: {err}",
+                  config.summary_model
+               ))
+            );
+            fallback_summary(&stat, &detail_points, analysis.commit_type.as_str(), config)
+         });
+         (summary, "generate_summary")
+      },
+      Err(err) => {
+         eprintln!("{}", style::warning(&format!("Invalid analysis summary: {err}")));
+         (
+            fallback_summary(&stat, &detail_points, analysis.commit_type.as_str(), config),
+            "use_analysis_summary",
+         )
+      },
+   };
+   record_timing(timings, summary_phase, phase_start.elapsed());
 
    // Save summary debug output
    if let Some(debug_dir) = &args.debug_output {
@@ -580,6 +630,7 @@ async fn run_generation(
 }
 
 /// Post-process, validate, retry with fallback. Returns validation error if any
+#[tracing::instrument(target = "lgit", name = "standard.validate_and_process", skip_all, fields(commit_type = %commit_msg.commit_type, detail_count = detail_points.len()))]
 async fn validate_and_process(
    commit_msg: &mut ConventionalCommit,
    stat: &str,
@@ -674,6 +725,7 @@ async fn validate_and_process(
 }
 
 /// Copy text to clipboard
+#[tracing::instrument(target = "lgit", name = "clipboard.copy", skip_all)]
 fn copy_to_clipboard(text: &str) -> Result<()> {
    let mut clipboard = Clipboard::new().map_err(CommitGenError::ClipboardError)?;
    clipboard
@@ -683,6 +735,7 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 }
 
 /// Auto-stage all changes if nothing is staged in the working directory.
+#[tracing::instrument(target = "lgit", name = "git.auto_stage_if_needed", skip_all, fields(dir))]
 fn auto_stage_if_needed(dir: &str) -> Result<()> {
    let staged_check = git_command()
       .args(["diff", "--cached", "--quiet"])
@@ -715,7 +768,7 @@ fn auto_stage_if_needed(dir: &str) -> Result<()> {
          });
       }
 
-      status!("{} {}", style::info("›"), style::dim("No staged changes, staging all..."));
+      status!("{} {}", style::info("›"), style::dim("No staged changes; running git add -A"));
       let add_output = git_command()
          .args(["add", "-A"])
          .current_dir(dir)
@@ -732,6 +785,7 @@ fn auto_stage_if_needed(dir: &str) -> Result<()> {
 }
 
 /// Fast mode: single API call to generate a complete commit message.
+#[tracing::instrument(target = "lgit", name = "fast.run_fast_mode", skip_all, fields(mode = ?args.mode, dir = %args.dir))]
 async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    let total_start = Instant::now();
    let mut timings = timings_enabled(args).then(Vec::new);
@@ -792,7 +846,7 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 
    // Single API call generates the complete commit
    let phase_start = Instant::now();
-   let mut commit_msg = style::with_spinner("Generating commit (fast mode)", async {
+   let mut commit_msg = style::with_spinner("Fast mode: waiting for LLM response", async {
       generate_fast_commit(
          &stat,
          &diff,
@@ -914,7 +968,32 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
 #[tokio::main]
 async fn main() -> miette::Result<()> {
    let args = Args::parse();
+   let trace_path = trace_output_path(&args);
+   let trace_guard = trace_path
+      .as_deref()
+      .map(profile::init_file_tracing)
+      .transpose()?;
 
+   if let Some(active_trace) = &trace_guard {
+      tracing::info!(
+         target: profile::TARGET,
+         event = "cli_started",
+         trace_file = %active_trace.path().display(),
+         mode = ?args.mode,
+         fast = args.fast,
+         compose = args.compose,
+         rewrite = args.rewrite,
+         test = args.test,
+         dry_run = args.dry_run,
+         dir = %args.dir,
+      );
+   }
+
+   run_cli(args).await
+}
+
+#[tracing::instrument(target = "lgit", name = "main.run_cli", skip_all, fields(mode = ?args.mode, fast = args.fast, compose = args.compose, rewrite = args.rewrite, test = args.test, dry_run = args.dry_run, dir = %args.dir))]
+async fn run_cli(args: Args) -> miette::Result<()> {
    // Emit a completion script and exit before any config/git work so it works
    // outside a repository and without a configured API endpoint.
    if let Some(shell) = args.completions {
@@ -1125,6 +1204,8 @@ async fn main() -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
+   use llm_git::types::ConventionalAnalysis;
+
    use super::*;
 
    // ========== CLI / completions Tests ==========
@@ -1134,6 +1215,16 @@ mod tests {
       // clap's own consistency checks: catches conflicting attrs, duplicate
       // flags, bad value parsers, etc. across the whole Args definition.
       Args::command().debug_assert();
+   }
+
+   #[test]
+   fn trace_output_flag_enables_file_profiling() {
+      let args = Args::try_parse_from(["lgit", "--trace-output", "profile.jsonl", "--dry-run"])
+         .expect("trace output flag should parse");
+
+      assert_eq!(args.trace_output.as_deref(), Some(Path::new("profile.jsonl")));
+      assert_eq!(trace_output_path(&args).as_deref(), Some(Path::new("profile.jsonl")));
+      assert!(timings_enabled(&args));
    }
 
    #[test]
@@ -1150,6 +1241,40 @@ mod tests {
             "{shell} completion should reference the lgit binary name"
          );
       }
+   }
+
+   fn test_analysis_with_summary(summary: Option<&str>) -> ConventionalAnalysis {
+      ConventionalAnalysis {
+         commit_type: types::CommitType::new("feat").unwrap(),
+         scope:       Some(types::Scope::new("api").unwrap()),
+         summary:     summary.map(str::to_string),
+         details:     vec![],
+         issue_refs:  vec![],
+      }
+   }
+
+   #[test]
+   fn test_summary_from_holistic_analysis_strips_prefix() {
+      let config = CommitConfig::default();
+      let analysis = test_analysis_with_summary(Some("feat(api): added holistic commit titles"));
+
+      let summary = summary_from_holistic_analysis(&analysis, &config)
+         .unwrap()
+         .expect("summary should be present");
+
+      assert_eq!(summary.as_str(), "added holistic commit titles");
+   }
+
+   #[test]
+   fn test_summary_from_holistic_analysis_ignores_blank_summary() {
+      let config = CommitConfig::default();
+      let analysis = test_analysis_with_summary(Some("   "));
+
+      assert!(
+         summary_from_holistic_analysis(&analysis, &config)
+            .unwrap()
+            .is_none()
+      );
    }
 
    // ========== build_footers Tests ==========

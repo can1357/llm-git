@@ -21,7 +21,19 @@ Forbidden scopes (use `null`): `src`, `lib`, `include`, `tests`, `benches`, `exa
 
 If unsure, choose `null` rather than a weak or misleading scope.
 
-## 2. Generate Details (0-6 items)
+## 2. Generate Summary
+
+Return `summary` as the description part after `type(scope):`.
+
+The summary:
+1. Starts with a lowercase past-tense verb
+2. Is an umbrella headline for the whole changeset
+3. Synthesizes the shared behavior or outcome across the diff and details
+4. Does not copy detail #1 or focus on one narrow file unless it dominates
+5. Has no `type(scope):` prefix, no trailing period, and no markdown
+6. Fits the configured summary guideline (normally ≤72 characters including prefix)
+
+## 3. Generate Details (0-6 items)
 
 Return only the highest-signal 0-6 details.
 
@@ -47,7 +59,7 @@ Priority: user-visible -> perf/security -> architecture -> internal.
 
 State only visible rationale. If unclear, use neutral: "Updated logic for correctness."
 
-## 3. Assign Changelog Metadata
+## 4. Assign Changelog Metadata
 
 | Condition | `changelog_category` |
 |-----------|---------------------|
@@ -66,11 +78,12 @@ Omit `changelog_category` when `user_visible: false`.
 
 Only add changelog metadata when it helps explain a user-facing impact.
 
-## 4. Verify Before Finalizing
+## 5. Verify Before Finalizing
 
 Before responding, check that:
 - `type` matches the dominant change and is one of the allowed commit types.
 - `scope` is either a valid short scope or `null`.
+- `summary` is an umbrella headline, starts with a past-tense verb, and has no prefix or period.
 - `details` are complete, grounded, and within the 0-6 limit.
 - `issue_refs` only contains references supported by the diff/context.
 - The final tool payload matches the schema exactly and contains no extra keys.
@@ -83,6 +96,7 @@ Call `create_conventional_analysis` with exactly:
 {
   "type": "feat|fix|refactor|docs|test|chore|style|perf|build|ci|revert|deps|security|config|ux|release|hotfix|infra|init|merge|hack|wip",
   "scope": "component-name" | null,
+  "summary": "past-tense umbrella headline without prefix or period",
   "details": [
     {
       "text": "Past-tense description ending with period.",
@@ -107,6 +121,7 @@ Do not add any other keys or prose.
 {
   "type": "feat",
   "scope": "api",
+  "summary": "added mutual TLS support for secure API transports",
   "details": [
     {
       "text": "Added TLS mutual authentication to prevent man-in-the-middle attacks (#100).",
@@ -133,6 +148,7 @@ Do not add any other keys or prose.
 {
   "type": "refactor",
   "scope": "parser",
+  "summary": "restructured parser validation for shared error handling",
   "details": [
     {
       "text": "Extracted validation logic into separate module for reusability.",
@@ -153,6 +169,7 @@ Do not add any other keys or prose.
 {
   "type": "fix",
   "scope": "parser",
+  "summary": "fixed parser bounds checks for invalid inputs",
   "details": [
     {
       "text": "Corrected off-by-one error causing buffer overflow on large inputs (#456).",
@@ -175,6 +192,7 @@ Do not add any other keys or prose.
 {
   "type": "chore",
   "scope": "deps",
+  "summary": "updated dependency metadata",
   "details": [],
   "issue_refs": []
 }

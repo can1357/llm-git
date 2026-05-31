@@ -368,6 +368,7 @@ impl ScopeAnalyzer {
 
 /// Extract candidate scopes from git diff --numstat output
 /// Returns (`scope_string`, `is_wide_change`)
+#[tracing::instrument(target = "lgit", name = "analysis.extract_scope_candidates", skip_all, fields(mode = ?mode, target = ?target, dir))]
 pub fn extract_scope_candidates(
    mode: &Mode,
    target: Option<&str>,

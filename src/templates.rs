@@ -4,6 +4,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use serde::Serialize;
 use rust_embed::RustEmbed;
 use tera::{Context, Tera};
 
@@ -435,18 +436,22 @@ pub fn render_changelog_prompt(
    render_prompt_parts(&format!("changelog/{variant}.md"), &template_content, &context)
 }
 
-/// Render map prompt template (per-file observation extraction)
+#[derive(Serialize)]
+pub struct MapFile<'a> {
+   pub path: &'a str,
+   pub diff: &'a str,
+}
+
+/// Render map prompt template (batched file observation extraction)
 pub fn render_map_prompt(
    variant: &str,
-   filename: &str,
-   diff: &str,
+   files: &[MapFile<'_>],
    context_header: &str,
 ) -> Result<PromptParts> {
    let template_content = load_template_file("map", variant)?;
 
    let mut context = Context::new();
-   context.insert("filename", filename);
-   context.insert("diff", diff);
+   context.insert("files", files);
    if !context_header.is_empty() {
       context.insert("context_header", context_header);
    }
@@ -546,8 +551,9 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
 #[cfg(test)]
 mod tests {
    use super::{
-      ComposeBindPromptParams, ComposeIntentPromptParams, render_compose_bind_prompt,
-      render_compose_intent_prompt, split_prompt_template,
+      AnalysisParams, ComposeBindPromptParams, ComposeIntentPromptParams, ensure_prompts_dir,
+      render_analysis_prompt, render_compose_bind_prompt, render_compose_intent_prompt,
+      render_reduce_prompt, render_summary_prompt, split_prompt_template,
    };
 
    #[test]
@@ -577,6 +583,53 @@ mod tests {
    }
 
    #[test]
+   fn test_render_analysis_prompt_requests_holistic_summary() {
+      ensure_prompts_dir().unwrap();
+
+      let parts = render_analysis_prompt(&AnalysisParams {
+         variant:           "default",
+         stat:              "src/api/client.rs | 24 +++++++++++++++---------",
+         diff:              "diff --git a/src/api/client.rs b/src/api/client.rs\n",
+         scope_candidates:  "api",
+         recent_commits:    None,
+         common_scopes:     None,
+         types_description: None,
+         project_context:   None,
+      })
+      .unwrap();
+
+      assert!(parts.system.contains("Generate Summary"));
+      assert!(parts.system.contains("\"summary\""));
+      assert!(
+         parts
+            .system
+            .contains("umbrella headline for the whole changeset")
+      );
+      assert!(parts.system.contains("Does not copy detail #1"));
+   }
+
+   #[test]
+   fn test_render_reduce_prompt_guides_grouped_synthesis() {
+      ensure_prompts_dir().unwrap();
+
+      let parts = render_reduce_prompt(
+         "default",
+         r#"[{"file":"src/a.rs","observations":["Added retry handling."]}]"#,
+         "src/a.rs | 10 +++++-----",
+         "api",
+         None,
+      )
+      .unwrap();
+
+      assert!(parts.system.contains("3-4 strong grouped details"));
+      assert!(
+         parts
+            .system
+            .contains("Synthesize repeated file observations")
+      );
+      assert!(parts.system.contains("over enumerating files"));
+   }
+   #[test]
    fn test_render_compose_intent_prompt() {
       let parts = render_compose_intent_prompt(&ComposeIntentPromptParams {
          variant:          "default",
@@ -592,6 +645,37 @@ mod tests {
       assert!(parts.system.contains("create_compose_intent_plan"));
       assert!(parts.user.contains("max_commits: 3"));
       assert!(parts.user.contains("src/foo.rs"));
+   }
+
+   #[test]
+   fn test_render_summary_prompt_guides_umbrella_title() {
+      ensure_prompts_dir().unwrap();
+
+      let parts = render_summary_prompt(
+         "default",
+         "feat",
+         "api",
+         "72",
+         "Added websocket reconnects.\nUpdated client retry tests.",
+         "src/api/client.rs | 24 +++++++++++++++---------",
+         None,
+      )
+      .unwrap();
+
+      assert!(
+         parts
+            .system
+            .contains("umbrella description for the whole changeset")
+      );
+      assert!(parts.system.contains("not as candidate titles to copy"));
+      assert!(
+         parts
+            .system
+            .contains("does not copy or narrowly paraphrase one detail point")
+      );
+      assert!(parts.user.contains("<detail_points>"));
+      assert!(parts.user.contains("Added websocket reconnects."));
+      assert!(parts.user.contains("Updated client retry tests."));
    }
 
    #[test]

@@ -8,9 +8,10 @@ Given retrieved observations, git stat, and scope candidates, produce one unifie
 Determine:
 1. TYPE: one classification for the entire commit.
 2. SCOPE: one primary component, or null if the change is multi-component or unclear.
-3. DETAILS: 3-4 concise summary points, max 6.
-4. ISSUE_REFS: only issue references explicitly supported by the observations; otherwise return an empty array.
-5. CHANGELOG: metadata for user-visible details only.
+3. SUMMARY: one concise past-tense commit summary without `type(scope):` prefix.
+4. DETAILS: 3-4 concise summary points, max 6.
+5. ISSUE_REFS: only issue references explicitly supported by the observations; otherwise return an empty array.
+6. CHANGELOG: metadata for user-visible details only.
 
 Base the answer only on the provided observations, stat, and scope candidates. Do not invent intent, impact, or file changes that are not supported.
 </instructions>
@@ -24,7 +25,12 @@ Base the answer only on the provided observations, stat, and scope candidates. D
 </scope_rules>
 
 <output_format>
-Return exactly one `create_conventional_analysis` payload with only `type`, optional `scope`, `details`, and `issue_refs`.
+Return exactly one `create_conventional_analysis` payload with only `type`, optional `scope`, `summary`, `details`, and `issue_refs`.
+
+The `summary` must:
+- Start with a past-tense verb.
+- Stay at or under 72 characters.
+- Omit the `type(scope):` prefix and trailing period.
 
 Each detail point must:
 - Start with a past-tense verb.
@@ -46,10 +52,11 @@ Do not add prose or extra keys.
 </output_format>
 
 <synthesis_rules>
-- Cover every substantive file observation in the final details, either directly or by grouping it with a clearly related change.
-- Prefer fewer, stronger details over a long list of overlapping ones.
+- Produce 3-4 strong grouped details when possible; use the 6-item limit only for genuinely distinct outcomes.
+- Synthesize repeated file observations into the shared behavior, abstraction, or user-visible outcome they support.
+- Prefer broader, evidence-backed details over enumerating files, hunks, or one observation per file.
 - If observations conflict, reconcile them conservatively using the most specific and repeated evidence.
-- If the diff stat suggests breadth that is not reflected in the observations, widen the synthesis until the coverage matches.
+- If the diff stat shows breadth that observations do not explain, mention the breadth only at the level the evidence supports.
 - Do a final pass before returning to confirm the type, scope, and detail points all agree with the evidence.
 </synthesis_rules>
 

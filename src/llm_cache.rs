@@ -1,9 +1,11 @@
-//! Content-addressed cache for parsed LLM responses.
+//! Content-addressed cache for parsed LLM responses and the requests that
+//! produced them.
 //!
-//! Every successful one-shot LLM call writes its parsed payload here keyed on
-//! the canonical request material (operation, model, prompts, schema,
-//! temperature, …). Subsequent calls with byte-identical inputs short-circuit
-//! the network round-trip and replay the parsed value, which is the cheapest
+//! Every successful one-shot LLM call writes the provider request JSON and
+//! parsed payload here keyed on the canonical request material (operation,
+//! model, prompts, schema, temperature, …). Subsequent calls with
+//! byte-identical inputs short-circuit the network round-trip and replay the
+//! parsed value, which is the cheapest
 //! possible recovery when the caller (eg. `lgit --compose`) is rerun after a
 //! transient failure or unrelated edit.
 //!
@@ -26,7 +28,7 @@ use crate::{
 
 /// Bumped whenever the on-disk row format or hashing scheme changes. Existing
 /// rows with a different schema version are treated as misses.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Approximate inverse probability of running a TTL prune on each successful
 /// `put` call. Keeps the cache bounded without scheduling background work.
@@ -93,6 +95,12 @@ pub struct LlmCache {
    ttl_secs: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedLlmResponse {
+   pub request:  String,
+   pub response: String,
+}
+
 impl LlmCache {
    /// Open (or create) the cache at `path` with the given TTL. A TTL of zero
    /// disables expiration.
@@ -117,6 +125,7 @@ impl LlmCache {
                 schema_version INTEGER NOT NULL,
                 model          TEXT    NOT NULL,
                 operation      TEXT    NOT NULL,
+                request        TEXT    NOT NULL,
                 response       TEXT    NOT NULL,
                 created_at     INTEGER NOT NULL,
                 accessed_at    INTEGER NOT NULL
@@ -125,25 +134,40 @@ impl LlmCache {
                 ON responses(created_at);",
          )
          .map_err(|err| CommitGenError::Other(format!("create cache schema: {err}")))?;
+      conn
+         .execute(
+            "ALTER TABLE responses ADD COLUMN request TEXT NOT NULL DEFAULT ''",
+            [],
+         )
+         .or_else(|err| {
+            if matches!(err, rusqlite::Error::SqliteFailure(_, Some(ref message)) if message.contains("duplicate column name"))
+            {
+               Ok(0)
+            } else {
+               Err(err)
+            }
+         })
+         .map_err(|err| CommitGenError::Other(format!("migrate cache schema: {err}")))?;
       Ok(Self { conn: Mutex::new(conn), ttl_secs: ttl.as_secs() })
    }
 
-   /// Look up the stored payload string for `key`. Returns `None` on miss,
-   /// expired entry, or any underlying error (cache failures are silent).
-   pub fn get(&self, key: &str) -> Option<String> {
+   /// Look up the stored request/response payloads for `key`. Returns `None`
+   /// on miss, expired entry, or any underlying error (cache failures are
+   /// silent).
+   pub fn get_entry(&self, key: &str) -> Option<CachedLlmResponse> {
       let conn = self.conn.lock();
       let now = now_unix();
-      let row: Option<(String, i64)> = conn
+      let row: Option<(String, String, i64)> = conn
          .query_row(
-            "SELECT response, created_at FROM responses
+            "SELECT request, response, created_at FROM responses
              WHERE key = ?1 AND schema_version = ?2",
             params![key, SCHEMA_VERSION],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
          )
          .optional()
          .ok()
          .flatten();
-      let (response, created_at) = row?;
+      let (request, response, created_at) = row?;
       if self.ttl_secs > 0 {
          let cutoff = now.saturating_sub(self.ttl_secs);
          if (created_at as u64) < cutoff {
@@ -153,19 +177,25 @@ impl LlmCache {
       }
       let _ = conn
          .execute("UPDATE responses SET accessed_at = ?1 WHERE key = ?2", params![now as i64, key]);
-      Some(response)
+      Some(CachedLlmResponse { request, response })
    }
 
-   /// Insert (or replace) a cached payload. Failures are silently swallowed —
-   /// the cache must never break the actual operation.
-   pub fn put(&self, key: &str, model: &str, operation: &str, response: &str) {
+   /// Look up the stored response payload string for `key`. Returns `None` on
+   /// miss, expired entry, or any underlying error (cache failures are silent).
+   pub fn get(&self, key: &str) -> Option<String> {
+      self.get_entry(key).map(|entry| entry.response)
+   }
+
+   /// Insert (or replace) cached request/response payloads. Failures are
+   /// silently swallowed — the cache must never break the actual operation.
+   pub fn put(&self, key: &str, model: &str, operation: &str, request: &str, response: &str) {
       let conn = self.conn.lock();
       let now = now_unix();
       let _ = conn.execute(
          "INSERT OR REPLACE INTO responses
-          (key, schema_version, model, operation, response, created_at, accessed_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-         params![key, SCHEMA_VERSION, model, operation, response, now as i64],
+          (key, schema_version, model, operation, request, response, created_at, accessed_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+         params![key, SCHEMA_VERSION, model, operation, request, response, now as i64],
       );
       if self.ttl_secs > 0 && now.is_multiple_of(PRUNE_DIVISOR) {
          let cutoff = now.saturating_sub(self.ttl_secs);
@@ -273,17 +303,60 @@ mod tests {
       let cache =
          Arc::new(LlmCache::open(&dir.path().join("c.sqlite"), Duration::from_secs(60)).unwrap());
       assert!(cache.get("k").is_none());
-      cache.put("k", "model", "op", "{\"x\":1}");
+      cache.put("k", "model", "op", "{\"request\":1}", "{\"x\":1}");
       assert_eq!(cache.get("k").as_deref(), Some("{\"x\":1}"));
-      cache.put("k", "model", "op", "{\"x\":2}");
+      assert_eq!(
+         cache.get_entry("k"),
+         Some(CachedLlmResponse {
+            request:  "{\"request\":1}".to_string(),
+            response: "{\"x\":1}".to_string(),
+         })
+      );
+      cache.put("k", "model", "op", "{\"request\":2}", "{\"x\":2}");
       assert_eq!(cache.get("k").as_deref(), Some("{\"x\":2}"));
+      assert_eq!(
+         cache.get_entry("k").map(|entry| entry.request),
+         Some("{\"request\":2}".to_string())
+      );
    }
 
+   #[test]
+   fn open_migrates_old_schema_before_storing_requests() {
+      let dir = tempdir().unwrap();
+      let path = dir.path().join("c.sqlite");
+      {
+         let conn = Connection::open(&path).unwrap();
+         conn
+            .execute_batch(
+               "CREATE TABLE responses (
+                key            TEXT    PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                model          TEXT    NOT NULL,
+                operation      TEXT    NOT NULL,
+                response       TEXT    NOT NULL,
+                created_at     INTEGER NOT NULL,
+                accessed_at    INTEGER NOT NULL
+             );",
+            )
+            .unwrap();
+      }
+
+      let cache = LlmCache::open(&path, Duration::from_secs(60)).unwrap();
+      cache.put("k", "model", "op", "{\"request\":true}", "{\"response\":true}");
+
+      assert_eq!(
+         cache.get_entry("k"),
+         Some(CachedLlmResponse {
+            request:  "{\"request\":true}".to_string(),
+            response: "{\"response\":true}".to_string(),
+         })
+      );
+   }
    #[test]
    fn ttl_zero_disables_expiry() {
       let dir = tempdir().unwrap();
       let cache = LlmCache::open(&dir.path().join("c.sqlite"), Duration::from_secs(0)).unwrap();
-      cache.put("k", "model", "op", "v");
+      cache.put("k", "model", "op", "request", "v");
       assert_eq!(cache.get("k").as_deref(), Some("v"));
    }
 }

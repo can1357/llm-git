@@ -58,6 +58,8 @@ pub struct CommitConfig {
    pub initial_backoff_ms:        u64,
    #[serde(default = "default_auto_fast_threshold_lines")]
    pub auto_fast_threshold_lines: usize,
+   /// Character ceiling used by smart truncation after a diff stays on the
+   /// holistic path.
    pub max_diff_length:           usize,
    pub max_diff_tokens:           usize,
    pub wide_change_threshold:     f32,
@@ -124,9 +126,16 @@ pub struct CommitConfig {
    #[serde(default = "default_map_reduce_enabled")]
    pub map_reduce_enabled: bool,
 
-   /// Token threshold for triggering map-reduce (default: 30000 tokens)
+   /// Token threshold for routing to map-reduce before holistic smart
+   /// truncation. Diffs below this stay in one analysis call and are bounded by
+   /// `max_diff_length` instead (default: 5000 tokens).
    #[serde(default = "default_map_reduce_threshold")]
    pub map_reduce_threshold: usize,
+
+   /// Token budget for each map-reduce map batch. Files are greedily packed up
+   /// to this budget before an LLM call; oversized files run alone.
+   #[serde(default = "default_map_batch_token_budget")]
+   pub map_batch_token_budget: usize,
 
    /// Enable the on-disk LLM response cache (default: true). Cache survives
    /// across runs so reruns reuse parsed call results when prompts match.
@@ -209,7 +218,11 @@ const fn default_map_reduce_enabled() -> bool {
 }
 
 const fn default_map_reduce_threshold() -> usize {
-   30000 // ~30k tokens, roughly 120k characters
+   5000 // ~5k tokens, roughly 20k characters
+}
+
+const fn default_map_batch_token_budget() -> usize {
+   16_000
 }
 
 const fn default_auto_fast_threshold_lines() -> usize {
@@ -313,6 +326,7 @@ impl Default for CommitConfig {
          changelog_enabled: default_changelog_enabled(),
          map_reduce_enabled: default_map_reduce_enabled(),
          map_reduce_threshold: default_map_reduce_threshold(),
+         map_batch_token_budget: default_map_batch_token_budget(),
          cache_enabled: default_cache_enabled(),
          cache_ttl_days: default_cache_ttl_days(),
          cache_dir: None,

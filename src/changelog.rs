@@ -297,6 +297,7 @@ async fn call_changelog_api(
       tool_name:        "create_changelog_entries",
       tool_description: "Generate changelog entries grouped by category",
       schema:           &changelog_schema,
+      progress_label:   Some("changelog"),
       debug:            None,
       cacheable:        true,
    })

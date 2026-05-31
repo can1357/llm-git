@@ -99,6 +99,17 @@ lgit --rewrite --rewrite-start main~50  # Rewrite last 50 commits only
 lgit --rewrite --rewrite-parallel 20    # 20 concurrent API calls
 ```
 
+### Profiling Trace
+
+Write detailed tracing spans and HTTP timing events to a JSONL file:
+
+```bash
+lgit --trace-output /tmp/lgit-profile.jsonl --dry-run
+LLM_GIT_TRACE_FILE=/tmp/lgit-profile.jsonl lgit --compose
+```
+
+Each span close event includes busy/idle timing from `tracing-subscriber`; API events also record TTFT, total response time, status, and response size.
+
 ## Automatic Changelog
 
 lgit automatically maintains `CHANGELOG.md` files when committing:
@@ -223,6 +234,7 @@ default = true
 | `LLM_GIT_API_KEY` | API key | none |
 | `LLM_GIT_CONFIG` | Config file path | `~/.config/llm-git/config.toml` |
 | `LLM_GIT_VERBOSE` | Debug output | `false` |
+| `LLM_GIT_TRACE_FILE` | JSONL profiling trace output path | none |
 
 ## Installation
 

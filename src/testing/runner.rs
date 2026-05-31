@@ -80,6 +80,7 @@ impl TestRunner {
             analysis:      ConventionalAnalysis {
                commit_type: CommitType::new("chore").expect("valid type"),
                scope:       None,
+               summary:     None,
                details:     vec![],
                issue_refs:  vec![],
             },
@@ -115,27 +116,37 @@ impl TestRunner {
       )
       .await?;
 
-      // Get summary
+      // Use the holistic title when analysis provided one; fixture runs for
+      // map-reduce or legacy output retain the separate summary path.
       let detail_points = analysis.body_texts();
-      let summary = crate::api::generate_summary_from_analysis(
-         &fixture.input.stat,
-         analysis.commit_type.as_str(),
-         analysis.scope.as_ref().map(|s| s.as_str()),
-         &detail_points,
-         fixture.input.context.user_context.as_deref(),
-         &self.config,
-         None,
-         None,
-      )
-      .await
-      .unwrap_or_else(|_| {
-         crate::api::fallback_summary(
+      let summary = match crate::api::summary_from_holistic_analysis(&analysis, &self.config) {
+         Ok(Some(summary)) => summary,
+         Ok(None) => crate::api::generate_summary_from_analysis(
+            &fixture.input.stat,
+            analysis.commit_type.as_str(),
+            analysis.scope.as_ref().map(|s| s.as_str()),
+            &detail_points,
+            fixture.input.context.user_context.as_deref(),
+            &self.config,
+            None,
+            None,
+         )
+         .await
+         .unwrap_or_else(|_| {
+            crate::api::fallback_summary(
+               &fixture.input.stat,
+               &detail_points,
+               analysis.commit_type.as_str(),
+               &self.config,
+            )
+         }),
+         Err(_) => crate::api::fallback_summary(
             &fixture.input.stat,
             &detail_points,
             analysis.commit_type.as_str(),
             &self.config,
-         )
-      });
+         ),
+      };
 
       let final_commit = ConventionalCommit {
          commit_type: analysis.commit_type.clone(),

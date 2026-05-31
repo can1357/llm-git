@@ -19,36 +19,131 @@ use crate::{
 };
 
 /// Whether API tracing is enabled (`LLM_GIT_TRACE=1`).
-static TRACE_ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var("LLM_GIT_TRACE").is_ok());
+static TRACE_ENABLED: LazyLock<bool> =
+   LazyLock::new(|| env_flag_value_enabled(std::env::var("LLM_GIT_TRACE").ok().as_deref()));
+
+/// Whether per-request LLM progress logging is enabled.
+///
+/// `LLM_GIT_PROGRESS=1` prints query/response/cache lines. `LLM_GIT_TRACE=1`
+/// implies this and also prints the lower-level trace line.
+static LLM_PROGRESS_ENABLED: LazyLock<bool> = LazyLock::new(|| {
+   env_flag_value_enabled(std::env::var("LLM_GIT_PROGRESS").ok().as_deref()) || trace_enabled()
+});
+
+fn env_flag_value_enabled(value: Option<&str>) -> bool {
+   let Some(value) = value else {
+      return false;
+   };
+
+   !matches!(value.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
+}
 
 /// Check if API request tracing is enabled via `LLM_GIT_TRACE` env var.
 fn trace_enabled() -> bool {
    *TRACE_ENABLED
 }
 
+pub(crate) fn llm_progress_enabled() -> bool {
+   *LLM_PROGRESS_ENABLED
+}
+
+pub(crate) fn print_llm_progress(message: impl FnOnce() -> String) {
+   if llm_progress_enabled() {
+      crate::style::print_info(&message());
+   }
+}
+
+const fn api_mode_label(mode: ResolvedApiMode) -> &'static str {
+   match mode {
+      ResolvedApiMode::ChatCompletions => "chat completions",
+      ResolvedApiMode::AnthropicMessages => "Anthropic messages",
+   }
+}
+
 /// Send an HTTP request with timing instrumentation.
 ///
 /// Measures TTFT (time to first byte / headers received) separately from total
 /// response time. Logs to stderr when `LLM_GIT_TRACE=1`.
+#[tracing::instrument(target = "lgit", name = "api.timed_send", skip_all, fields(operation = label, model))]
 pub async fn timed_send(
    request_builder: reqwest::RequestBuilder,
    label: &str,
    model: &str,
 ) -> std::result::Result<(reqwest::StatusCode, String), CommitGenError> {
    let trace = trace_enabled();
+   let profile = crate::profile::enabled();
    let start = std::time::Instant::now();
 
-   let response = request_builder
-      .send()
-      .await
-      .map_err(CommitGenError::HttpError)?;
+   if profile {
+      tracing::info!(
+         target: crate::profile::TARGET,
+         event = "api_request_started",
+         operation = label,
+         model,
+      );
+   }
+
+   let response = match request_builder.send().await {
+      Ok(response) => response,
+      Err(error) => {
+         if profile {
+            let elapsed = start.elapsed();
+            tracing::warn!(
+               target: crate::profile::TARGET,
+               event = "api_request_failed",
+               operation = label,
+               model,
+               elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+               elapsed_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+               error = %error,
+            );
+         }
+         return Err(CommitGenError::HttpError(error));
+      },
+   };
 
    let ttft = start.elapsed();
    let status = response.status();
    let content_length = response.content_length();
 
-   let body = response.text().await.map_err(CommitGenError::HttpError)?;
+   let body = match response.text().await {
+      Ok(body) => body,
+      Err(error) => {
+         if profile {
+            let elapsed = start.elapsed();
+            tracing::warn!(
+               target: crate::profile::TARGET,
+               event = "api_response_body_failed",
+               operation = label,
+               model,
+               status = status.as_u16(),
+               elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+               elapsed_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+               error = %error,
+            );
+         }
+         return Err(CommitGenError::HttpError(error));
+      },
+   };
    let total = start.elapsed();
+
+   if profile {
+      tracing::info!(
+         target: crate::profile::TARGET,
+         event = "api_request_finished",
+         operation = label,
+         model,
+         status = status.as_u16(),
+         success = status.is_success(),
+         ttft_ms = ttft.as_secs_f64() * 1000.0,
+         ttft_us = u64::try_from(ttft.as_micros()).unwrap_or(u64::MAX),
+         total_ms = total.as_secs_f64() * 1000.0,
+         total_us = u64::try_from(total.as_micros()).unwrap_or(u64::MAX),
+         body_bytes = body.len(),
+         content_length_known = content_length.is_some(),
+         content_length_bytes = content_length.unwrap_or(0),
+      );
+   }
 
    if trace {
       let size_info = content_length.map_or_else(
@@ -290,6 +385,7 @@ pub struct OneShotSpec<'a> {
    pub tool_name:        &'a str,
    pub tool_description: &'a str,
    pub schema:           &'a serde_json::Value,
+   pub progress_label:   Option<&'a str>,
    pub debug:            Option<OneShotDebug<'a>>,
    /// Look up / store the parsed response in the global LLM cache. Cache
    /// entries are keyed on a hash of the spec fields plus prompts/schema.
@@ -318,6 +414,13 @@ impl OneShotRequestKind {
       }
    }
 
+   const fn progress_label(self) -> &'static str {
+      match self {
+         Self::StructuredOutput => "structured output",
+         Self::ToolCalling => "tool call",
+      }
+   }
+
    const fn content_source(self) -> OneShotSource {
       match self {
          Self::StructuredOutput => OneShotSource::StructuredOutput,
@@ -326,8 +429,99 @@ impl OneShotRequestKind {
    }
 }
 
+fn oneshot_progress_label<'a>(spec: &OneShotSpec<'a>) -> &'a str {
+   spec.progress_label.unwrap_or(spec.operation)
+}
+
+const fn estimate_prompt_text_tokens(spec: &OneShotSpec<'_>) -> usize {
+   spec
+      .system_prompt
+      .len()
+      .saturating_add(spec.user_prompt.len())
+      .saturating_add(3)
+      / 4
+}
+
+const fn prompt_text_chars(spec: &OneShotSpec<'_>) -> usize {
+   spec
+      .system_prompt
+      .len()
+      .saturating_add(spec.user_prompt.len())
+}
+
+fn format_count(count: usize) -> String {
+   if count >= 10_000 {
+      format!("{:.1}k", count as f64 / 1000.0)
+   } else {
+      count.to_string()
+   }
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+   if elapsed.as_secs() > 0 {
+      format!("{:.1}s", elapsed.as_secs_f64())
+   } else {
+      format!("{}ms", elapsed.as_millis())
+   }
+}
+
+fn format_bytes(bytes: usize) -> String {
+   if bytes >= 1024 * 1024 {
+      format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+   } else if bytes >= 1024 {
+      format!("{:.1}KB", bytes as f64 / 1024.0)
+   } else {
+      format!("{bytes}B")
+   }
+}
+
+fn format_llm_query_progress(
+   spec: &OneShotSpec<'_>,
+   mode: ResolvedApiMode,
+   kind: OneShotRequestKind,
+) -> String {
+   format!(
+      "LLM query: {} \u{2192} {} ({}/{}, {}, {}, prompt ~{} tokens/{} chars, max {} output tokens)",
+      oneshot_progress_label(spec),
+      spec.model,
+      spec.prompt_family,
+      spec.prompt_variant,
+      api_mode_label(mode),
+      kind.progress_label(),
+      format_count(estimate_prompt_text_tokens(spec)),
+      format_count(prompt_text_chars(spec)),
+      spec.max_tokens
+   )
+}
+
+fn format_llm_response_progress(
+   spec: &OneShotSpec<'_>,
+   status: reqwest::StatusCode,
+   elapsed: Duration,
+   body_bytes: usize,
+) -> String {
+   format!(
+      "LLM response: {} \u{2190} {} (HTTP {}, {}, {})",
+      oneshot_progress_label(spec),
+      spec.model,
+      status.as_u16(),
+      format_elapsed(elapsed),
+      format_bytes(body_bytes)
+   )
+}
+
+fn format_llm_cache_progress(spec: &OneShotSpec<'_>) -> String {
+   format!(
+      "LLM cache hit: {} \u{2192} {} ({}/{})",
+      oneshot_progress_label(spec),
+      spec.model,
+      spec.prompt_family,
+      spec.prompt_variant
+   )
+}
+
 enum OneShotRequestOutcome {
-   Response(String),
+   Response { request_json: String, response_text: String },
    Retry,
    FallbackToTool,
 }
@@ -590,7 +784,9 @@ async fn send_oneshot_request(
    spec: &OneShotSpec<'_>,
    mode: ResolvedApiMode,
    kind: OneShotRequestKind,
+   capture_request: bool,
 ) -> Result<OneShotRequestOutcome> {
+   print_llm_progress(|| format_llm_query_progress(spec, mode, kind));
    match mode {
       ResolvedApiMode::ChatCompletions => {
          let tool = build_openai_tool(spec.tool_name, spec.tool_description, spec.schema)?;
@@ -639,10 +835,18 @@ async fn send_oneshot_request(
             request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
          }
 
+         let request_json = if capture_request {
+            serde_json::to_string(&request).unwrap_or_default()
+         } else {
+            String::new()
+         };
+         let request_start = std::time::Instant::now();
          let (status, response_text) =
             timed_send(request_builder.json(&request), spec.operation, spec.model).await?;
+         print_llm_progress(|| {
+            format_llm_response_progress(spec, status, request_start.elapsed(), response_text.len())
+         });
          save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
-
          if !status.is_success() && is_context_length_error(&response_text) {
             return Err(CommitGenError::ApiContextLengthExceeded {
                operation: spec.operation.to_string(),
@@ -695,7 +899,7 @@ async fn send_oneshot_request(
             return Ok(OneShotRequestOutcome::Retry);
          }
 
-         Ok(OneShotRequestOutcome::Response(response_text))
+         Ok(OneShotRequestOutcome::Response { request_json, response_text })
       },
       ResolvedApiMode::AnthropicMessages => {
          let prompt_caching = anthropic_prompt_caching_enabled(config);
@@ -743,10 +947,18 @@ async fn send_oneshot_request(
             request_builder = request_builder.header("x-api-key", api_key);
          }
 
+         let request_json = if capture_request {
+            serde_json::to_string(&request).unwrap_or_default()
+         } else {
+            String::new()
+         };
+         let request_start = std::time::Instant::now();
          let (status, response_text) =
             timed_send(request_builder.json(&request), spec.operation, spec.model).await?;
+         print_llm_progress(|| {
+            format_llm_response_progress(spec, status, request_start.elapsed(), response_text.len())
+         });
          save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
-
          if !status.is_success() && is_context_length_error(&response_text) {
             return Err(CommitGenError::ApiContextLengthExceeded {
                operation: spec.operation.to_string(),
@@ -799,7 +1011,7 @@ async fn send_oneshot_request(
             return Ok(OneShotRequestOutcome::Retry);
          }
 
-         Ok(OneShotRequestOutcome::Response(response_text))
+         Ok(OneShotRequestOutcome::Response { request_json, response_text })
       },
    }
 }
@@ -1044,6 +1256,7 @@ fn parse_oneshot_response<T: DeserializeOwned>(
    }
 }
 
+#[tracing::instrument(target = "lgit", name = "api.run_oneshot", skip_all, fields(operation = spec.operation, model = spec.model, prompt_family = spec.prompt_family, prompt_variant = spec.prompt_variant))]
 pub async fn run_oneshot<T>(
    config: &CommitConfig,
    spec: &OneShotSpec<'_>,
@@ -1056,6 +1269,7 @@ where
       && let Some(stored) = cache.get(key)
       && let Ok(output) = serde_json::from_str::<T>(&stored)
    {
+      print_llm_progress(|| format_llm_cache_progress(spec));
       return Ok(OneShotResponse {
          output,
          source: OneShotSource::Cache,
@@ -1066,106 +1280,123 @@ where
    // On parse failure (stale schema / wrong T) we silently fall through and
    // re-fetch — the next successful response will overwrite the stale entry.
 
-   let response: OneShotResponse<T> = retry_api_call(config, async move || {
-      let mode = config.resolved_api_mode(spec.model);
-      let structured_attempt = if should_attempt_structured_output(config, spec.model) {
-         begin_structured_output_attempt(config, spec.model, mode)
-      } else {
-         StructuredOutputAttempt::SkipUnsupported
-      };
+   let capture_request = cache_entry.is_some();
+   let (response, request_json): (OneShotResponse<T>, Option<String>) =
+      retry_api_call(config, async move || {
+         let mode = config.resolved_api_mode(spec.model);
+         let structured_attempt = if should_attempt_structured_output(config, spec.model) {
+            begin_structured_output_attempt(config, spec.model, mode)
+         } else {
+            StructuredOutputAttempt::SkipUnsupported
+         };
 
-      let structured_result = match structured_attempt {
-         StructuredOutputAttempt::SkipUnsupported => None,
-         StructuredOutputAttempt::Probe | StructuredOutputAttempt::Supported => {
-            let request_result =
-               send_oneshot_request(config, spec, mode, OneShotRequestKind::StructuredOutput).await;
-            let request_outcome = match request_result {
-               Ok(outcome) => outcome,
-               Err(err) => {
-                  if structured_attempt == StructuredOutputAttempt::Probe {
-                     let _ = update_structured_output_capability(config, spec.model, mode, None);
-                  }
-                  return Err(err);
-               },
-            };
+         let structured_result = match structured_attempt {
+            StructuredOutputAttempt::SkipUnsupported => None,
+            StructuredOutputAttempt::Probe | StructuredOutputAttempt::Supported => {
+               let request_result = send_oneshot_request(
+                  config,
+                  spec,
+                  mode,
+                  OneShotRequestKind::StructuredOutput,
+                  capture_request,
+               )
+               .await;
+               let request_outcome = match request_result {
+                  Ok(outcome) => outcome,
+                  Err(err) => {
+                     if structured_attempt == StructuredOutputAttempt::Probe {
+                        let _ = update_structured_output_capability(config, spec.model, mode, None);
+                     }
+                     return Err(err);
+                  },
+               };
 
-            match request_outcome {
-               OneShotRequestOutcome::Response(response_text) => {
-                  if structured_attempt == StructuredOutputAttempt::Probe {
-                     let _ = update_structured_output_capability(
+               match request_outcome {
+                  OneShotRequestOutcome::Response { request_json, response_text } => {
+                     if structured_attempt == StructuredOutputAttempt::Probe {
+                        let _ = update_structured_output_capability(
+                           config,
+                           spec.model,
+                           mode,
+                           Some(StructuredOutputCapability::Supported),
+                        );
+                     }
+                     Some((request_json, response_text))
+                  },
+                  OneShotRequestOutcome::Retry => {
+                     if structured_attempt == StructuredOutputAttempt::Probe {
+                        let _ = update_structured_output_capability(config, spec.model, mode, None);
+                     }
+                     return Ok((true, None));
+                  },
+                  OneShotRequestOutcome::FallbackToTool => {
+                     let first_detection = update_structured_output_capability(
                         config,
                         spec.model,
                         mode,
-                        Some(StructuredOutputCapability::Supported),
+                        Some(StructuredOutputCapability::Unsupported),
                      );
+                     if first_detection {
+                        crate::style::warn(&format!(
+                           "Structured outputs unsupported for model {}. Using tool calling for \
+                            the remainder of this run.",
+                           spec.model
+                        ));
+                     }
+                     None
+                  },
+               }
+            },
+         };
+
+         if let Some((request_json, response_text)) = structured_result {
+            match parse_oneshot_response::<T>(
+               mode,
+               OneShotRequestKind::StructuredOutput,
+               spec.tool_name,
+               spec.operation,
+               &response_text,
+            ) {
+               OneShotParseOutcome::Success(output) => {
+                  if output.source == OneShotSource::PlainTextContent {
+                     let first_detection = update_structured_output_capability(
+                        config,
+                        spec.model,
+                        mode,
+                        Some(StructuredOutputCapability::Unsupported),
+                     );
+                     if first_detection {
+                        crate::style::warn(&format!(
+                           "Structured outputs unsupported for model {}. Using tool calling for \
+                            the remainder of this run.",
+                           spec.model
+                        ));
+                     }
                   }
-                  Some(response_text)
+                  return Ok((false, Some((output, Some(request_json)))));
                },
-               OneShotRequestOutcome::Retry => {
-                  if structured_attempt == StructuredOutputAttempt::Probe {
-                     let _ = update_structured_output_capability(config, spec.model, mode, None);
-                  }
-                  return Ok((true, None));
-               },
-               OneShotRequestOutcome::FallbackToTool => {
-                  let first_detection = update_structured_output_capability(
-                     config,
-                     spec.model,
-                     mode,
-                     Some(StructuredOutputCapability::Unsupported),
-                  );
-                  if first_detection {
-                     crate::style::warn(&format!(
-                        "Structured outputs unsupported for model {}. Using tool calling for the \
-                         remainder of this run.",
-                        spec.model
-                     ));
-                  }
-                  None
+               OneShotParseOutcome::Retry => return Ok((true, None)),
+               OneShotParseOutcome::Fatal(err) => {
+                  crate::style::warn(&format!(
+                     "Structured output parse failed for {}. Falling back to tool calling: {}",
+                     spec.operation, err
+                  ));
                },
             }
-         },
-      };
-
-      if let Some(response_text) = structured_result {
-         match parse_oneshot_response::<T>(
-            mode,
-            OneShotRequestKind::StructuredOutput,
-            spec.tool_name,
-            spec.operation,
-            &response_text,
-         ) {
-            OneShotParseOutcome::Success(output) => {
-               if output.source == OneShotSource::PlainTextContent {
-                  let first_detection = update_structured_output_capability(
-                     config,
-                     spec.model,
-                     mode,
-                     Some(StructuredOutputCapability::Unsupported),
-                  );
-                  if first_detection {
-                     crate::style::warn(&format!(
-                        "Structured outputs unsupported for model {}. Using tool calling for the \
-                         remainder of this run.",
-                        spec.model
-                     ));
-                  }
-               }
-               return Ok((false, Some(output)));
-            },
-            OneShotParseOutcome::Retry => return Ok((true, None)),
-            OneShotParseOutcome::Fatal(err) => {
-               crate::style::warn(&format!(
-                  "Structured output parse failed for {}. Falling back to tool calling: {}",
-                  spec.operation, err
-               ));
-            },
          }
-      }
 
-      let response_text =
-         match send_oneshot_request(config, spec, mode, OneShotRequestKind::ToolCalling).await? {
-            OneShotRequestOutcome::Response(response_text) => response_text,
+         let (request_json, response_text) = match send_oneshot_request(
+            config,
+            spec,
+            mode,
+            OneShotRequestKind::ToolCalling,
+            capture_request,
+         )
+         .await?
+         {
+            OneShotRequestOutcome::Response { request_json, response_text } => {
+               (request_json, response_text)
+            },
             OneShotRequestOutcome::Retry => return Ok((true, None)),
             OneShotRequestOutcome::FallbackToTool => {
                return Err(CommitGenError::Other(format!(
@@ -1175,24 +1406,24 @@ where
             },
          };
 
-      match parse_oneshot_response::<T>(
-         mode,
-         OneShotRequestKind::ToolCalling,
-         spec.tool_name,
-         spec.operation,
-         &response_text,
-      ) {
-         OneShotParseOutcome::Success(output) => Ok((false, Some(output))),
-         OneShotParseOutcome::Retry => Ok((true, None)),
-         OneShotParseOutcome::Fatal(err) => Err(err),
-      }
-   })
-   .await?;
+         match parse_oneshot_response::<T>(
+            mode,
+            OneShotRequestKind::ToolCalling,
+            spec.tool_name,
+            spec.operation,
+            &response_text,
+         ) {
+            OneShotParseOutcome::Success(output) => Ok((false, Some((output, Some(request_json))))),
+            OneShotParseOutcome::Retry => Ok((true, None)),
+            OneShotParseOutcome::Fatal(err) => Err(err),
+         }
+      })
+      .await?;
 
    if let Some((cache, key)) = cache_entry.as_ref()
       && let Ok(payload) = serde_json::to_string(&response.output)
    {
-      cache.put(key, spec.model, spec.operation, &payload);
+      cache.put(key, spec.model, spec.operation, request_json.as_deref().unwrap_or(""), &payload);
    }
 
    Ok(response)
@@ -1374,6 +1605,7 @@ const fn should_retry_error(error: &CommitGenError) -> bool {
    !matches!(error, CommitGenError::ApiContextLengthExceeded { .. })
 }
 /// Retry an API call with exponential backoff
+#[tracing::instrument(target = "lgit", name = "api.retry", skip_all, fields(max_retries = config.max_retries))]
 pub async fn retry_api_call<T>(
    config: &CommitConfig,
    mut f: impl AsyncFnMut() -> Result<(bool, Option<T>)>,
@@ -1382,6 +1614,14 @@ pub async fn retry_api_call<T>(
 
    loop {
       attempt += 1;
+      if crate::profile::enabled() {
+         tracing::info!(
+            target: crate::profile::TARGET,
+            event = "api_retry_attempt_started",
+            attempt,
+            max_retries = config.max_retries,
+         );
+      }
 
       match f().await {
          Ok((false, Some(result))) => return Ok(result),
@@ -1390,6 +1630,16 @@ pub async fn retry_api_call<T>(
          },
          Ok((true, _)) if attempt < config.max_retries => {
             let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
+            if crate::profile::enabled() {
+               tracing::warn!(
+                  target: crate::profile::TARGET,
+                  event = "api_retry_scheduled",
+                  attempt,
+                  max_retries = config.max_retries,
+                  backoff_ms,
+                  reason = "retryable_response",
+               );
+            }
             eprintln!(
                "{}",
                crate::style::warning(&format!(
@@ -1412,6 +1662,17 @@ pub async fn retry_api_call<T>(
 
             if attempt < config.max_retries {
                let backoff_ms = config.initial_backoff_ms * (1 << (attempt - 1));
+               if crate::profile::enabled() {
+                  tracing::warn!(
+                     target: crate::profile::TARGET,
+                     event = "api_retry_scheduled",
+                     attempt,
+                     max_retries = config.max_retries,
+                     backoff_ms,
+                     reason = "error",
+                     error = %e,
+                  );
+               }
                eprintln!(
                   "{}",
                   crate::style::warning(&format!(
@@ -1459,6 +1720,7 @@ pub fn format_types_description(config: &CommitConfig) -> String {
 }
 
 /// Generate conventional commit analysis using OpenAI-compatible API
+#[tracing::instrument(target = "lgit", name = "api.generate_conventional_analysis", skip_all, fields(model = model_name, diff_bytes = diff.len(), stat_bytes = stat.len()))]
 pub async fn generate_conventional_analysis<'a>(
    stat: &'a str,
    diff: &'a str,
@@ -1479,6 +1741,15 @@ pub async fn generate_conventional_analysis<'a>(
          "scope": {
             "type": "string",
             "description": "Optional scope (module/component). Omit if unclear or multi-component."
+         },
+         "summary": {
+            "type": "string",
+            "description": format!(
+               "Umbrella commit summary without type/scope prefix or trailing period; target {} chars, hard limit {}.",
+               config.summary_guideline,
+               config.summary_hard_limit
+            ),
+            "maxLength": config.summary_hard_limit
          },
          "details": {
             "type": "array",
@@ -1509,7 +1780,7 @@ pub async fn generate_conventional_analysis<'a>(
             "items": { "type": "string" }
          }
       }),
-      &["type", "details", "issue_refs"],
+      &["type", "summary", "details", "issue_refs"],
    );
 
    let types_desc = format_types_description(config);
@@ -1533,7 +1804,7 @@ pub async fn generate_conventional_analysis<'a>(
    let response = run_oneshot::<ConventionalAnalysis>(config, &OneShotSpec {
       operation:        "analysis",
       model:            model_name,
-      max_tokens:       1000,
+      max_tokens:       1200,
       temperature:      config.temperature,
       prompt_family:    "analysis",
       prompt_variant:   &config.analysis_prompt_variant,
@@ -1541,8 +1812,9 @@ pub async fn generate_conventional_analysis<'a>(
       user_prompt:      &user_prompt,
       tool_name:        "create_conventional_analysis",
       tool_description: "Analyze changes and classify as conventional commit with type, scope, \
-                         details, and metadata",
+                         summary, details, and metadata",
       schema:           &analysis_schema,
+      progress_label:   Some("analysis"),
       debug:            Some(OneShotDebug {
          dir:    ctx.debug_output,
          prefix: ctx.debug_prefix,
@@ -1559,7 +1831,7 @@ pub async fn generate_conventional_analysis<'a>(
 ///
 /// Some models return the full format `feat(scope): summary` instead of just
 /// `summary`. This function removes the prefix to normalize the response.
-fn strip_type_prefix(summary: &str, commit_type: &str, scope: Option<&str>) -> String {
+pub fn strip_type_prefix(summary: &str, commit_type: &str, scope: Option<&str>) -> String {
    let scope_part = scope.map(|s| format!("({s})")).unwrap_or_default();
    let prefix = format!("{commit_type}{scope_part}: ");
 
@@ -1572,6 +1844,32 @@ fn strip_type_prefix(summary: &str, commit_type: &str, scope: Option<&str>) -> S
       })
       .unwrap_or(summary)
       .to_string()
+}
+
+/// Build a commit summary from the holistic analysis response when present.
+///
+/// Returns `None` for map-reduce or legacy responses that do not include the
+/// optional `summary` field.
+pub fn summary_from_holistic_analysis(
+   analysis: &ConventionalAnalysis,
+   config: &CommitConfig,
+) -> Result<Option<CommitSummary>> {
+   let Some(raw_summary) = analysis
+      .summary
+      .as_deref()
+      .map(str::trim)
+      .filter(|summary| !summary.is_empty())
+   else {
+      return Ok(None);
+   };
+
+   let cleaned = strip_type_prefix(
+      raw_summary,
+      analysis.commit_type.as_str(),
+      analysis.scope.as_ref().map(|scope| scope.as_str()),
+   );
+
+   CommitSummary::new(cleaned, config.summary_hard_limit).map(Some)
 }
 
 /// Validate summary against requirements
@@ -1676,6 +1974,7 @@ fn validate_summary_quality(
 
 /// Create commit summary using a smaller model focused on detail retention
 #[allow(clippy::too_many_arguments, reason = "summary generation needs debug hooks and context")]
+#[tracing::instrument(target = "lgit", name = "api.generate_summary_from_analysis", skip_all, fields(commit_type, scope = ?scope, detail_count = details.len(), model = %config.summary_model))]
 pub async fn generate_summary_from_analysis<'a>(
    stat: &'a str,
    commit_type: &'a str,
@@ -1747,6 +2046,7 @@ pub async fn generate_summary_from_analysis<'a>(
          tool_name:        "create_commit_summary",
          tool_description: "Compose a git commit summary line from detail statements",
          schema:           &summary_schema,
+         progress_label:   Some("summary"),
          debug:            Some(OneShotDebug {
             dir:    debug_dir,
             prefix: debug_prefix,
@@ -1953,6 +2253,7 @@ pub fn fallback_summary(
 ///
 /// This is the main entry point for analysis. It automatically routes to
 /// map-reduce when the diff exceeds the configured token threshold.
+#[tracing::instrument(target = "lgit", name = "api.generate_analysis_with_map_reduce", skip_all, fields(model = model_name, diff_bytes = diff.len(), stat_bytes = stat.len()))]
 pub async fn generate_analysis_with_map_reduce<'a>(
    stat: &'a str,
    diff: &'a str,
@@ -1979,6 +2280,7 @@ pub async fn generate_analysis_with_map_reduce<'a>(
 /// Generate a complete commit in a single API call (fast mode).
 ///
 /// Returns a `ConventionalCommit` directly — no separate summary phase.
+#[tracing::instrument(target = "lgit", name = "api.generate_fast_commit", skip_all, fields(model = model_name, diff_bytes = diff.len(), stat_bytes = stat.len()))]
 pub async fn generate_fast_commit(
    stat: &str,
    diff: &str,
@@ -2034,6 +2336,7 @@ pub async fn generate_fast_commit(
       tool_name:        "create_fast_commit",
       tool_description: "Generate a conventional commit from the given diff",
       schema:           &fast_schema,
+      progress_label:   Some("fast commit"),
       debug:            Some(OneShotDebug { dir: debug_dir, prefix: None, name: "fast" }),
       cacheable:        true,
    })
@@ -2076,6 +2379,64 @@ mod tests {
       assert_eq!(response_format["json_schema"]["name"], "commit_summary");
       assert_eq!(response_format["json_schema"]["strict"], serde_json::json!(true));
       assert_eq!(response_format["json_schema"]["schema"], schema);
+   }
+
+   #[test]
+   fn test_env_flag_value_enabled_uses_boolean_semantics() {
+      assert!(!env_flag_value_enabled(None));
+      assert!(!env_flag_value_enabled(Some("")));
+      assert!(!env_flag_value_enabled(Some("0")));
+      assert!(!env_flag_value_enabled(Some("false")));
+      assert!(!env_flag_value_enabled(Some("NO")));
+      assert!(!env_flag_value_enabled(Some("off")));
+      assert!(env_flag_value_enabled(Some("1")));
+      assert!(env_flag_value_enabled(Some("true")));
+      assert!(env_flag_value_enabled(Some("yes")));
+      assert!(env_flag_value_enabled(Some("anything")));
+   }
+   #[test]
+   fn test_format_llm_progress_uses_operation_label_and_request_shape() {
+      let schema =
+         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
+      let spec = OneShotSpec {
+         operation:        "map-reduce/map",
+         model:            "claude-sonnet-4.5",
+         max_tokens:       1500,
+         temperature:      0.0,
+         prompt_family:    "map",
+         prompt_variant:   "default",
+         system_prompt:    "system",
+         user_prompt:      "user",
+         tool_name:        "create_file_observation",
+         tool_description: "Extract observations",
+         schema:           &schema,
+         progress_label:   Some("map file 2/5 src/lib.rs"),
+         debug:            None,
+         cacheable:        false,
+      };
+
+      assert_eq!(
+         format_llm_query_progress(
+            &spec,
+            ResolvedApiMode::ChatCompletions,
+            OneShotRequestKind::ToolCalling
+         ),
+         "LLM query: map file 2/5 src/lib.rs \u{2192} claude-sonnet-4.5 (map/default, chat \
+          completions, tool call, prompt ~3 tokens/10 chars, max 1500 output tokens)"
+      );
+      assert_eq!(
+         format_llm_response_progress(
+            &spec,
+            reqwest::StatusCode::OK,
+            std::time::Duration::from_millis(1234),
+            2048,
+         ),
+         "LLM response: map file 2/5 src/lib.rs \u{2190} claude-sonnet-4.5 (HTTP 200, 1.2s, 2.0KB)"
+      );
+      assert_eq!(
+         format_llm_cache_progress(&spec),
+         "LLM cache hit: map file 2/5 src/lib.rs \u{2192} claude-sonnet-4.5 (map/default)"
+      );
    }
 
    #[test]
@@ -2151,6 +2512,7 @@ mod tests {
          tool_name: "create_commit_summary",
          tool_description: "Create a commit summary",
          schema: &schema,
+         progress_label: Some("summary"),
          debug: None,
          cacheable: false,
       })

@@ -401,6 +401,7 @@ fn splice_hunks_into_base(base: &[u8], hunks: &[&ComposeHunk]) -> Vec<u8> {
 /// hunk is anchored in the base it was generated from, this applies cleanly
 /// where a state-sensitive `git apply` against the live index would conflict.
 /// The working tree is never touched: only the index is rewritten.
+#[tracing::instrument(target = "lgit", name = "patch.force_stage_file_from_base", skip_all, fields(dir, file_id, hunk_count = selected_hunk_ids.len()))]
 pub fn force_stage_file_from_base(
    snapshot: &ComposeSnapshot,
    file_id: &str,
@@ -410,6 +411,7 @@ pub fn force_stage_file_from_base(
    force_stage_file_from_base_with_index(snapshot, file_id, selected_hunk_ids, dir, None)
 }
 
+#[tracing::instrument(target = "lgit", name = "patch.force_stage_file_from_base_in_index", skip_all, fields(dir, file_id, hunk_count = selected_hunk_ids.len(), index = %index_file.display()))]
 pub fn force_stage_file_from_base_in_index(
    snapshot: &ComposeSnapshot,
    file_id: &str,
@@ -466,6 +468,7 @@ fn force_stage_file_from_base_with_index(
 }
 
 /// Stage specific files.
+#[tracing::instrument(target = "lgit", name = "patch.stage_files", skip_all, fields(dir, file_count = files.len()))]
 pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
    stage_files_with_index(files, dir, None)
 }
@@ -593,6 +596,7 @@ fn stage_index_blob(blob: &IndexBlob, dir: &str, index_file: Option<&Path>) -> R
 }
 
 /// Reset staging area.
+#[tracing::instrument(target = "lgit", name = "patch.reset_staging", skip_all, fields(dir))]
 pub fn reset_staging(dir: &str) -> Result<()> {
    let output = git_command()
       .args(["reset", "HEAD"])
@@ -753,6 +757,7 @@ fn build_semantic_key(path: &str, lines: &[String], fallback: &str) -> String {
    format!("{path}:{}", fnv1a_64(&source))
 }
 
+#[tracing::instrument(target = "lgit", name = "patch.build_compose_snapshot", skip_all, fields(diff_bytes = diff.len(), stat_bytes = stat.len()))]
 pub fn build_compose_snapshot(diff: &str, stat: &str) -> Result<ComposeSnapshot> {
    let mut files = Vec::new();
    let mut current_file: Option<ParsedFile> = None;
@@ -1097,6 +1102,7 @@ fn new_file_index_blob(file: &ComposeFile, hunks: &[&ComposeHunk]) -> Result<Ind
    Ok(IndexBlob { path: file.path.clone(), mode, object })
 }
 
+#[tracing::instrument(target = "lgit", name = "patch.create_executable_group_patch", skip_all, fields(group_id = %group.group_id, file_count = group.file_ids.len(), hunk_count = group.hunk_ids.len()))]
 pub fn create_executable_group_patch(
    snapshot: &ComposeSnapshot,
    group: &ComposeExecutableGroup,
@@ -1174,6 +1180,7 @@ pub fn create_executable_group_patch(
    Ok(ComposeGroupPatch { diff, stat, apply_patches, fallback_files, index_blobs })
 }
 
+#[tracing::instrument(target = "lgit", name = "patch.stage_executable_group", skip_all, fields(dir, group_id = %group.group_id))]
 pub fn stage_executable_group(
    snapshot: &ComposeSnapshot,
    group: &ComposeExecutableGroup,
@@ -1182,6 +1189,7 @@ pub fn stage_executable_group(
    stage_executable_group_with_index(snapshot, group, dir, None)
 }
 
+#[tracing::instrument(target = "lgit", name = "patch.stage_executable_group_in_index", skip_all, fields(dir, group_id = %group.group_id, index = %index_file.display()))]
 pub fn stage_executable_group_in_index(
    snapshot: &ComposeSnapshot,
    group: &ComposeExecutableGroup,

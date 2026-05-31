@@ -20,6 +20,7 @@ use crate::{
 };
 
 /// Run rewrite mode - regenerate all commit messages in history
+#[tracing::instrument(target = "lgit", name = "rewrite.run", skip_all, fields(dir = %args.dir, parallel = args.rewrite_parallel, dry_run = args.rewrite_dry_run))]
 pub async fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    // 1. Validate preconditions
    if !args.rewrite_dry_run
@@ -108,6 +109,7 @@ pub async fn run_rewrite_mode(args: &Args, config: &CommitConfig) -> Result<()> 
 }
 
 /// Generate new commit messages in parallel using async streams
+#[tracing::instrument(target = "lgit", name = "rewrite.generate_messages_parallel", skip_all, fields(commit_count = commits.len(), parallel = args.rewrite_parallel))]
 async fn generate_messages_parallel(
    commits: &[CommitMetadata],
    config: &CommitConfig,
@@ -162,6 +164,7 @@ async fn generate_messages_parallel(
 }
 
 /// Generate conventional commit message for a single commit
+#[tracing::instrument(target = "lgit", name = "rewrite.generate_for_commit", skip_all, fields(dir, hash = %commit.hash))]
 async fn generate_for_commit(
    commit: &CommitMetadata,
    config: &CommitConfig,
@@ -230,6 +233,7 @@ async fn generate_for_commit(
 }
 
 /// Print preview list of commits (no API calls)
+#[tracing::instrument(target = "lgit", name = "rewrite.print_preview_list", skip_all, fields(commit_count = commits.len()))]
 fn print_preview_list(commits: &[CommitMetadata]) {
    println!(
       "\n{}\n",
@@ -256,6 +260,7 @@ fn print_preview_list(commits: &[CommitMetadata]) {
 }
 
 /// Print conversion results comparison
+#[tracing::instrument(target = "lgit", name = "rewrite.print_conversion_results", skip_all, fields(commit_count = commits.len()))]
 fn print_conversion_results(commits: &[CommitMetadata], new_messages: &[String]) {
    println!(
       "\n{} Processed {} commits\n",

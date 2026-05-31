@@ -63,6 +63,7 @@ pub struct ComposeBaseState {
    index_tree: String,
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.capture_base_state", skip_all, fields(dir))]
 pub fn capture_compose_base_state(dir: &str) -> Result<ComposeBaseState> {
    Ok(ComposeBaseState {
       head_hash:  get_head_hash(dir)?,
@@ -1764,6 +1765,7 @@ fn build_large_patch_fallback_groups(
    Ok(groups)
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.analyze_intent", skip_all, fields(file_count = snapshot.files.len(), observation_count = observations.len(), max_commits))]
 async fn analyze_compose_intent(
    snapshot: &ComposeSnapshot,
    observations: &[FileObservation],
@@ -1800,6 +1802,7 @@ async fn analyze_compose_intent(
       tool_name:        "create_compose_intent_plan",
       tool_description: "Plan logical commit groups over the provided planning target IDs",
       schema:           &schema,
+      progress_label:   Some("compose intent planner"),
       debug:            debug_dir.map(|dir| OneShotDebug {
          dir:    Some(dir),
          prefix: None,
@@ -1830,6 +1833,7 @@ async fn analyze_compose_intent(
    Ok(ComposeIntentPlan { groups, dependency_order })
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.should_collect_observations", skip_all, fields(file_count = snapshot.files.len()))]
 fn should_collect_compose_observations(
    snapshot: &ComposeSnapshot,
    config: &CommitConfig,
@@ -1839,6 +1843,7 @@ fn should_collect_compose_observations(
       && should_use_map_reduce(&snapshot.diff, config, counter)
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.auto_assign_hunks", skip_all, fields(group_count = intent_plan.groups.len()))]
 fn auto_assign_hunks(
    snapshot: &ComposeSnapshot,
    intent_plan: &ComposeIntentPlan,
@@ -1979,6 +1984,7 @@ async fn request_binding(
       tool_name:        "bind_compose_hunks",
       tool_description: "Assign hunk IDs to existing compose groups",
       schema:           &schema,
+      progress_label:   Some("compose hunk binder"),
       debug:            debug_dir.map(|dir| OneShotDebug {
          dir:    Some(dir),
          prefix: None,
@@ -2442,6 +2448,7 @@ fn validate_executable_plan(
    Ok(())
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.bind_plan", skip_all, fields(file_count = snapshot.files.len(), group_count = intent_plan.groups.len()))]
 async fn bind_compose_plan(
    snapshot: &ComposeSnapshot,
    intent_plan: &ComposeIntentPlan,
@@ -2580,6 +2587,7 @@ fn print_executable_plan(snapshot: &ComposeSnapshot, plan: &ComposeExecutablePla
    }
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.generate_group_analysis", skip_all, fields(group_id = %group.group_id, diff_bytes = diff.len(), stat_bytes = stat.len()))]
 async fn generate_compose_group_analysis(
    stat: &str,
    diff: &str,
@@ -2681,6 +2689,7 @@ fn cumulative_file_hunk_ids(
    hunk_ids
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.execute", skip_all, fields(group_count = plan.dependency_order.len(), dir = %args.dir))]
 pub async fn execute_compose(
    snapshot: &ComposeSnapshot,
    plan: &ComposeExecutablePlan,
@@ -2774,6 +2783,7 @@ pub async fn execute_compose(
    )
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.execute_prepared_messages", skip_all, fields(group_count = plan.dependency_order.len(), dir = %args.dir))]
 fn execute_compose_with_prepared_messages(
    snapshot: &ComposeSnapshot,
    plan: &ComposeExecutablePlan,
@@ -2911,6 +2921,7 @@ fn execute_compose_with_prepared_messages(
    Ok(commit_hashes)
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.run", skip_all, fields(dir = %args.dir, max_rounds = config.compose_max_rounds))]
 pub async fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    let max_rounds = config.compose_max_rounds;
 
@@ -2970,6 +2981,7 @@ pub async fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> 
    Ok(())
 }
 
+#[tracing::instrument(target = "lgit", name = "compose.round", skip_all, fields(dir = %args.dir, round))]
 async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result<()> {
    let base_state = capture_compose_base_state(&args.dir)?;
    let diff = get_compose_diff(&args.dir)?;
@@ -2987,7 +2999,7 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
    let token_counter = create_token_counter(config);
    let observations = if should_collect_compose_observations(&snapshot, config, &token_counter) {
       println!("{}", style::info("Summarizing compose snapshot with map-reduce..."));
-      observe_diff_files(&snapshot.diff, &config.analysis_model, config, &token_counter).await?
+      observe_diff_files(&snapshot.diff, &config.summary_model, config, &token_counter).await?
    } else {
       if planning_mode_for_snapshot(&snapshot) == PlanningMode::Area
          && should_use_map_reduce(&snapshot.diff, config, &token_counter)
@@ -3738,7 +3750,7 @@ index 3333333..4444444 100644
    #[test]
    fn test_should_collect_compose_observations_skips_area_mode() {
       let snapshot = build_large_snapshot(160, 4);
-      let config = CommitConfig::default();
+      let config = CommitConfig { map_reduce_threshold: 1_000, ..Default::default() };
       let counter = create_token_counter(&config);
 
       assert!(should_use_map_reduce(&snapshot.diff, &config, &counter));
@@ -3746,16 +3758,11 @@ index 3333333..4444444 100644
    }
 
    #[test]
-   fn test_compose_analysis_strategy_uses_map_reduce_for_multi_file_group_diff() {
-      let config = CommitConfig::default();
+   fn test_compose_analysis_strategy_uses_map_reduce_for_large_diff() {
+      let config = CommitConfig { map_reduce_threshold: 20, ..Default::default() };
       let counter = create_token_counter(&config);
-      let diff = [
-         "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-a\n+b",
-         "diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n-a\n+b",
-         "diff --git a/c.rs b/c.rs\n@@ -1 +1 @@\n-a\n+b",
-         "diff --git a/d.rs b/d.rs\n@@ -1 +1 @@\n-a\n+b",
-      ]
-      .join("\n");
+      let payload = "a".repeat(200);
+      let diff = format!("diff --git a/a.rs b/a.rs\n@@ -0,0 +1 @@\n+{payload}");
 
       assert_eq!(
          compose_analysis_strategy(&diff, &config, &counter),

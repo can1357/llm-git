@@ -15,6 +15,7 @@ pub mod llm_cache;
 pub mod map_reduce;
 pub mod normalization;
 pub mod patch;
+pub mod profile;
 pub mod repo;
 pub mod style;
 pub mod templates;
