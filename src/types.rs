@@ -114,7 +114,8 @@ pub fn default_types() -> IndexMap<String, TypeConfig> {
       ("docs".to_string(), TypeConfig {
          description: "Documentation only changes".to_string(),
          file_patterns: vec!["*.md".to_string(), "doc comments".to_string()],
-         hint: "Excludes prompt template files (prompts/*.md). Prompt changes are functional — use feat/fix/refactor."
+         hint: "Excludes prompt template files (prompts/*.md). Prompt changes are functional — \
+                use feat/fix/refactor."
             .to_string(),
          ..Default::default()
       }),

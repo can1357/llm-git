@@ -204,8 +204,7 @@ fn append_untracked_stat(mut stat: String, dir: &str, untracked_files: &[String]
 
       if let Ok(metadata) = fs::metadata(format!("{dir}/{file}")) {
          let lines = if metadata.is_file() {
-            fs::read_to_string(format!("{dir}/{file}"))
-               .map_or(0, |content| content.lines().count())
+            fs::read_to_string(format!("{dir}/{file}")).map_or(0, |content| content.lines().count())
          } else {
             0
          };

@@ -1115,14 +1115,8 @@ diff --git a/e.rs b/e.rs
    fn test_infer_file_description() {
       assert_eq!(infer_file_description("src/test_utils.rs", ""), "test file");
       assert_eq!(infer_file_description("README.md", ""), "documentation");
-      assert_eq!(
-         infer_file_description("prompts/analysis/default.md", ""),
-         "prompt template"
-      );
-      assert_eq!(
-         infer_file_description("system/analysis/default.md", ""),
-         "prompt template"
-      );
+      assert_eq!(infer_file_description("prompts/analysis/default.md", ""), "prompt template");
+      assert_eq!(infer_file_description("system/analysis/default.md", ""), "prompt template");
       assert_eq!(infer_file_description("config.toml", ""), "configuration");
       assert_eq!(infer_file_description("src/error.rs", ""), "error definitions");
       assert_eq!(infer_file_description("src/types.rs", ""), "type definitions");

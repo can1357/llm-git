@@ -1215,7 +1215,10 @@ fn group_type_bonus(file: &ComposeFile, group: &ComposeIntentGroup) -> i32 {
       (ComposeFileCategory::Test, "test") => 25,
       (ComposeFileCategory::Dependency, "build" | "chore" | "ci") => 18,
       (ComposeFileCategory::Config, "build" | "chore" | "ci") => 12,
-      (ComposeFileCategory::Prompt | ComposeFileCategory::Source, "feat" | "fix" | "refactor" | "perf") => 10,
+      (
+         ComposeFileCategory::Prompt | ComposeFileCategory::Source,
+         "feat" | "fix" | "refactor" | "perf",
+      ) => 10,
       _ => 0,
    }
 }
@@ -3208,7 +3211,9 @@ index 3333333..4444444 100644
 +new docs
 ";
       let snapshot = build_compose_snapshot(diff, "").unwrap();
-      let prompt_file = snapshot.file_by_path("prompts/analysis/default.md").unwrap();
+      let prompt_file = snapshot
+         .file_by_path("prompts/analysis/default.md")
+         .unwrap();
       let system_file = snapshot.file_by_path("system/analysis/default.md").unwrap();
       let readme_file = snapshot.file_by_path("README.md").unwrap();
 
@@ -3227,7 +3232,8 @@ index 3333333..4444444 100644
       assert_eq!(group_type_bonus(prompt_file, &feat_group), 10);
 
       let fallback_type =
-         fallback_commit_type_for_group(&snapshot, &[], std::slice::from_ref(&prompt_file.file_id)).unwrap();
+         fallback_commit_type_for_group(&snapshot, &[], std::slice::from_ref(&prompt_file.file_id))
+            .unwrap();
       assert_eq!(fallback_type.as_str(), "refactor");
    }
 
