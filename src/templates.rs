@@ -4,8 +4,8 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use serde::Serialize;
 use rust_embed::RustEmbed;
+use serde::Serialize;
 use tera::{Context, Tera};
 
 use crate::error::{CommitGenError, Result};

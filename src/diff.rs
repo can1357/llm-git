@@ -341,6 +341,151 @@ pub fn reconstruct_diff(files: &[FileDiff]) -> String {
    result
 }
 
+/// Classification of a changeset by whitespace footprint.
+///
+/// A file is "whitespace-only" when its added and removed lines are identical
+/// once *all* whitespace (including newlines) is stripped — i.e. only
+/// indentation, spacing, or line wrapping changed, never a token.
+#[derive(Debug, Clone, Default)]
+pub struct WhitespaceReport {
+   /// Paths of files whose only change is whitespace.
+   pub whitespace_only_files: Vec<String>,
+   /// Whether at least one file has a substantive (non-whitespace) change.
+   pub has_substantive:       bool,
+}
+
+impl WhitespaceReport {
+   /// True when every changed file differs only in whitespace (and there is at
+   /// least one such file). This is the signal to record a `style: reformatted`
+   /// commit without calling the model.
+   pub const fn all_whitespace(&self) -> bool {
+      !self.has_substantive && !self.whitespace_only_files.is_empty()
+   }
+}
+
+/// Byte offsets where each `diff --git` file section begins.
+///
+/// Only matches at the start of a line so that occurrences inside diff bodies
+/// (e.g. an edited line containing the literal text) are ignored.
+fn file_section_starts(diff: &str) -> Vec<usize> {
+   let bytes = diff.as_bytes();
+   diff
+      .match_indices("diff --git")
+      .filter(|&(i, _)| i == 0 || bytes[i - 1] == b'\n')
+      .map(|(i, _)| i)
+      .collect()
+}
+
+/// Split a unified diff into a leading preamble (commit metadata from
+/// `git show`, usually empty) and one `(path, section)` pair per file. Section
+/// slices borrow `diff` verbatim, including their trailing newline, so they can
+/// be concatenated back losslessly.
+fn file_sections(diff: &str) -> (&str, Vec<(&str, &str)>) {
+   let starts = file_section_starts(diff);
+   if starts.is_empty() {
+      return (diff, Vec::new());
+   }
+
+   let preamble = &diff[..starts[0]];
+   let mut sections = Vec::with_capacity(starts.len());
+   for (idx, &start) in starts.iter().enumerate() {
+      let end = starts.get(idx + 1).copied().unwrap_or(diff.len());
+      let section = &diff[start..end];
+      let path = section
+         .lines()
+         .next()
+         .and_then(|line| line.split_whitespace().nth(3))
+         .map_or("unknown", |s| s.trim_start_matches("b/"));
+      sections.push((path, section));
+   }
+   (preamble, sections)
+}
+
+/// Whether a single file section changes only whitespace.
+///
+/// Concatenates the added lines and the removed lines separately, strips all
+/// whitespace from each, and compares. Equal non-empty change ⇒ whitespace
+/// only. Binary files and renames are always treated as substantive so they
+/// never masquerade as a reformat.
+fn section_is_whitespace_only(section: &str) -> bool {
+   let mut added = String::new();
+   let mut removed = String::new();
+   let mut has_change = false;
+
+   for line in section.lines() {
+      if line.starts_with("Binary files")
+         || line.starts_with("rename from")
+         || line.starts_with("rename to")
+         || line.starts_with("copy from")
+         || line.starts_with("copy to")
+      {
+         return false;
+      }
+      // Skip the `+++`/`---` file headers; they are not content lines.
+      if line.starts_with("+++") || line.starts_with("---") {
+         continue;
+      }
+      if let Some(rest) = line.strip_prefix('+') {
+         has_change = true;
+         added.extend(rest.chars().filter(|c| !c.is_whitespace()));
+      } else if let Some(rest) = line.strip_prefix('-') {
+         has_change = true;
+         removed.extend(rest.chars().filter(|c| !c.is_whitespace()));
+      }
+   }
+
+   has_change && added == removed
+}
+
+/// Classify a unified diff by whitespace footprint.
+#[tracing::instrument(target = "lgit", name = "diff.classify_whitespace", skip_all, fields(diff_bytes = diff.len()))]
+pub fn classify_diff_whitespace(diff: &str) -> WhitespaceReport {
+   let (_preamble, sections) = file_sections(diff);
+   let mut report = WhitespaceReport::default();
+   for (path, section) in sections {
+      if section_is_whitespace_only(section) {
+         report.whitespace_only_files.push(path.to_string());
+      } else {
+         report.has_substantive = true;
+      }
+   }
+   report
+}
+
+/// Drop whitespace-only file sections from a diff, returning the trimmed diff.
+///
+/// Returns `None` when nothing would change (no whitespace-only files) or when
+/// every section is whitespace-only (stripping would empty the diff), so the
+/// caller keeps the original on the common path without reallocating.
+#[tracing::instrument(target = "lgit", name = "diff.strip_whitespace_only", skip_all, fields(diff_bytes = diff.len()))]
+pub fn strip_whitespace_only_files(diff: &str) -> Option<String> {
+   let (preamble, sections) = file_sections(diff);
+   if sections.is_empty() {
+      return None;
+   }
+
+   let mut kept = Vec::with_capacity(sections.len());
+   let mut stripped_any = false;
+   for (_path, section) in &sections {
+      if section_is_whitespace_only(section) {
+         stripped_any = true;
+      } else {
+         kept.push(*section);
+      }
+   }
+
+   if !stripped_any || kept.is_empty() {
+      return None;
+   }
+
+   let mut out = String::with_capacity(diff.len());
+   out.push_str(preamble);
+   for section in kept {
+      out.push_str(section);
+   }
+   Some(out)
+}
+
 /// Truncate a diff to fit within a line budget, distributing lines across files
 /// by priority.
 ///
@@ -992,5 +1137,136 @@ index 123..456 100644
       let files: Vec<FileDiff> = vec![];
       let result = reconstruct_diff(&files);
       assert_eq!(result, "");
+   }
+
+   const WS_ONLY_INDENT: &str = "diff --git a/src/foo.rs b/src/foo.rs
+index 1234567..89abcde 100644
+--- a/src/foo.rs
++++ b/src/foo.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-let x = 1;
++    let x = 1;
+ }
+";
+
+   const SUBSTANTIVE: &str = "diff --git a/src/bar.rs b/src/bar.rs
+index 1111111..2222222 100644
+--- a/src/bar.rs
++++ b/src/bar.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-let x = 1;
++let x = 2;
+ }
+";
+
+   #[test]
+   fn test_whitespace_only_indentation() {
+      let report = classify_diff_whitespace(WS_ONLY_INDENT);
+      assert!(report.all_whitespace());
+      assert!(!report.has_substantive);
+      assert_eq!(report.whitespace_only_files, vec!["src/foo.rs".to_string()]);
+   }
+
+   #[test]
+   fn test_whitespace_only_rewrap() {
+      // Reflowing one line into two is still whitespace-only: the tokens match
+      // once newlines are stripped.
+      let diff = "diff --git a/a.md b/a.md
+index 111..222 100644
+--- a/a.md
++++ b/a.md
+@@ -1 +1,2 @@
+-one two three
++one two
++three
+";
+      let report = classify_diff_whitespace(diff);
+      assert!(report.all_whitespace());
+   }
+
+   #[test]
+   fn test_substantive_change_not_whitespace() {
+      let report = classify_diff_whitespace(SUBSTANTIVE);
+      assert!(!report.all_whitespace());
+      assert!(report.has_substantive);
+      assert!(report.whitespace_only_files.is_empty());
+   }
+
+   #[test]
+   fn test_new_file_is_substantive() {
+      let diff = "diff --git a/new.txt b/new.txt
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++hello
++world
+";
+      let report = classify_diff_whitespace(diff);
+      assert!(!report.all_whitespace());
+      assert!(report.has_substantive);
+   }
+
+   #[test]
+   fn test_rename_is_substantive() {
+      let diff = "diff --git a/old.rs b/new.rs
+similarity index 100%
+rename from old.rs
+rename to new.rs
+";
+      let report = classify_diff_whitespace(diff);
+      assert!(!report.all_whitespace());
+      assert!(report.has_substantive);
+   }
+
+   #[test]
+   fn test_mixed_changeset() {
+      let diff = format!("{WS_ONLY_INDENT}{SUBSTANTIVE}");
+      let report = classify_diff_whitespace(&diff);
+      assert!(!report.all_whitespace());
+      assert!(report.has_substantive);
+      assert_eq!(report.whitespace_only_files, vec!["src/foo.rs".to_string()]);
+   }
+
+   #[test]
+   fn test_strip_drops_whitespace_only_file() {
+      let diff = format!("{WS_ONLY_INDENT}{SUBSTANTIVE}");
+      let stripped = strip_whitespace_only_files(&diff).expect("a file should be dropped");
+      assert!(!stripped.contains("src/foo.rs"));
+      assert!(stripped.contains("src/bar.rs"));
+      // Substantive section is preserved byte-for-byte.
+      assert_eq!(stripped, SUBSTANTIVE);
+   }
+
+   #[test]
+   fn test_strip_noop_when_no_whitespace_only() {
+      assert!(strip_whitespace_only_files(SUBSTANTIVE).is_none());
+   }
+
+   #[test]
+   fn test_strip_noop_when_all_whitespace() {
+      // Stripping everything would empty the diff, so the helper declines.
+      assert!(strip_whitespace_only_files(WS_ONLY_INDENT).is_none());
+   }
+
+   #[test]
+   fn test_diff_git_text_in_body_not_a_boundary() {
+      // A removed line that happens to contain the literal "diff --git" text
+      // must not be mistaken for a new file section.
+      let diff = "diff --git a/doc.md b/doc.md
+index 111..222 100644
+--- a/doc.md
++++ b/doc.md
+@@ -1,2 +1,2 @@
+-Run diff --git to inspect changes
++Run git diff to inspect changes
+ done
+";
+      let report = classify_diff_whitespace(diff);
+      assert_eq!(report.whitespace_only_files.len() + usize::from(report.has_substantive), 1);
+      assert!(report.has_substantive);
    }
 }

@@ -194,7 +194,6 @@ impl<'a> ContextHeaders<'a> {
       Self { files, ranked_indices, large_commit_header: None }
    }
 
-
    fn header_for_files(&self, current_files: &[&str]) -> Cow<'_, str> {
       if let Some(header) = &self.large_commit_header {
          return Cow::Borrowed(header.as_str());
@@ -254,7 +253,6 @@ impl<'a> ContextHeaders<'a> {
 fn is_current_context_file(filename: &str, current_files: &[&str]) -> bool {
    current_files.contains(&filename)
 }
-
 
 /// Infer a brief description of what a file likely contains based on
 /// name/content
@@ -442,20 +440,20 @@ async fn map_file_batch(
       .expect("batch output token cap fits in u32");
 
    let response = run_oneshot::<BatchObservationResponse>(config, &OneShotSpec {
-      operation:        "map-reduce/map",
-      model:            model_name,
+      operation: "map-reduce/map",
+      model: model_name,
       max_tokens,
-      temperature:      config.temperature,
-      prompt_family:    "map",
-      prompt_variant:   "default",
-      system_prompt:    &parts.system,
-      user_prompt:      &parts.user,
-      tool_name:        "create_file_observations",
+      temperature: config.temperature,
+      prompt_family: "map",
+      prompt_variant: "default",
+      system_prompt: &parts.system,
+      user_prompt: &parts.user,
+      tool_name: "create_file_observations",
       tool_description: "Extract observations from a batch of file changes",
-      schema:           &observation_schema,
-      progress_label:   Some(progress_label),
-      debug:            None,
-      cacheable:        true,
+      schema: &observation_schema,
+      progress_label: Some(progress_label),
+      debug: None,
+      cacheable: true,
    })
    .await?;
 
@@ -506,7 +504,10 @@ fn map_batch_response_to_observations(
       crate::style::warn(
          "Model returned batch observations as text; using fallback observations for every file.",
       );
-      return files.iter().map(|file| fallback_file_observation(file)).collect();
+      return files
+         .iter()
+         .map(|file| fallback_file_observation(file))
+         .collect();
    }
 
    let stopped_at_max_tokens = stop_reason == Some("max_tokens");
@@ -514,12 +515,9 @@ fn map_batch_response_to_observations(
    files
       .iter()
       .map(|file| {
-         let Some(entry_idx) = find_observation_entry(
-            file.filename.as_str(),
-            &response.files,
-            &used_entries,
-            files,
-         ) else {
+         let Some(entry_idx) =
+            find_observation_entry(file.filename.as_str(), &response.files, &used_entries, files)
+         else {
             return fallback_file_observation(file);
          };
 
@@ -531,12 +529,7 @@ fn map_batch_response_to_observations(
             entry.observations.clone()
          };
 
-         FileObservation {
-            file: file.filename.clone(),
-            observations,
-            additions: 0,
-            deletions: 0,
-         }
+         FileObservation { file: file.filename.clone(), observations, additions: 0, deletions: 0 }
       })
       .collect()
 }
@@ -564,9 +557,7 @@ fn find_observation_entry(
             .flatten()
       })
       .or_else(|| {
-         find_entry_by(entries, used_entries, |entry| {
-            path_suffix_matches(&entry.path, filename)
-         })
+         find_entry_by(entries, used_entries, |entry| path_suffix_matches(&entry.path, filename))
       })
 }
 
@@ -692,7 +683,7 @@ struct BatchObservationResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct FileObservationEntry {
-   path: String,
+   path:         String,
    #[serde(default, deserialize_with = "deserialize_observations")]
    observations: Vec<String>,
 }
@@ -876,7 +867,6 @@ mod tests {
          is_binary: false,
       }
    }
-
 
    #[test]
    fn test_map_phase_model_uses_summary_model() {

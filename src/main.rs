@@ -12,7 +12,10 @@ use arboard::Clipboard;
 use clap::{CommandFactory, Parser};
 use compose::run_compose_mode;
 use config::CommitConfig;
-use diff::{smart_truncate_diff, truncate_diff_by_lines};
+use diff::{
+   classify_diff_whitespace, smart_truncate_diff, strip_whitespace_only_files,
+   truncate_diff_by_lines,
+};
 use error::{CommitGenError, Result};
 use git::{
    ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat, get_git_stat,
@@ -20,7 +23,7 @@ use git::{
 };
 use llm_git::{style, tokens::create_token_counter, *};
 use normalization::{format_commit_message, post_process_commit_message};
-use types::{Args, ConventionalCommit, Mode, resolve_model_name};
+use types::{Args, CommitSummary, CommitType, ConventionalCommit, Mode, resolve_model_name};
 use validation::{check_type_scope_consistency, validate_commit_message};
 
 /// Print status messages to stderr in pipe mode, stdout otherwise.
@@ -402,6 +405,48 @@ fn build_footers(args: &Args) -> Vec<String> {
    footers
 }
 
+/// Detect when a changeset differs only in whitespace and, if so, build a
+/// ready-to-commit `style: reformatted …` message without calling the model.
+///
+/// Returns `Ok(None)` when at least one file has a substantive change, so the
+/// caller continues with the normal generation pipeline. Compose mode is
+/// handled separately and never reaches here.
+#[tracing::instrument(target = "lgit", name = "standard.detect_reformat", skip_all, fields(mode = ?args.mode, dir = %args.dir))]
+fn detect_reformat_shortcut(
+   args: &Args,
+   config: &CommitConfig,
+) -> Result<Option<ConventionalCommit>> {
+   let diff = get_git_diff(&args.mode, args.target.as_deref(), &args.dir, config)?;
+   let report = classify_diff_whitespace(&diff);
+   if !report.all_whitespace() {
+      return Ok(None);
+   }
+   Ok(Some(build_reformat_commit(&report.whitespace_only_files, args, config)?))
+}
+
+/// Build a `style: reformatted …` commit for a whitespace-only changeset.
+fn build_reformat_commit(
+   files: &[String],
+   args: &Args,
+   config: &CommitConfig,
+) -> Result<ConventionalCommit> {
+   let summary_text = match files {
+      [single] => {
+         let name = single.rsplit('/').next().unwrap_or(single.as_str());
+         format!("reformatted {name}")
+      },
+      many => format!("reformatted {} files", many.len()),
+   };
+
+   Ok(ConventionalCommit {
+      commit_type: CommitType::new("style")?,
+      scope:       None,
+      summary:     CommitSummary::new(summary_text, config.summary_hard_limit)?,
+      body:        Vec::new(),
+      footers:     build_footers(args),
+   })
+}
+
 fn resolve_fast_mode_model(args: &Args, config: &CommitConfig) -> String {
    if args.model.is_some() || config.legacy_model.is_some() {
       config.analysis_model.clone()
@@ -447,6 +492,13 @@ async fn run_generation(
       save_debug_output(debug_dir, "stat.txt", &stat)?;
       record_timing(timings, "write_debug_inputs", phase_start.elapsed());
    }
+
+   // Drop whitespace-only files so the model focuses on substantive changes.
+   // A changeset that is *entirely* whitespace never reaches here — it is
+   // short-circuited to a reformat commit in `run_cli`.
+   let phase_start = Instant::now();
+   let diff = strip_whitespace_only_files(&diff).unwrap_or(diff);
+   record_timing(timings, "strip_whitespace_only", phase_start.elapsed());
 
    status!(
       "{} {} {} {} {} {} {}",
@@ -808,6 +860,11 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
       record_timing(&mut timings, "write_debug_inputs", phase_start.elapsed());
    }
 
+   // Drop whitespace-only files so the model focuses on substantive changes.
+   let phase_start = Instant::now();
+   let diff = strip_whitespace_only_files(&diff).unwrap_or(diff);
+   record_timing(&mut timings, "strip_whitespace_only", phase_start.elapsed());
+
    // Line-budget truncation for fast mode (10k lines)
    let phase_start = Instant::now();
    let diff = truncate_diff_by_lines(&diff, 10_000, config);
@@ -1043,48 +1100,64 @@ async fn run_cli(args: Args) -> miette::Result<()> {
       record_timing(&mut timings, "auto_stage_if_needed", phase_start.elapsed());
    }
 
-   // Route to fast mode if --fast flag is present
-   if args.fast {
-      return Ok(run_fast_mode(&args, &config).await?);
-   }
+   // Whitespace-only changesets become a `style: reformatted …` commit with no
+   // model call. Checked before fast-mode routing so small reformats are not
+   // auto-switched into the LLM fast path.
+   let phase_start = Instant::now();
+   let reformat_commit = detect_reformat_shortcut(&args, &config)?;
+   record_timing(&mut timings, "detect_reformat_shortcut", phase_start.elapsed());
 
-   if config.auto_fast_threshold_lines > 0 {
-      let phase_start = Instant::now();
-      let numstat = get_git_numstat(&args.mode, args.target.as_deref(), &args.dir, &config)?;
-      record_timing(&mut timings, "get_git_numstat_for_auto_fast", phase_start.elapsed());
-
-      if let Some(changed_lines) = auto_fast_changed_lines(&numstat, &config) {
-         status!(
-            "{} {}",
-            style::info("›"),
-            style::dim(&format!(
-               "Auto-switching to fast mode ({changed_lines} changed lines <= {})",
-               config.auto_fast_threshold_lines
-            ))
-         );
+   let mut commit_msg = if let Some(commit) = reformat_commit {
+      status!(
+         "{} {}",
+         style::info("›"),
+         style::dim("Detected whitespace-only changes; recording as reformat")
+      );
+      commit
+   } else {
+      // Route to fast mode if --fast flag is present
+      if args.fast {
          return Ok(run_fast_mode(&args, &config).await?);
       }
-   }
 
-   // Run changelog maintenance if not disabled (check both CLI flag and config)
-   if !args.no_changelog && config.changelog_enabled {
-      let phase_start = Instant::now();
-      if let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config).await {
-         // Don't fail the commit, just warn
-         eprintln!("Warning: Changelog update failed: {e}");
+      if config.auto_fast_threshold_lines > 0 {
+         let phase_start = Instant::now();
+         let numstat = get_git_numstat(&args.mode, args.target.as_deref(), &args.dir, &config)?;
+         record_timing(&mut timings, "get_git_numstat_for_auto_fast", phase_start.elapsed());
+
+         if let Some(changed_lines) = auto_fast_changed_lines(&numstat, &config) {
+            status!(
+               "{} {}",
+               style::info("›"),
+               style::dim(&format!(
+                  "Auto-switching to fast mode ({changed_lines} changed lines <= {})",
+                  config.auto_fast_threshold_lines
+               ))
+            );
+            return Ok(run_fast_mode(&args, &config).await?);
+         }
       }
-      record_timing(&mut timings, "run_changelog_flow", phase_start.elapsed());
-   }
 
-   status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
-      Mode::Staged => style::bold("staged"),
-      Mode::Commit => style::bold("commit"),
-      Mode::Unstaged => style::bold("unstaged"),
-      Mode::Compose => unreachable!("compose mode handled separately"),
-   });
+      // Run changelog maintenance if not disabled (check both CLI flag and config)
+      if !args.no_changelog && config.changelog_enabled {
+         let phase_start = Instant::now();
+         if let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config).await {
+            // Don't fail the commit, just warn
+            eprintln!("Warning: Changelog update failed: {e}");
+         }
+         record_timing(&mut timings, "run_changelog_flow", phase_start.elapsed());
+      }
 
-   // Run generation pipeline
-   let mut commit_msg = run_generation(&config, &args, &token_counter, &mut timings).await?;
+      status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
+         Mode::Staged => style::bold("staged"),
+         Mode::Commit => style::bold("commit"),
+         Mode::Unstaged => style::bold("unstaged"),
+         Mode::Compose => unreachable!("compose mode handled separately"),
+      });
+
+      // Run generation pipeline
+      run_generation(&config, &args, &token_counter, &mut timings).await?
+   };
 
    // Get stat and detail points for validation retry
    let phase_start = Instant::now();
