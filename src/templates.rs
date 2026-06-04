@@ -526,11 +526,12 @@ pub fn render_compose_bind_prompt(p: &ComposeBindPromptParams<'_>) -> Result<Pro
 
 /// Parameters for rendering the fast mode prompt template.
 pub struct FastPromptParams<'a> {
-   pub variant:          &'a str,
-   pub stat:             &'a str,
-   pub diff:             &'a str,
-   pub scope_candidates: &'a str,
-   pub user_context:     Option<&'a str>,
+   pub variant:           &'a str,
+   pub stat:              &'a str,
+   pub diff:              &'a str,
+   pub scope_candidates:  &'a str,
+   pub user_context:      Option<&'a str>,
+   pub types_description: Option<&'a str>,
 }
 
 /// Render fast mode prompt template (single-call commit generation)
@@ -544,6 +545,9 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
    if let Some(ctx) = p.user_context {
       context.insert("user_context", ctx);
    }
+   if let Some(types_desc) = p.types_description {
+      context.insert("types_description", types_desc);
+   }
 
    render_prompt_parts(&format!("fast/{}.md", p.variant), &template_content, &context)
 }
@@ -551,9 +555,10 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
 #[cfg(test)]
 mod tests {
    use super::{
-      AnalysisParams, ComposeBindPromptParams, ComposeIntentPromptParams, ensure_prompts_dir,
-      render_analysis_prompt, render_compose_bind_prompt, render_compose_intent_prompt,
-      render_reduce_prompt, render_summary_prompt, split_prompt_template,
+      AnalysisParams, ComposeBindPromptParams, ComposeIntentPromptParams, FastPromptParams,
+      ensure_prompts_dir, render_analysis_prompt, render_compose_bind_prompt,
+      render_compose_intent_prompt, render_fast_prompt, render_reduce_prompt,
+      render_summary_prompt, split_prompt_template,
    };
 
    #[test]
@@ -606,6 +611,46 @@ mod tests {
             .contains("umbrella headline for the whole changeset")
       );
       assert!(parts.system.contains("Does not copy detail #1"));
+   }
+
+   #[test]
+   fn test_render_fast_prompt_surfaces_type_guidance() {
+      ensure_prompts_dir().unwrap();
+
+      let parts = render_fast_prompt(&FastPromptParams {
+         variant:           "default",
+         stat:              "prompts/analysis/default.md | 5 +++++",
+         diff:              "diff --git a/prompts/analysis/default.md \
+                             b/prompts/analysis/default.md\n",
+         scope_candidates:  "prompts",
+         user_context:      None,
+         types_description: Some(
+            "**docs**: Documentation only changes\n  Note: Excludes prompt template files.",
+         ),
+      })
+      .unwrap();
+
+      // Type guidance must reach the model and steer prompt edits away from docs.
+      assert!(parts.user.contains("<commit_types>"));
+      assert!(parts.user.contains("Excludes prompt template files."));
+      assert!(parts.system.contains("not `docs`"));
+   }
+
+   #[test]
+   fn test_render_fast_prompt_omits_commit_types_when_absent() {
+      ensure_prompts_dir().unwrap();
+
+      let parts = render_fast_prompt(&FastPromptParams {
+         variant:           "default",
+         stat:              "src/main.rs | 5 +++++",
+         diff:              "diff --git a/src/main.rs b/src/main.rs\n",
+         scope_candidates:  "",
+         user_context:      None,
+         types_description: None,
+      })
+      .unwrap();
+
+      assert!(!parts.user.contains("<commit_types>"));
    }
 
    #[test]

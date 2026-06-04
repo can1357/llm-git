@@ -2291,6 +2291,7 @@ pub async fn generate_fast_commit(
    debug_dir: Option<&Path>,
 ) -> Result<ConventionalCommit> {
    let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
+   let types_desc = format_types_description(config);
 
    let parts = templates::render_fast_prompt(&templates::FastPromptParams {
       variant: "default",
@@ -2298,6 +2299,7 @@ pub async fn generate_fast_commit(
       diff,
       scope_candidates: scope_candidates_str,
       user_context,
+      types_description: Some(&types_desc),
    })?;
 
    let fast_schema = strict_json_schema(

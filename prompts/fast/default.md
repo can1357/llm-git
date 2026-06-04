@@ -4,7 +4,7 @@ Produce exactly one `create_fast_commit` call with only `type`, optional `scope`
 
 Rules:
 - Use the supplied `stat`, `scope_candidates`, `user_context`, and `diff`. Treat `diff` as the source of truth; use the other inputs only as hints.
-- `type`: choose the best conventional commit type for the dominant change.
+- `type`: choose the best conventional commit type for the dominant change. When `<commit_types>` guidance is provided, follow its descriptions, notes, and disambiguation rules — they override your priors (e.g. prompt/template files under `prompts/` are functional changes, not `docs`).
 - `scope`: use a narrow lowercase module/component only when the diff clearly supports it. Prefer `scope_candidates` when helpful. Use `null` if unclear, cross-cutting, repo-wide, or if no single scope covers most of the change.
 - `summary`: specific past-tense phrase, no type prefix, no trailing period, and at most 72 characters.
 - `details`: 0-3 past-tense sentences, each ending with a period. Include only material changes that matter to a reader; skip renames, imports, formatting, and incidental churn.
@@ -32,6 +32,10 @@ Examples:
 {% if scope_candidates %}<scope_candidates>
 {{ scope_candidates }}
 </scope_candidates>
+{% endif %}
+{% if types_description %}<commit_types>
+{{ types_description }}
+</commit_types>
 {% endif %}
 {% if user_context %}<user_context>
 {{ user_context }}
