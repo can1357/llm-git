@@ -39,6 +39,11 @@ impl FileDiff {
          return 70; // Medium-high priority for dependency manifests (below source/SQL, above default)
       }
 
+      // Prompt/system templates are functional source, not docs.
+      if filename_lower.contains("prompt") || filename_lower.contains("system") {
+         return 100;
+      }
+
       // Check if it's a test file (lower priority)
       if self.filename.contains("/test")
          || self.filename.contains("test_")
@@ -795,6 +800,26 @@ index 123..000 100644
          is_binary: false,
       };
       assert_eq!(md_file.priority(&config), 20);
+
+      let prompt_file = FileDiff {
+         filename:  "prompts/analysis/default.md".to_string(),
+         header:    String::new(),
+         content:   String::new(),
+         additions: 0,
+         deletions: 0,
+         is_binary: false,
+      };
+      assert_eq!(prompt_file.priority(&config), 100);
+
+      let system_file = FileDiff {
+         filename:  "system/analysis/default.md".to_string(),
+         header:    String::new(),
+         content:   String::new(),
+         additions: 0,
+         deletions: 0,
+         is_binary: false,
+      };
+      assert_eq!(system_file.priority(&config), 100);
 
       let toml_file = FileDiff {
          filename:  "config.toml".to_string(),

@@ -263,6 +263,9 @@ fn infer_file_description(filename: &str, content: &str) -> &'static str {
    if filename_lower.contains("test") {
       return "test file";
    }
+   if filename_lower.contains("prompt") || filename_lower.contains("system") {
+      return "prompt template";
+   }
    if Path::new(filename)
       .extension()
       .is_some_and(|e| e.eq_ignore_ascii_case("md"))
@@ -1112,6 +1115,14 @@ diff --git a/e.rs b/e.rs
    fn test_infer_file_description() {
       assert_eq!(infer_file_description("src/test_utils.rs", ""), "test file");
       assert_eq!(infer_file_description("README.md", ""), "documentation");
+      assert_eq!(
+         infer_file_description("prompts/analysis/default.md", ""),
+         "prompt template"
+      );
+      assert_eq!(
+         infer_file_description("system/analysis/default.md", ""),
+         "prompt template"
+      );
       assert_eq!(infer_file_description("config.toml", ""), "configuration");
       assert_eq!(infer_file_description("src/error.rs", ""), "error definitions");
       assert_eq!(infer_file_description("src/types.rs", ""), "type definitions");

@@ -67,8 +67,7 @@ impl TempGitIndex {
       let pid = std::process::id();
       let nanos = SystemTime::now()
          .duration_since(UNIX_EPOCH)
-         .map(|duration| duration.as_nanos())
-         .unwrap_or(0);
+         .map_or(0, |duration| duration.as_nanos());
 
       for attempt in 0..100_u32 {
          let path = temp_dir.join(format!("index-{pid}-{nanos}-{attempt}"));
@@ -206,8 +205,7 @@ fn append_untracked_stat(mut stat: String, dir: &str, untracked_files: &[String]
       if let Ok(metadata) = fs::metadata(format!("{dir}/{file}")) {
          let lines = if metadata.is_file() {
             fs::read_to_string(format!("{dir}/{file}"))
-               .map(|content| content.lines().count())
-               .unwrap_or(0)
+               .map_or(0, |content| content.lines().count())
          } else {
             0
          };
@@ -1074,7 +1072,7 @@ pub fn get_common_scopes(dir: &str, limit: usize) -> Result<Vec<(String, usize)>
 
    // Sort by frequency (descending)
    let mut scopes: Vec<(String, usize)> = scope_counts.into_iter().collect();
-   scopes.sort_by(|a, b| b.1.cmp(&a.1));
+   scopes.sort_by_key(|scope| std::cmp::Reverse(scope.1));
 
    Ok(scopes)
 }
@@ -1203,11 +1201,11 @@ pub fn extract_style_patterns(commits: &[String]) -> Option<StylePatterns> {
 
    // Sort verbs by count
    let mut common_verbs: Vec<_> = verb_counts.into_iter().collect();
-   common_verbs.sort_by(|a, b| b.1.cmp(&a.1));
+   common_verbs.sort_by_key(|verb| std::cmp::Reverse(verb.1));
 
    // Sort scopes by count
    let mut top_scopes: Vec<_> = scope_counts.into_iter().collect();
-   top_scopes.sort_by(|a, b| b.1.cmp(&a.1));
+   top_scopes.sort_by_key(|scope| std::cmp::Reverse(scope.1));
 
    // Calculate length stats
    let avg_length = if lengths.is_empty() {

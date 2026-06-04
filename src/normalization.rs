@@ -183,7 +183,7 @@ pub fn cap_details(details: &mut Vec<String>, max_tokens: usize) {
       .collect();
 
    // Sort by score descending
-   scored.sort_by(|a, b| b.1.cmp(&a.1));
+   scored.sort_by_key(|item| std::cmp::Reverse(item.1));
 
    // Keep details until budget exhausted
    let mut budget_remaining = max_tokens;

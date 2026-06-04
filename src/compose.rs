@@ -1107,6 +1107,7 @@ enum ComposeFileCategory {
    Binary,
    Dependency,
    Docs,
+   Prompt,
    Test,
    Config,
    Source,
@@ -1122,22 +1123,26 @@ fn compose_file_category(file: &ComposeFile) -> ComposeFileCategory {
       return ComposeFileCategory::Dependency;
    }
 
-   let path = file.path.to_ascii_lowercase();
-   let file_name = Path::new(&path)
+   let filename_lower = file.path.to_ascii_lowercase();
+   let file_name = Path::new(&filename_lower)
       .file_name()
       .and_then(|name| name.to_str())
       .unwrap_or_default();
-   let extension = Path::new(&path)
+   let extension = Path::new(&filename_lower)
       .extension()
       .and_then(|ext| ext.to_str())
       .unwrap_or_default();
+
+   if filename_lower.contains("prompt") || filename_lower.contains("system") {
+      return ComposeFileCategory::Prompt;
+   }
 
    if extension == "md" || file_name == "readme" || file_name == "readme.md" {
       return ComposeFileCategory::Docs;
    }
 
-   if path.contains("/tests/")
-      || path.starts_with("tests/")
+   if filename_lower.contains("/tests/")
+      || filename_lower.starts_with("tests/")
       || file_name.contains("test")
       || file_name.contains("spec")
    {
@@ -1210,7 +1215,7 @@ fn group_type_bonus(file: &ComposeFile, group: &ComposeIntentGroup) -> i32 {
       (ComposeFileCategory::Test, "test") => 25,
       (ComposeFileCategory::Dependency, "build" | "chore" | "ci") => 18,
       (ComposeFileCategory::Config, "build" | "chore" | "ci") => 12,
-      (ComposeFileCategory::Source, "feat" | "fix" | "refactor" | "perf") => 10,
+      (ComposeFileCategory::Prompt | ComposeFileCategory::Source, "feat" | "fix" | "refactor" | "perf") => 10,
       _ => 0,
    }
 }
@@ -2707,7 +2712,7 @@ pub async fn execute_compose(
       let group = &plan.groups[group_idx];
       println!(
          "  {}",
-         style::info(&format!("Preparing diff for {} ({}/{})", group.group_id, idx + 1, total,))
+         style::info(&format!("Preparing diff for {} ({}/{})", group.group_id, idx + 1, total))
       );
       let group_patch = create_executable_group_patch(snapshot, group)?;
       group_diff_stats.push((group_patch.diff, group_patch.stat));
@@ -3176,6 +3181,54 @@ index 3333333..4444444 100644
 
    fn canned_message(summary: &str) -> (Vec<String>, CommitSummary) {
       (vec![], CommitSummary::new_unchecked(summary, 128).unwrap())
+   }
+
+   #[test]
+   fn test_compose_file_category_treats_prompts_as_functional_source() {
+      let diff = r"diff --git a/prompts/analysis/default.md b/prompts/analysis/default.md
+index 1111111..2222222 100644
+--- a/prompts/analysis/default.md
++++ b/prompts/analysis/default.md
+@@ -1,1 +1,1 @@
+-old prompt
++new prompt
+diff --git a/system/analysis/default.md b/system/analysis/default.md
+index 5555555..6666666 100644
+--- a/system/analysis/default.md
++++ b/system/analysis/default.md
+@@ -1,1 +1,1 @@
+-old system
++new system
+diff --git a/README.md b/README.md
+index 3333333..4444444 100644
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,1 @@
+-old docs
++new docs
+";
+      let snapshot = build_compose_snapshot(diff, "").unwrap();
+      let prompt_file = snapshot.file_by_path("prompts/analysis/default.md").unwrap();
+      let system_file = snapshot.file_by_path("system/analysis/default.md").unwrap();
+      let readme_file = snapshot.file_by_path("README.md").unwrap();
+
+      assert_eq!(compose_file_category(prompt_file), ComposeFileCategory::Prompt);
+      assert_eq!(compose_file_category(system_file), ComposeFileCategory::Prompt);
+      assert_eq!(compose_file_category(readme_file), ComposeFileCategory::Docs);
+
+      let feat_group = ComposeIntentGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("feat").unwrap(),
+         scope:        None,
+         file_ids:     vec![prompt_file.file_id.clone()],
+         rationale:    "prompt behavior change".to_string(),
+         dependencies: vec![],
+      };
+      assert_eq!(group_type_bonus(prompt_file, &feat_group), 10);
+
+      let fallback_type =
+         fallback_commit_type_for_group(&snapshot, &[], std::slice::from_ref(&prompt_file.file_id)).unwrap();
+      assert_eq!(fallback_type.as_str(), "refactor");
    }
 
    fn build_large_snapshot(file_count: usize, hunks_per_file: usize) -> ComposeSnapshot {
