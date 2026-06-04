@@ -39,7 +39,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-11-01
+          toolchain: nightly-2026-06-04
           targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
@@ -73,7 +73,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-11-01
+          toolchain: nightly-2026-06-04
 
       - name: Verify crate packaging
         run: cargo package --allow-dirty
