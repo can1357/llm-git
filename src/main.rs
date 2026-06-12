@@ -18,7 +18,7 @@ use diff::{
 };
 use error::{CommitGenError, Result};
 use git::{
-   ensure_git_repo, ensure_index_unchanged, get_common_scopes, get_git_diff, get_git_numstat,
+   commit_snapshot_tree, ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat,
    get_git_stat, get_recent_commits, git_command, git_commit, git_push,
    init_git_command_settings, write_real_index_tree,
 };
@@ -837,6 +837,54 @@ fn auto_stage_if_needed(dir: &str) -> Result<()> {
    Ok(())
 }
 
+/// Commit staged-mode output, tolerating mid-run index drift.
+///
+/// When the live index still matches the analyzed snapshot, plain `git
+/// commit` runs (hooks included). When something was staged while the message
+/// was generated, the snapshot tree is committed directly instead: the index
+/// and worktree are left untouched, so the mid-run staging stays staged for a
+/// later commit.
+#[tracing::instrument(target = "lgit", name = "git.commit_staged", skip_all, fields(dir = %args.dir))]
+fn commit_staged(
+   message: &str,
+   snapshot_tree: Option<&str>,
+   args: &Args,
+   config: &CommitConfig,
+) -> Result<()> {
+   let sign = args.sign || config.gpg_sign;
+   let signoff = args.signoff || config.signoff;
+
+   if !args.dry_run
+      && let Some(expected_tree) = snapshot_tree
+      && write_real_index_tree(&args.dir)? != expected_tree
+   {
+      status!(
+         "{} {}",
+         style::info("›"),
+         style::dim("Index changed during generation; committing the analyzed snapshot (hooks skipped)")
+      );
+      match commit_snapshot_tree(message, expected_tree, &args.dir, sign, signoff, args.amend)? {
+         Some(hash) => {
+            status!(
+               "{} {}",
+               style::success(style::icons::SUCCESS),
+               style::success(&format!("Successfully committed snapshot as {hash:.8}"))
+            );
+         },
+         None => {
+            status!(
+               "{} {}",
+               style::info("›"),
+               style::dim("Snapshot already committed; nothing to do")
+            );
+         },
+      }
+      return Ok(());
+   }
+
+   git_commit(message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks, args.amend)
+}
+
 /// Fast mode: single API call to generate a complete commit message.
 #[tracing::instrument(target = "lgit", name = "fast.run_fast_mode", skip_all, fields(mode = ?args.mode, dir = %args.dir))]
 async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
@@ -1001,23 +1049,9 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
          ));
       }
 
-      if let Some(expected_tree) = &staged_index_tree {
-         ensure_index_unchanged(expected_tree, &args.dir)?;
-      }
-
       status!("\n{}", style::info("Preparing to commit..."));
-      let sign = args.sign || config.gpg_sign;
-      let signoff = args.signoff || config.signoff;
       let phase_start = Instant::now();
-      git_commit(
-         &formatted_message,
-         args.dry_run,
-         &args.dir,
-         sign,
-         signoff,
-         args.skip_hooks,
-         args.amend,
-      )?;
+      commit_staged(&formatted_message, staged_index_tree.as_deref(), args, config)?;
       record_timing(&mut timings, "git_commit", phase_start.elapsed());
 
       // Auto-push if requested (only if not dry-run)
@@ -1271,23 +1305,9 @@ async fn run_cli(args: Args) -> miette::Result<()> {
          );
       }
 
-      if let Some(expected_tree) = &staged_index_tree {
-         ensure_index_unchanged(expected_tree, &args.dir)?;
-      }
-
       status!("\n{}", style::info("Preparing to commit..."));
-      let sign = args.sign || config.gpg_sign;
-      let signoff = args.signoff || config.signoff;
       let phase_start = Instant::now();
-      git_commit(
-         &formatted_message,
-         args.dry_run,
-         &args.dir,
-         sign,
-         signoff,
-         args.skip_hooks,
-         args.amend,
-      )?;
+      commit_staged(&formatted_message, staged_index_tree.as_deref(), &args, &config)?;
       record_timing(&mut timings, "git_commit", phase_start.elapsed());
 
       // Auto-push if requested (only if not dry-run)
@@ -1319,6 +1339,57 @@ mod tests {
       // clap's own consistency checks: catches conflicting attrs, duplicate
       // flags, bad value parsers, etc. across the whole Args definition.
       Args::command().debug_assert();
+   }
+
+   fn run_test_git(dir: &std::path::Path, args: &[&str]) -> String {
+      let output = git_command()
+         .args(args)
+         .current_dir(dir)
+         .output()
+         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+      assert!(
+         output.status.success(),
+         "git {:?} failed: {}",
+         args,
+         String::from_utf8_lossy(&output.stderr)
+      );
+      String::from_utf8_lossy(&output.stdout).to_string()
+   }
+
+   #[test]
+   fn test_commit_staged_commits_snapshot_on_index_drift() {
+      let dir = tempfile::TempDir::new().unwrap();
+      let path = dir.path();
+      run_test_git(path, &["init"]);
+      run_test_git(path, &["config", "user.name", "Drift Test"]);
+      run_test_git(path, &["config", "user.email", "drift@test.local"]);
+      run_test_git(path, &["config", "commit.gpgsign", "false"]);
+      std::fs::write(path.join("a.txt"), "one\n").unwrap();
+      run_test_git(path, &["add", "a.txt"]);
+      run_test_git(path, &["commit", "-m", "base"]);
+
+      // Analyzed snapshot: a.txt modified and staged.
+      std::fs::write(path.join("a.txt"), "two\n").unwrap();
+      run_test_git(path, &["add", "a.txt"]);
+      let snapshot_tree = write_real_index_tree(path.to_str().unwrap()).unwrap();
+
+      // Mid-run drift: more staging while the message was generated.
+      std::fs::write(path.join("b.txt"), "drift\n").unwrap();
+      run_test_git(path, &["add", "b.txt"]);
+
+      let args = Args { dir: path.to_str().unwrap().to_string(), ..Default::default() };
+      let config = CommitConfig::default();
+      commit_staged("feat: snapshot commit", Some(&snapshot_tree), &args, &config).unwrap();
+
+      assert_eq!(run_test_git(path, &["rev-parse", "HEAD^{tree}"]).trim(), snapshot_tree);
+      assert!(run_test_git(path, &["log", "-1", "--format=%s"]).contains("feat: snapshot commit"));
+      assert_eq!(
+         run_test_git(path, &["diff", "--cached", "--name-only"]).trim(),
+         "b.txt",
+         "drifted staging stays staged for the next commit"
+      );
+      assert_eq!(std::fs::read_to_string(path.join("a.txt")).unwrap(), "two\n");
+      assert_eq!(std::fs::read_to_string(path.join("b.txt")).unwrap(), "drift\n");
    }
 
    #[test]

@@ -24,7 +24,7 @@ use crate::{
    git::{
       TempGitIndex, append_signoff_trailer, commit_tree, current_head_ref, get_compose_diff,
       get_compose_stat, get_git_dir, get_head_hash, read_tree_into_index, reset_mixed_to,
-      update_ref_checked, write_index_tree, write_real_index_tree,
+      reset_paths_to, update_ref_checked, write_index_tree, write_real_index_tree,
    },
    map_reduce::{FileObservation, observe_diff_files, run_map_reduce, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
@@ -2902,7 +2902,7 @@ fn execute_compose_with_prepared_messages(
 
       let tree = write_index_tree(index.path(), dir)?;
       let sign = args.sign || config.gpg_sign;
-      let hash = commit_tree(&tree, &parent_hash, &formatted_message, dir, sign)?;
+      let hash = commit_tree(&tree, &[parent_hash.as_str()], &formatted_message, dir, sign)?;
       parent_hash.clone_from(&hash);
       commit_hashes.push(hash);
 
@@ -2917,15 +2917,22 @@ fn execute_compose_with_prepared_messages(
       return Ok(commit_hashes);
    }
 
-   let current_index_tree = write_real_index_tree(dir)?;
-   if current_index_tree != base_state.index_tree {
-      return Err(CommitGenError::Other(
-         "Real git index changed during compose; aborting before updating HEAD".to_string(),
-      ));
-   }
-
    update_ref_checked(&base_state.head_ref, &parent_hash, &base_state.head_hash, dir)?;
-   reset_mixed_to(&parent_hash, dir)?;
+
+   let current_index_tree = write_real_index_tree(dir)?;
+   if current_index_tree == base_state.index_tree {
+      reset_mixed_to(&parent_hash, dir)?;
+   } else {
+      // Someone staged while compose ran. The commits contain only pinned
+      // snapshot content, so just refresh the index entries for the paths
+      // compose committed and leave the drifted staging intact.
+      println!(
+         "{}",
+         style::warning("Index changed during compose; preserving newly staged changes")
+      );
+      let paths: Vec<String> = snapshot.files.iter().map(|file| file.path.clone()).collect();
+      reset_paths_to(&parent_hash, &paths, dir)?;
+   }
 
    Ok(commit_hashes)
 }

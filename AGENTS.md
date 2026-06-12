@@ -148,10 +148,10 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
   - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
 - `splice_hunks_into_base()` - Reconstruct file content from base blob + selected hunks without `git apply`
 
-**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the real branch/index update at the end is guarded by an index-tree comparison against the base state.
+**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). If the real index drifted mid-run, only the snapshot paths are refreshed (`reset_paths_to`) so mid-run staging stays staged; otherwise a full `reset --mixed` runs.
 
 **Snapshot isolation elsewhere:**
-- Standard/fast staged mode captures the index tree after auto-stage/changelog and aborts the commit (`ensure_index_unchanged`, `CommitGenError::IndexChangedDuringRun`) if the index changed while the message was generated.
+- Standard/fast staged mode captures the index tree after auto-stage/changelog (`commit_staged` in `src/main.rs`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit_snapshot_tree`: `commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
 - Changelog maintenance (`src/changelog.rs`) generates entries against the *staged* copy of CHANGELOG.md and stages the result as an exact blob (`stage_changelog_blob`), so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately.
 
 ## Prompt Engineering

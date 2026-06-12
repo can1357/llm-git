@@ -746,18 +746,90 @@ pub fn write_real_index_tree(dir: &str) -> Result<String> {
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Error when the real index no longer writes to `expected_tree`.
+/// Commit `tree` directly, bypassing the live index.
 ///
-/// Guards staged-mode commits: the message was generated for a snapshot of
-/// the index, so anything staged since must abort the commit instead of being
-/// silently swept into it.
-#[tracing::instrument(target = "lgit", name = "git.ensure_index_unchanged", skip_all, fields(dir))]
-pub fn ensure_index_unchanged(expected_tree: &str, dir: &str) -> Result<()> {
-   let current = write_real_index_tree(dir)?;
-   if current != expected_tree {
-      return Err(CommitGenError::IndexChangedDuringRun);
+/// Used when the index drifted while a message was being generated: the
+/// analyzed snapshot is committed as-is, the branch (or detached HEAD)
+/// advances, and the index and worktree are left untouched — anything staged
+/// mid-run stays staged for a later commit. Commit hooks do not run.
+///
+/// Returns `Ok(None)` when `tree` is already HEAD's tree (the same content
+/// was committed mid-run), `Ok(Some(hash))` otherwise.
+#[tracing::instrument(
+   target = "lgit",
+   name = "git.commit_snapshot_tree",
+   skip_all,
+   fields(dir, tree, sign, signoff, amend)
+)]
+pub fn commit_snapshot_tree(
+   message: &str,
+   tree: &str,
+   dir: &str,
+   sign: bool,
+   signoff: bool,
+   amend: bool,
+) -> Result<Option<String>> {
+   let message = if signoff {
+      append_signoff_trailer(message, dir)?
+   } else {
+      message.to_string()
+   };
+
+   // Unborn branch (no commits yet) has no head and no parents.
+   let head = get_head_hash(dir).ok();
+   let head_ref = current_head_ref(dir)?;
+
+   let mut parents: Vec<String> = Vec::new();
+   if let Some(head) = &head {
+      if amend {
+         parents = rev_parse_parents(head, dir)?;
+      } else {
+         if rev_parse_tree_of(head, dir)? == tree {
+            return Ok(None);
+         }
+         parents.push(head.clone());
+      }
    }
-   Ok(())
+
+   let parent_refs: Vec<&str> = parents.iter().map(String::as_str).collect();
+   let hash = commit_tree(tree, &parent_refs, &message, dir, sign)?;
+   update_ref_checked(&head_ref, &hash, head.as_deref().unwrap_or(""), dir)?;
+   Ok(Some(hash))
+}
+
+/// Tree oid of a commit-ish.
+fn rev_parse_tree_of(commitish: &str, dir: &str) -> Result<String> {
+   let output = git_command()
+      .args(["rev-parse", &format!("{commitish}^{{tree}}")])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to resolve tree of {commitish}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git rev-parse {commitish}^{{tree}} failed: {stderr}")));
+   }
+
+   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Parent hashes of a commit-ish (empty for a root commit).
+fn rev_parse_parents(commitish: &str, dir: &str) -> Result<Vec<String>> {
+   let output = git_command()
+      .args(["rev-parse", &format!("{commitish}^@")])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to resolve parents of {commitish}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git rev-parse {commitish}^@ failed: {stderr}")));
+   }
+
+   Ok(String::from_utf8_lossy(&output.stdout)
+      .lines()
+      .map(str::to_string)
+      .collect())
 }
 
 #[tracing::instrument(target = "lgit", name = "git.read_tree_into_index", skip_all, fields(dir, treeish, index = %index_file.display()))]
@@ -799,11 +871,11 @@ pub fn write_index_tree(index_file: &Path, dir: &str) -> Result<String> {
    target = "lgit",
    name = "git.commit_tree",
    skip_all,
-   fields(dir, parent, tree, sign)
+   fields(dir, parents = parents.len(), tree, sign)
 )]
 pub fn commit_tree(
    tree: &str,
-   parent: &str,
+   parents: &[&str],
    message: &str,
    dir: &str,
    sign: bool,
@@ -813,7 +885,11 @@ pub fn commit_tree(
    if sign {
       cmd.arg("-S");
    }
-   cmd.arg(tree).arg("-p").arg(parent).arg("-F").arg("-");
+   cmd.arg(tree);
+   for parent in parents {
+      cmd.arg("-p").arg(parent);
+   }
+   cmd.arg("-F").arg("-");
 
    let mut child = cmd
       .current_dir(dir)
@@ -881,6 +957,33 @@ pub fn reset_mixed_to(treeish: &str, dir: &str) -> Result<()> {
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
       return Err(CommitGenError::git(format!("git reset --mixed failed: {stderr}")));
+   }
+
+   Ok(())
+}
+
+/// Reset the index entries for `paths` to their state in `treeish`, leaving
+/// every other index entry and the worktree untouched.
+///
+/// Used after compose when the real index drifted mid-run: the committed
+/// snapshot paths are refreshed while anything staged during the run stays
+/// staged.
+#[tracing::instrument(target = "lgit", name = "git.reset_paths", skip_all, fields(dir, treeish, path_count = paths.len()))]
+pub fn reset_paths_to(treeish: &str, paths: &[String], dir: &str) -> Result<()> {
+   if paths.is_empty() {
+      return Ok(());
+   }
+
+   let output = git_command()
+      .args(["reset", "-q", treeish, "--"])
+      .args(paths)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to reset paths to {treeish}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git reset {treeish} -- <paths> failed: {stderr}")));
    }
 
    Ok(())
@@ -1372,38 +1475,64 @@ mod tests {
       ]);
    }
 
+   fn run_test_git(dir: &tempfile::TempDir, args: &[&str]) -> String {
+      let output = git_command()
+         .args(args)
+         .current_dir(dir.path())
+         .output()
+         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+      assert!(
+         output.status.success(),
+         "git {:?} failed: {}",
+         args,
+         String::from_utf8_lossy(&output.stderr)
+      );
+      String::from_utf8_lossy(&output.stdout).to_string()
+   }
+
    #[test]
-   fn test_ensure_index_unchanged_detects_index_drift() {
+   fn test_commit_snapshot_tree_commits_snapshot_and_keeps_drifted_staging() {
       let dir = tempfile::TempDir::new().unwrap();
       let dir_str = dir.path().to_str().unwrap();
-      let run = |args: &[&str]| {
-         let output = git_command()
-            .args(args)
-            .current_dir(dir.path())
-            .output()
-            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
-         assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-         );
-      };
-      run(&["init"]);
-      run(&["config", "user.name", "Guard Test"]);
-      run(&["config", "user.email", "guard@test.local"]);
+      run_test_git(&dir, &["init"]);
+      run_test_git(&dir, &["config", "user.name", "Guard Test"]);
+      run_test_git(&dir, &["config", "user.email", "guard@test.local"]);
+      run_test_git(&dir, &["config", "commit.gpgsign", "false"]);
       std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
-      run(&["add", "a.txt"]);
+      run_test_git(&dir, &["add", "a.txt"]);
+      run_test_git(&dir, &["commit", "-m", "base"]);
 
-      let tree = write_real_index_tree(dir_str).unwrap();
-      ensure_index_unchanged(&tree, dir_str).unwrap();
+      // The analyzed snapshot: a.txt modified and staged.
+      std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+      run_test_git(&dir, &["add", "a.txt"]);
+      let snapshot_tree = write_real_index_tree(dir_str).unwrap();
 
-      std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
-      run(&["add", "b.txt"]);
-      assert!(matches!(
-         ensure_index_unchanged(&tree, dir_str),
-         Err(CommitGenError::IndexChangedDuringRun)
-      ));
+      // Mid-run drift: another file gets staged.
+      std::fs::write(dir.path().join("b.txt"), "drift\n").unwrap();
+      run_test_git(&dir, &["add", "b.txt"]);
+
+      let hash = commit_snapshot_tree("feat: snapshot", &snapshot_tree, dir_str, false, false, false)
+         .unwrap()
+         .expect("snapshot differs from HEAD");
+
+      // HEAD advanced to exactly the snapshot tree.
+      assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD"]).trim(), hash);
+      assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD^{tree}"]).trim(), snapshot_tree);
+      assert_eq!(run_test_git(&dir, &["show", "HEAD:a.txt"]), "two\n");
+      assert!(
+         !run_test_git(&dir, &["ls-tree", "--name-only", "HEAD"]).contains("b.txt"),
+         "drifted staging must not enter the commit"
+      );
+
+      // The drifted staging survives, staged for the next commit.
+      assert_eq!(run_test_git(&dir, &["diff", "--cached", "--name-only"]).trim(), "b.txt");
+      assert_eq!(std::fs::read_to_string(dir.path().join("b.txt")).unwrap(), "drift\n");
+
+      // Re-committing the same snapshot is a no-op.
+      let again =
+         commit_snapshot_tree("feat: again", &snapshot_tree, dir_str, false, false, false).unwrap();
+      assert_eq!(again, None);
+      assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD"]).trim(), hash);
    }
 
    #[test]
