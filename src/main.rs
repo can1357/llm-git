@@ -18,8 +18,9 @@ use diff::{
 };
 use error::{CommitGenError, Result};
 use git::{
-   ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat, get_git_stat,
-   get_recent_commits, git_command, git_commit, git_push, init_git_command_settings,
+   ensure_git_repo, ensure_index_unchanged, get_common_scopes, get_git_diff, get_git_numstat,
+   get_git_stat, get_recent_commits, git_command, git_commit, git_push,
+   init_git_command_settings, write_real_index_tree,
 };
 use llm_git::{style, tokens::create_token_counter, *};
 use normalization::{format_commit_message, post_process_commit_message};
@@ -842,6 +843,14 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    let total_start = Instant::now();
    let mut timings = timings_enabled(args).then(Vec::new);
 
+   // Snapshot of the index this run will analyze and commit; compared again
+   // right before committing so mid-run staging aborts instead of leaking in.
+   let staged_index_tree = if matches!(args.mode, Mode::Staged) && !args.dry_run {
+      Some(write_real_index_tree(&args.dir)?)
+   } else {
+      None
+   };
+
    // Skip changelog entirely in fast mode
 
    let phase_start = Instant::now();
@@ -992,6 +1001,10 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
          ));
       }
 
+      if let Some(expected_tree) = &staged_index_tree {
+         ensure_index_unchanged(expected_tree, &args.dir)?;
+      }
+
       status!("\n{}", style::info("Preparing to commit..."));
       let sign = args.sign || config.gpg_sign;
       let signoff = args.signoff || config.signoff;
@@ -1100,6 +1113,16 @@ async fn run_cli(args: Args) -> miette::Result<()> {
       record_timing(&mut timings, "auto_stage_if_needed", phase_start.elapsed());
    }
 
+   // Snapshot of the index the generated message will describe. Captured
+   // after auto-staging (and refreshed after changelog maintenance, which
+   // legitimately stages entries), then compared right before committing so
+   // anything staged mid-run aborts instead of leaking into the commit.
+   let mut staged_index_tree = if matches!(args.mode, Mode::Staged) && !args.dry_run {
+      Some(write_real_index_tree(&args.dir)?)
+   } else {
+      None
+   };
+
    // Whitespace-only changesets become a `style: reformatted …` commit with no
    // model call. Checked before fast-mode routing so small reformats are not
    // auto-switched into the LLM fast path.
@@ -1146,6 +1169,10 @@ async fn run_cli(args: Args) -> miette::Result<()> {
             eprintln!("Warning: Changelog update failed: {e}");
          }
          record_timing(&mut timings, "run_changelog_flow", phase_start.elapsed());
+      }
+
+      if staged_index_tree.is_some() {
+         staged_index_tree = Some(write_real_index_tree(&args.dir)?);
       }
 
       status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
@@ -1242,6 +1269,10 @@ async fn run_cli(args: Args) -> miette::Result<()> {
          return Err(
             CommitGenError::ValidationError("Commit message validation failed".to_string()).into(),
          );
+      }
+
+      if let Some(expected_tree) = &staged_index_tree {
+         ensure_index_unchanged(expected_tree, &args.dir)?;
       }
 
       status!("\n{}", style::info("Preparing to commit..."));

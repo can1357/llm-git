@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-   compose_types::{ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot},
+   compose_types::{ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot, WorktreePin},
    error::{CommitGenError, Result},
    git::{git_command, git_command_with_index},
 };
@@ -467,6 +467,179 @@ fn force_stage_file_from_base_with_index(
    Ok(())
 }
 
+/// Pin each snapshot file's worktree state into the object database.
+///
+/// Records `(mode, oid)` per path as of this moment, so whole-file staging
+/// later reproduces exactly this content regardless of subsequent worktree
+/// edits. Paths absent from the worktree are pinned as deletions.
+#[tracing::instrument(target = "lgit", name = "patch.pin_worktree_state", skip_all, fields(dir, file_count = snapshot.files.len()))]
+pub fn pin_snapshot_worktree_state(snapshot: &mut ComposeSnapshot, dir: &str) -> Result<()> {
+   let mut regular_paths: Vec<String> = Vec::new();
+
+   for file in &snapshot.files {
+      let full_path = Path::new(dir).join(&file.path);
+      let metadata = match std::fs::symlink_metadata(&full_path) {
+         Ok(metadata) => metadata,
+         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            snapshot.pins.insert(file.path.clone(), WorktreePin::Deleted);
+            continue;
+         },
+         Err(err) => {
+            return Err(CommitGenError::git(format!(
+               "Failed to inspect worktree path {}: {err}",
+               file.path
+            )));
+         },
+      };
+
+      let file_type = metadata.file_type();
+      if file_type.is_symlink() {
+         let target = std::fs::read_link(&full_path).map_err(|err| {
+            CommitGenError::git(format!("Failed to read symlink {}: {err}", file.path))
+         })?;
+         let oid = hash_blob_bytes(target.as_os_str().as_encoded_bytes(), &file.path, dir)?;
+         snapshot
+            .pins
+            .insert(file.path.clone(), WorktreePin::Object { mode: "120000".to_string(), oid });
+      } else if file_type.is_dir() {
+         // Submodule worktree: pin the gitlink at its current HEAD. A
+         // directory without a resolvable HEAD keeps the legacy `git add`
+         // staging path.
+         if let Some(oid) = submodule_head(&full_path) {
+            snapshot
+               .pins
+               .insert(file.path.clone(), WorktreePin::Object { mode: "160000".to_string(), oid });
+         }
+      } else if !file.path.contains('\n') {
+         regular_paths.push(file.path.clone());
+      }
+      // Paths containing a newline cannot go through `--stdin-paths` and keep
+      // the legacy staging path.
+   }
+
+   let oids = hash_worktree_paths(&regular_paths, dir)?;
+   for (path, oid) in regular_paths.iter().zip(oids) {
+      let mode = worktree_file_mode(&Path::new(dir).join(path));
+      snapshot.pins.insert(path.clone(), WorktreePin::Object { mode, oid });
+   }
+
+   Ok(())
+}
+
+/// Hash worktree files into the odb in one `git hash-object --stdin-paths`
+/// call, applying the same content filters `git add` would.
+fn hash_worktree_paths(paths: &[String], dir: &str) -> Result<Vec<String>> {
+   if paths.is_empty() {
+      return Ok(Vec::new());
+   }
+
+   let mut child = git_command()
+      .args(["hash-object", "-w", "--stdin-paths"])
+      .current_dir(dir)
+      .stdin(std::process::Stdio::piped())
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::piped())
+      .spawn()
+      .map_err(|e| CommitGenError::git(format!("Failed to spawn git hash-object: {e}")))?;
+
+   {
+      let Some(mut stdin) = child.stdin.take() else {
+         return Err(CommitGenError::git("Failed to open git hash-object stdin".to_string()));
+      };
+
+      use std::io::Write;
+
+      for path in paths {
+         stdin
+            .write_all(path.as_bytes())
+            .and_then(|()| stdin.write_all(b"\n"))
+            .map_err(|e| CommitGenError::git(format!("Failed to write path {path}: {e}")))?;
+      }
+   }
+
+   let output = child
+      .wait_with_output()
+      .map_err(|e| CommitGenError::git(format!("Failed to wait for git hash-object: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git hash-object --stdin-paths failed: {stderr}")));
+   }
+
+   let oids: Vec<String> = String::from_utf8_lossy(&output.stdout)
+      .lines()
+      .map(str::to_string)
+      .collect();
+   if oids.len() != paths.len() {
+      return Err(CommitGenError::git(format!(
+         "git hash-object returned {} oids for {} paths",
+         oids.len(),
+         paths.len()
+      )));
+   }
+
+   Ok(oids)
+}
+
+/// Index mode for a worktree file, mirroring `git add`: executable bit maps
+/// to 100755, everything else to 100644.
+fn worktree_file_mode(path: &Path) -> String {
+   #[cfg(unix)]
+   {
+      use std::os::unix::fs::PermissionsExt;
+      if let Ok(metadata) = std::fs::metadata(path)
+         && metadata.permissions().mode() & 0o111 != 0
+      {
+         return "100755".to_string();
+      }
+   }
+   #[cfg(not(unix))]
+   let _ = path;
+   "100644".to_string()
+}
+
+/// Current HEAD of a submodule checkout, if resolvable.
+fn submodule_head(path: &Path) -> Option<String> {
+   let output = git_command()
+      .args(["rev-parse", "HEAD"])
+      .current_dir(path)
+      .output()
+      .ok()?;
+   if !output.status.success() {
+      return None;
+   }
+   let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+   (!oid.is_empty()).then_some(oid)
+}
+
+/// Stage a path's deletion, matching a [`WorktreePin::Deleted`] pin.
+fn remove_index_path(path: &str, dir: &str, index_file: Option<&Path>) -> Result<StageResult> {
+   let listed = git_command_for_index(index_file)
+      .args(["ls-files", "--"])
+      .arg(path)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to inspect index entry {path}: {e}")))?;
+
+   if listed.status.success() && listed.stdout.is_empty() {
+      return Ok(StageResult::AlreadyApplied);
+   }
+
+   let output = git_command_for_index(index_file)
+      .args(["update-index", "--force-remove", "--"])
+      .arg(path)
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to remove index entry {path}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git update-index failed for {path}: {stderr}")));
+   }
+
+   Ok(StageResult::Staged)
+}
+
 /// Stage specific files.
 #[tracing::instrument(target = "lgit", name = "patch.stage_files", skip_all, fields(dir, file_count = files.len()))]
 pub fn stage_files(files: &[String], dir: &str) -> Result<()> {
@@ -900,6 +1073,7 @@ pub fn build_compose_snapshot(diff: &str, stat: &str) -> Result<ComposeSnapshot>
       stat:  stat.to_string(),
       files: snapshot_files,
       hunks: snapshot_hunks,
+      pins:  BTreeMap::new(),
    })
 }
 
@@ -1225,9 +1399,26 @@ fn stage_executable_group_with_index(
       }
    }
 
-   if !group_patch.fallback_files.is_empty() {
-      stage_files_with_index(&group_patch.fallback_files, dir, index_file)?;
-      result = result.combine(StageResult::Staged);
+   for path in &group_patch.fallback_files {
+      match snapshot.pins.get(path) {
+         Some(WorktreePin::Object { mode, oid }) => {
+            let blob = IndexBlob {
+               path:   path.clone(),
+               mode:   mode.clone(),
+               object: IndexObject::ExistingObject(oid.clone()),
+            };
+            result = result.combine(stage_index_blob(&blob, dir, index_file)?);
+         },
+         Some(WorktreePin::Deleted) => {
+            result = result.combine(remove_index_path(path, dir, index_file)?);
+         },
+         // Unpinned snapshot (tests, legacy callers): stage from the live
+         // worktree as before.
+         None => {
+            stage_files_with_index(std::slice::from_ref(path), dir, index_file)?;
+            result = result.combine(StageResult::Staged);
+         },
+      }
    }
 
    for blob in &group_patch.index_blobs {
@@ -1508,6 +1699,118 @@ index 3333333..4444444 100644
       let staged = staged_diff(&dir);
       assert!(staged.contains("beta changed"));
       assert!(!staged.contains("alpha changed"));
+   }
+
+   fn show_index_blob(dir: &TempDir, index: &TempGitIndex, path: &str) -> String {
+      let output = crate::git::git_command_with_index(index.path())
+         .args(["show", &format!(":{path}")])
+         .current_dir(dir.path())
+         .output()
+         .unwrap();
+      assert!(
+         output.status.success(),
+         "git show :{path} failed: {}",
+         String::from_utf8_lossy(&output.stderr)
+      );
+      String::from_utf8_lossy(&output.stdout).to_string()
+   }
+
+   #[test]
+   fn test_pinned_staging_ignores_worktree_edits_after_snapshot() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      write_file(&dir, "src/lib.rs", &fixture_file_stage_only());
+
+      let dir_str = dir.path().to_str().unwrap();
+      let diff = get_compose_diff(dir_str).unwrap();
+      let stat = get_compose_stat(dir_str).unwrap();
+      let mut snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      pin_snapshot_worktree_state(&mut snapshot, dir_str).unwrap();
+
+      // The user keeps editing while compose generates messages.
+      write_file(&dir, "src/lib.rs", &fixture_file_stage_and_unstaged());
+
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "whole file".to_string(),
+         dependencies: vec![],
+         hunk_ids:     source_file.hunk_ids.clone(),
+      };
+
+      let index = TempGitIndex::new(dir_str).unwrap();
+      read_tree_into_index(index.path(), "HEAD", dir_str).unwrap();
+      let outcome =
+         stage_executable_group_in_index(&snapshot, &group, dir_str, index.path()).unwrap();
+      assert_eq!(outcome.result, StageResult::Staged);
+      assert!(outcome.skipped.is_empty());
+
+      let staged = show_index_blob(&dir, &index, "src/lib.rs");
+      assert_eq!(
+         staged,
+         fixture_file_stage_only(),
+         "staged content must match the pinned snapshot, not the live worktree"
+      );
+
+      let on_disk = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+      assert_eq!(
+         on_disk,
+         fixture_file_stage_and_unstaged(),
+         "later edits stay untouched in the worktree"
+      );
+   }
+
+   #[test]
+   fn test_pinned_staging_stages_deletion_even_if_file_recreated() {
+      let dir = init_repo();
+      write_file(&dir, "src/lib.rs", &fixture_file_original());
+      commit_all(&dir, "initial");
+      fs::remove_file(dir.path().join("src/lib.rs")).unwrap();
+
+      let dir_str = dir.path().to_str().unwrap();
+      let diff = get_compose_diff(dir_str).unwrap();
+      let stat = get_compose_stat(dir_str).unwrap();
+      let mut snapshot = build_compose_snapshot(&diff, &stat).unwrap();
+      pin_snapshot_worktree_state(&mut snapshot, dir_str).unwrap();
+      assert_eq!(
+         snapshot.pins.get("src/lib.rs"),
+         Some(&crate::compose_types::WorktreePin::Deleted)
+      );
+
+      // The file reappears while compose runs.
+      write_file(&dir, "src/lib.rs", "fn revived() {}\n");
+
+      let source_file = snapshot.file_by_path("src/lib.rs").unwrap();
+      let group = ComposeExecutableGroup {
+         group_id:     "G1".to_string(),
+         commit_type:  CommitType::new("refactor").unwrap(),
+         scope:        None,
+         file_ids:     vec![source_file.file_id.clone()],
+         rationale:    "delete file".to_string(),
+         dependencies: vec![],
+         hunk_ids:     source_file.hunk_ids.clone(),
+      };
+
+      let index = TempGitIndex::new(dir_str).unwrap();
+      read_tree_into_index(index.path(), "HEAD", dir_str).unwrap();
+      let outcome =
+         stage_executable_group_in_index(&snapshot, &group, dir_str, index.path()).unwrap();
+      assert_eq!(outcome.result, StageResult::Staged);
+
+      let listed = crate::git::git_command_with_index(index.path())
+         .args(["ls-files", "--", "src/lib.rs"])
+         .current_dir(dir.path())
+         .output()
+         .unwrap();
+      assert!(listed.stdout.is_empty(), "deletion must be staged from the pin");
+      assert!(
+         dir.path().join("src/lib.rs").exists(),
+         "recreated file stays untouched in the worktree"
+      );
    }
 
    #[test]

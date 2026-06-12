@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::types::{CommitType, Scope};
@@ -32,12 +34,29 @@ pub struct ComposeFile {
    pub synthetic_only: bool,
 }
 
+/// A file's worktree state as captured when the compose snapshot was taken.
+///
+/// Staging from a pin reproduces the exact bytes that were on disk at capture
+/// time, so edits made while compose runs never leak into its commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreePin {
+   /// Object written to the object database at capture time (file blob,
+   /// symlink target, or submodule commit), with its index mode.
+   Object { mode: String, oid: String },
+   /// The path was absent from the worktree at capture time.
+   Deleted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeSnapshot {
    pub diff:  String,
    pub stat:  String,
    pub files: Vec<ComposeFile>,
    pub hunks: Vec<ComposeHunk>,
+   /// Worktree content pinned per path at capture time. Empty for snapshots
+   /// built outside the compose flow (tests, cached artifacts).
+   #[serde(default)]
+   pub pins:  BTreeMap<String, WorktreePin>,
 }
 
 impl ComposeSnapshot {

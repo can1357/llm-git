@@ -82,7 +82,7 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
 
    println!("{}", crate::style::info(&format!("Updating {} changelog(s)...", boundaries.len())));
 
-   let mut modified_changelogs = Vec::new();
+   let mut untracked_changelogs = Vec::new();
 
    for boundary in boundaries {
       // Get diff and stat for this boundary's files
@@ -99,16 +99,30 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
       } else {
          diff
       };
+      // The staged (index) copy is what the commit will contain. Generating
+      // and staging against it keeps unrelated unstaged edits to the
+      // changelog out of the commit.
+      let rel_path = boundary
+         .changelog_path
+         .strip_prefix(&args.dir)
+         .unwrap_or(&boundary.changelog_path)
+         .to_string_lossy()
+         .to_string();
+      let staged_content = staged_changelog_content(&rel_path, &args.dir)?;
 
-      // Parse existing [Unreleased] section for context
-      let changelog_content = std::fs::read_to_string(&boundary.changelog_path).map_err(|e| {
+      let worktree_content = std::fs::read_to_string(&boundary.changelog_path).map_err(|e| {
          CommitGenError::ChangelogParseError {
             path:   boundary.changelog_path.display().to_string(),
             reason: e.to_string(),
          }
       })?;
 
-      let unreleased = match parse_unreleased_section(&changelog_content, &boundary.changelog_path)
+      let (changelog_content, is_tracked) = match &staged_content {
+         Some(content) => (content.as_str(), true),
+         None => (worktree_content.as_str(), false),
+      };
+
+      let unreleased = match parse_unreleased_section(changelog_content, &boundary.changelog_path)
       {
          Ok(u) => u,
          Err(CommitGenError::NoUnreleasedSection { path }) => {
@@ -120,6 +134,25 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
             continue;
          },
          Err(e) => return Err(e),
+      };
+
+      // A tracked changelog whose worktree copy diverged gets the entries
+      // inserted into both copies independently.
+      let worktree_unreleased = if is_tracked && worktree_content != changelog_content {
+         match parse_unreleased_section(&worktree_content, &boundary.changelog_path) {
+            Ok(u) => Some(u),
+            Err(CommitGenError::NoUnreleasedSection { path }) => {
+               eprintln!(
+                  "{} No [Unreleased] section in worktree copy of {}, skipping changelog update",
+                  crate::style::icons::WARNING,
+                  path
+               );
+               continue;
+            },
+            Err(e) => return Err(e),
+         }
+      } else {
+         None
       };
 
       // Check if this is a package-scoped changelog (not root)
@@ -168,17 +201,29 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
          }
       }
 
-      // Write entries to changelog
-      let updated = write_entries(&changelog_content, &unreleased, &new_entries);
-      std::fs::write(&boundary.changelog_path, updated).map_err(|e| {
+      // Write entries to both copies: the staged copy is pinned directly into
+      // the index, the worktree copy keeps the user's unrelated edits.
+      let updated_staged = write_entries(changelog_content, &unreleased, &new_entries);
+      let updated_worktree = match &worktree_unreleased {
+         Some(worktree_section) => {
+            write_entries(&worktree_content, worktree_section, &new_entries)
+         },
+         None => updated_staged.clone(),
+      };
+      std::fs::write(&boundary.changelog_path, updated_worktree).map_err(|e| {
          CommitGenError::ChangelogParseError {
             path:   boundary.changelog_path.display().to_string(),
             reason: format!("Failed to write: {e}"),
          }
       })?;
 
+      if is_tracked {
+         stage_changelog_blob(&rel_path, &updated_staged, &args.dir)?;
+      } else {
+         untracked_changelogs.push(boundary.changelog_path.display().to_string());
+      }
+
       let entry_count: usize = new_entries.values().map(|v| v.len()).sum();
-      modified_changelogs.push(boundary.changelog_path.display().to_string());
       println!(
          "{}  Added {} entries to {}",
          crate::style::icons::SUCCESS,
@@ -187,9 +232,10 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
       );
    }
 
-   // Stage modified changelogs
-   if !modified_changelogs.is_empty() {
-      stage_files(&modified_changelogs, &args.dir)?;
+   // Newly created changelogs are staged whole; tracked ones were staged as
+   // pinned blobs above so unrelated unstaged edits stay unstaged.
+   if !untracked_changelogs.is_empty() {
+      stage_files(&untracked_changelogs, &args.dir)?;
    }
 
    Ok(())
@@ -353,6 +399,98 @@ fn get_staged_files(dir: &str) -> Result<Vec<String>> {
       .collect();
 
    Ok(files)
+}
+
+/// Content of a changelog as currently staged in the index, or `None` when
+/// the path is not tracked in the index.
+fn staged_changelog_content(rel_path: &str, dir: &str) -> Result<Option<String>> {
+   let output = git_command()
+      .args(["show", &format!(":{rel_path}")])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to read staged {rel_path}: {e}")))?;
+
+   if !output.status.success() {
+      return Ok(None);
+   }
+
+   Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+}
+
+/// Index mode of a tracked changelog, defaulting to a regular file.
+fn staged_changelog_mode(rel_path: &str, dir: &str) -> String {
+   git_command()
+      .args(["ls-files", "-s", "--", rel_path])
+      .current_dir(dir)
+      .output()
+      .ok()
+      .filter(|output| output.status.success())
+      .and_then(|output| {
+         String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_string)
+      })
+      .unwrap_or_else(|| "100644".to_string())
+}
+
+/// Stage exact changelog content as an index blob, without touching the
+/// worktree.
+///
+/// `git add` would also sweep unrelated unstaged changelog edits into the
+/// index; this stages only the generated entries.
+fn stage_changelog_blob(rel_path: &str, content: &str, dir: &str) -> Result<()> {
+   let mut child = git_command()
+      .args(["hash-object", "-w", "--path", rel_path, "--stdin"])
+      .current_dir(dir)
+      .stdin(std::process::Stdio::piped())
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::piped())
+      .spawn()
+      .map_err(|e| CommitGenError::git(format!("Failed to spawn git hash-object: {e}")))?;
+
+   {
+      let Some(mut stdin) = child.stdin.take() else {
+         return Err(CommitGenError::git("Failed to open git hash-object stdin".to_string()));
+      };
+
+      use std::io::Write;
+
+      stdin
+         .write_all(content.as_bytes())
+         .map_err(|e| CommitGenError::git(format!("Failed to write blob for {rel_path}: {e}")))?;
+   }
+
+   let output = child
+      .wait_with_output()
+      .map_err(|e| CommitGenError::git(format!("Failed to wait for git hash-object: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git hash-object failed for {rel_path}: {stderr}")));
+   }
+
+   let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+   if oid.is_empty() {
+      return Err(CommitGenError::git(format!(
+         "git hash-object returned empty oid for {rel_path}"
+      )));
+   }
+
+   let mode = staged_changelog_mode(rel_path, dir);
+   let cacheinfo = format!("{mode},{oid},{rel_path}");
+   let output = git_command()
+      .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
+      .current_dir(dir)
+      .output()
+      .map_err(|e| CommitGenError::git(format!("Failed to stage {rel_path}: {e}")))?;
+
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git update-index failed for {rel_path}: {stderr}")));
+   }
+
+   Ok(())
 }
 
 /// Find all CHANGELOG.md files in the repo
@@ -608,6 +746,72 @@ fn write_entries(
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   fn run_git(dir: &tempfile::TempDir, args: &[&str]) {
+      let output = git_command()
+         .args(args)
+         .current_dir(dir.path())
+         .output()
+         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+      assert!(
+         output.status.success(),
+         "git {:?} failed: {}",
+         args,
+         String::from_utf8_lossy(&output.stderr)
+      );
+   }
+
+   const BASE_CHANGELOG: &str = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - \
+                                 2020-01-01\n\n### Added\n\n- Old entry.\n";
+
+   #[test]
+   fn test_changelog_staging_keeps_unrelated_unstaged_edits_out() {
+      let dir = tempfile::TempDir::new().unwrap();
+      let dir_str = dir.path().to_str().unwrap();
+      run_git(&dir, &["init"]);
+      run_git(&dir, &["config", "user.name", "Changelog Test"]);
+      run_git(&dir, &["config", "user.email", "changelog@test.local"]);
+      run_git(&dir, &["config", "commit.gpgsign", "false"]);
+      let changelog_path = dir.path().join("CHANGELOG.md");
+      std::fs::write(&changelog_path, BASE_CHANGELOG).unwrap();
+      run_git(&dir, &["add", "."]);
+      run_git(&dir, &["commit", "-m", "base"]);
+
+      // Unrelated unstaged edit the user left in the changelog.
+      let worktree_content = format!("{BASE_CHANGELOG}\nUNRELATED DRAFT NOTES\n");
+      std::fs::write(&changelog_path, &worktree_content).unwrap();
+
+      // Mirror run_changelog_flow's tracked-changelog path with fixed entries.
+      let staged_content = staged_changelog_content("CHANGELOG.md", dir_str)
+         .unwrap()
+         .expect("changelog is tracked");
+      assert_eq!(staged_content, BASE_CHANGELOG);
+
+      let unreleased = parse_unreleased_section(&staged_content, &changelog_path).unwrap();
+      let worktree_unreleased =
+         parse_unreleased_section(&worktree_content, &changelog_path).unwrap();
+
+      let mut new_entries = HashMap::new();
+      new_entries.insert(ChangelogCategory::Added, vec!["New pinned entry.".to_string()]);
+
+      let updated_staged = write_entries(&staged_content, &unreleased, &new_entries);
+      let updated_worktree = write_entries(&worktree_content, &worktree_unreleased, &new_entries);
+      std::fs::write(&changelog_path, &updated_worktree).unwrap();
+      stage_changelog_blob("CHANGELOG.md", &updated_staged, dir_str).unwrap();
+
+      let staged_now = staged_changelog_content("CHANGELOG.md", dir_str)
+         .unwrap()
+         .expect("changelog still tracked");
+      assert!(staged_now.contains("New pinned entry."));
+      assert!(
+         !staged_now.contains("UNRELATED DRAFT NOTES"),
+         "unstaged edits must stay out of the index"
+      );
+
+      let on_disk = std::fs::read_to_string(&changelog_path).unwrap();
+      assert!(on_disk.contains("New pinned entry."));
+      assert!(on_disk.contains("UNRELATED DRAFT NOTES"), "worktree keeps the user's edits");
+   }
 
    #[test]
    fn test_extract_json_from_content_raw() {

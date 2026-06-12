@@ -746,6 +746,20 @@ pub fn write_real_index_tree(dir: &str) -> Result<String> {
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Error when the real index no longer writes to `expected_tree`.
+///
+/// Guards staged-mode commits: the message was generated for a snapshot of
+/// the index, so anything staged since must abort the commit instead of being
+/// silently swept into it.
+#[tracing::instrument(target = "lgit", name = "git.ensure_index_unchanged", skip_all, fields(dir))]
+pub fn ensure_index_unchanged(expected_tree: &str, dir: &str) -> Result<()> {
+   let current = write_real_index_tree(dir)?;
+   if current != expected_tree {
+      return Err(CommitGenError::IndexChangedDuringRun);
+   }
+   Ok(())
+}
+
 #[tracing::instrument(target = "lgit", name = "git.read_tree_into_index", skip_all, fields(dir, treeish, index = %index_file.display()))]
 pub fn read_tree_into_index(index_file: &Path, treeish: &str, dir: &str) -> Result<()> {
    let output = git_command_with_index(index_file)
@@ -1356,6 +1370,40 @@ mod tests {
          "-c".to_string(),
          "core.untrackedCache=false".to_string(),
       ]);
+   }
+
+   #[test]
+   fn test_ensure_index_unchanged_detects_index_drift() {
+      let dir = tempfile::TempDir::new().unwrap();
+      let dir_str = dir.path().to_str().unwrap();
+      let run = |args: &[&str]| {
+         let output = git_command()
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+         assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+         );
+      };
+      run(&["init"]);
+      run(&["config", "user.name", "Guard Test"]);
+      run(&["config", "user.email", "guard@test.local"]);
+      std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+      run(&["add", "a.txt"]);
+
+      let tree = write_real_index_tree(dir_str).unwrap();
+      ensure_index_unchanged(&tree, dir_str).unwrap();
+
+      std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+      run(&["add", "b.txt"]);
+      assert!(matches!(
+         ensure_index_unchanged(&tree, dir_str),
+         Err(CommitGenError::IndexChangedDuringRun)
+      ));
    }
 
    #[test]

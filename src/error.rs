@@ -131,6 +131,16 @@ pub enum CommitGenError {
       help("Add an ## [Unreleased] section to the changelog file")
    )]
    NoUnreleasedSection { path: String },
+
+   #[error("Staged changes were modified while the commit message was being generated")]
+   #[diagnostic(
+      code(lgit::git::index_changed),
+      help(
+         "The index no longer matches the analyzed snapshot. Re-run lgit to commit the current \
+          staged changes."
+      )
+   )]
+   IndexChangedDuringRun,
 }
 
 impl CommitGenError {

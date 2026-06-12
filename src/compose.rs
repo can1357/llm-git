@@ -30,7 +30,8 @@ use crate::{
    normalization::{format_commit_message, post_process_commit_message},
    patch::{
       StageResult, build_compose_snapshot, create_executable_group_patch,
-      force_stage_file_from_base_in_index, stage_executable_group_in_index,
+      force_stage_file_from_base_in_index, pin_snapshot_worktree_state,
+      stage_executable_group_in_index,
    },
    style, templates,
    tokens::{TokenCounter, create_token_counter},
@@ -2994,7 +2995,12 @@ async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> 
    let base_state = capture_compose_base_state(&args.dir)?;
    let diff = get_compose_diff(&args.dir)?;
    let stat = get_compose_stat(&args.dir)?;
-   let snapshot = build_compose_snapshot(&diff, &stat)?;
+   let mut snapshot = build_compose_snapshot(&diff, &stat)?;
+   // Freeze every file's on-disk content into the odb before any LLM call:
+   // staging later reads these pins, never the live worktree, so edits made
+   // while compose runs cannot leak into its commits.
+   pin_snapshot_worktree_state(&mut snapshot, &args.dir)?;
+   let snapshot = snapshot;
 
    if let Some(debug_dir) = args.debug_output.as_deref() {
       save_debug_artifact(

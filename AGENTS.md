@@ -136,18 +136,23 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
 
 ## Hunk-Level Staging (`src/patch.rs`)
 
-**Problem**: When multiple commit groups reference the same file, staging by whole file (`git add <file>`) commits all changes at once, leaving nothing for subsequent groups.
+**Problem**: Staging from the live worktree (`git add <file>`) reads whatever is on disk *at staging time*. Compose spends minutes in LLM calls; any edits the user makes meanwhile would leak into the generated commits.
 
-**Solution**: Extract specific hunks per group, apply with `git apply --cached`.
+**Solution**: Everything staged during compose comes from the immutable snapshot captured at invocation — never from the live worktree.
 
 **Key functions:**
-- `extract_file_diff()` - Isolate single file's diff from full diff
-- `extract_hunks_for_file()` - Filter specific hunks by header matching
-- `normalize_hunk_header()` - Compare hunks by line numbers (e.g., `-10,5 +10,7`)
-- `create_patch_for_changes()` - Assemble multi-file patch from hunk selections
-- `stage_group_changes()` - Route to `git add` (if all `["ALL"]`) or `git apply --cached` (partial)
+- `build_compose_snapshot()` - Parse the captured diff into `ComposeFile`/`ComposeHunk` with stable ids
+- `pin_snapshot_worktree_state()` - Hash every changed file's worktree content into the odb at capture time (`WorktreePin::Object { mode, oid }`, or `Deleted`); handles symlinks, submodule gitlinks, and binaries
+- `stage_executable_group_in_index()` - Stage a group into an isolated temp index:
+  - Partial file: `git apply --cached --3way` with the snapshot-derived patch; on conflict, re-splice from the base blob (`force_stage_file_from_base_in_index`)
+  - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
+- `splice_hunks_into_base()` - Reconstruct file content from base blob + selected hunks without `git apply`
 
-**Important**: Baseline diff must be captured ONCE before any compose commits, so hunk headers remain stable across groups (lines 408-421 in `src/compose.rs`).
+**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the real branch/index update at the end is guarded by an index-tree comparison against the base state.
+
+**Snapshot isolation elsewhere:**
+- Standard/fast staged mode captures the index tree after auto-stage/changelog and aborts the commit (`ensure_index_unchanged`, `CommitGenError::IndexChangedDuringRun`) if the index changed while the message was generated.
+- Changelog maintenance (`src/changelog.rs`) generates entries against the *staged* copy of CHANGELOG.md and stages the result as an exact blob (`stage_changelog_blob`), so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately.
 
 ## Prompt Engineering
 
