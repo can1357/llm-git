@@ -1788,8 +1788,9 @@ async fn analyze_compose_intent(
    let planning_notes = render_planning_notes(&planning_index);
    let split_bias = render_split_bias(&planning_index);
    let schema = build_intent_schema(config);
+   let variant = if config.markdown_output { "markdown" } else { "default" };
    let parts = templates::render_compose_intent_prompt(&templates::ComposeIntentPromptParams {
-      variant: "default",
+      variant,
       max_commits,
       stat: &stat_summary,
       snapshot_summary: &snapshot_summary,
@@ -1802,7 +1803,7 @@ async fn analyze_compose_intent(
       operation:        "compose/intent",
       model:            &config.analysis_model,
       prompt_family:    "compose-intent",
-      prompt_variant:   "default",
+      prompt_variant:   variant,
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "create_compose_intent_plan",
@@ -1973,8 +1974,9 @@ async fn request_binding(
    let schema = build_binding_schema();
    let groups_text = render_binding_groups(groups);
    let ambiguous_files_text = render_binding_ambiguous_files(snapshot, ambiguous_files);
+   let variant = if config.markdown_output { "markdown" } else { "default" };
    let parts = templates::render_compose_bind_prompt(&templates::ComposeBindPromptParams {
-      variant:         "default",
+      variant,
       groups:          &groups_text,
       ambiguous_files: &ambiguous_files_text,
    })?;
@@ -1982,7 +1984,7 @@ async fn request_binding(
       operation:        "compose/bind",
       model:            &config.analysis_model,
       prompt_family:    "compose-bind",
-      prompt_variant:   "default",
+      prompt_variant:   variant,
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "bind_compose_hunks",

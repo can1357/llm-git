@@ -833,7 +833,7 @@ fn parse_plain_text_output<T: DeserializeOwned>(
          "create_changelog_entries" => crate::markdown_output::parse_changelog_response(&trimmed),
          "create_compose_intent_plan" => crate::markdown_output::parse_compose_intent(&trimmed),
          "bind_compose_hunks" => crate::markdown_output::parse_compose_binding(&trimmed),
-         "create_fast_commit" => crate::markdown_output::parse_conventional_analysis(&trimmed),
+         "create_fast_commit" => crate::markdown_output::parse_fast_commit(&trimmed),
          "create_file_observations" => crate::markdown_output::parse_batch_observations(&trimmed),
          _ => return Ok(None),
       }?
@@ -2006,8 +2006,9 @@ pub async fn generate_fast_commit(
    let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
    let types_desc = format_types_description(config);
 
+   let fast_variant = if config.markdown_output { "markdown" } else { "default" };
    let parts = templates::render_fast_prompt(&templates::FastPromptParams {
-      variant: "default",
+      variant: fast_variant,
       stat,
       diff,
       scope_candidates: scope_candidates_str,
@@ -2043,7 +2044,7 @@ pub async fn generate_fast_commit(
       operation:        "fast",
       model:            model_name,
       prompt_family:    "fast",
-      prompt_variant:   "default",
+      prompt_variant:   fast_variant,
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "create_fast_commit",

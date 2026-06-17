@@ -250,8 +250,9 @@ async fn generate_changelog_entries(
    existing_entries: Option<&str>,
    config: &CommitConfig,
 ) -> Result<HashMap<ChangelogCategory, Vec<String>>> {
+   let variant = if config.markdown_output { "markdown" } else { "default" };
    let parts = templates::render_changelog_prompt(
-      "default",
+      variant,
       &changelog_path.display().to_string(),
       is_package_changelog,
       stat,
@@ -335,7 +336,7 @@ async fn call_changelog_api(
       operation:        "changelog",
       model:            &config.analysis_model,
       prompt_family:    "changelog",
-      prompt_variant:   "default",
+      prompt_variant:   if config.markdown_output { "markdown" } else { "default" },
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "create_changelog_entries",

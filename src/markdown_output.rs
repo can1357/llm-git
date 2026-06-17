@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use crate::error::{CommitGenError, Result};
+use crate::{
+   error::{CommitGenError, Result},
+   types::CommitType,
+};
 
 // ===== Leniency helpers =====
 // Models wrap the same content many ways: code fences, quotes, mismatched or
@@ -124,12 +127,17 @@ fn extract_tag_lenient(text: &str, tag: &str) -> Option<String> {
    Some(rest[..end].trim().to_string())
 }
 
-/// Parse markdown conventional analysis format.
-///
-/// Lenient: tolerates code fences, headings with/without `#`, bold emphasis,
-/// the `type(scope): summary` line appearing on any of the first lines, bullet
-/// glyph variations, and `Fixes:`/`Closes:`/`Resolves:` footers.
-pub fn parse_conventional_analysis(text: &str) -> Result<serde_json::Value> {
+/// Shared core: parse `# type(scope): summary` + detail bullets + issue footer.
+/// Returns the raw pieces so callers can shape them for their target struct.
+struct AnalysisParts {
+   commit_type: String,
+   scope:       Option<String>,
+   summary:     String,
+   details:     Vec<String>,
+   issue_refs:  Vec<String>,
+}
+
+fn parse_analysis_parts(text: &str) -> Result<AnalysisParts> {
    let unfenced = strip_fences(text);
    let lines: Vec<&str> = unfenced.lines().collect();
 
@@ -165,7 +173,7 @@ pub fn parse_conventional_analysis(text: &str) -> Result<serde_json::Value> {
 
       if let Some(detail) = bullet_content(trimmed_line) {
          if !detail.is_empty() {
-            details.push(serde_json::json!({ "text": detail }));
+            details.push(detail.to_string());
          }
       } else if let Some(rest) = lower
          .strip_prefix("fixes:")
@@ -183,12 +191,37 @@ pub fn parse_conventional_analysis(text: &str) -> Result<serde_json::Value> {
       }
    }
 
+   Ok(AnalysisParts { commit_type, scope, summary, details, issue_refs })
+}
+
+/// Parse markdown conventional analysis format (details as `{text}` objects,
+/// matching `ConventionalAnalysis`).
+///
+/// Lenient: tolerates code fences, headings with/without `#`, bold emphasis,
+/// the `type(scope): summary` line appearing on any of the first lines, bullet
+/// glyph variations, and `Fixes:`/`Closes:`/`Resolves:` footers.
+pub fn parse_conventional_analysis(text: &str) -> Result<serde_json::Value> {
+   let p = parse_analysis_parts(text)?;
+   let details: Vec<serde_json::Value> =
+      p.details.into_iter().map(|t| serde_json::json!({ "text": t })).collect();
    Ok(serde_json::json!({
-      "type": commit_type,
-      "scope": scope,
-      "summary": summary,
+      "type": p.commit_type,
+      "scope": p.scope,
+      "summary": p.summary,
       "details": details,
-      "issue_refs": issue_refs
+      "issue_refs": p.issue_refs
+   }))
+}
+
+/// Parse markdown fast-commit format (details as plain strings, matching
+/// `FastCommitOutput`). Same heading/bullet grammar as the analysis parser.
+pub fn parse_fast_commit(text: &str) -> Result<serde_json::Value> {
+   let p = parse_analysis_parts(text)?;
+   Ok(serde_json::json!({
+      "type": p.commit_type,
+      "scope": p.scope,
+      "summary": p.summary,
+      "details": p.details
    }))
 }
 
@@ -214,8 +247,12 @@ fn parse_heading(line: &str) -> Option<(String, Option<String>, String)> {
       (type_scope.to_string(), None)
    };
 
-   // Heuristic: a type token is a single alphabetic word (no spaces).
-   if ty.is_empty() || ty.contains(char::is_whitespace) || !ty.chars().all(|c| c.is_ascii_alphabetic()) {
+   // The type token must be a *valid conventional commit type*. This is what
+   // prevents stray `key: value` lines (e.g. `type: "refactor",` from a JSON
+   // blob, or `summary: ...`) from being misread as a heading — which would
+   // otherwise produce garbage like {"type":"type"} that caches and then fails
+   // downstream validation. Only a real type makes a real heading.
+   if CommitType::new(&ty).is_err() {
       return None;
    }
    Some((ty, scope, summary))
@@ -583,6 +620,39 @@ mod tests {
       let r = parse_conventional_analysis(md).unwrap();
       assert_eq!(r["type"], "chore");
       assert!(r["scope"].is_null());
+   }
+
+   #[test]
+   fn test_heading_requires_known_type_not_json_key() {
+      // A stray JSON/YAML `type:` key must NOT be misread as a heading.
+      // (This used to yield {"type":"type"} which cached and then blew up.)
+      let json_ish = "{\n  \"type\": \"refactor\",\n  \"summary\": \"did things\"\n}";
+      assert!(parse_conventional_analysis(json_ish).is_err());
+      // And `summary:`/`scope:` key lines are likewise not headings.
+      assert!(parse_conventional_analysis("summary: did a thing\nscope: core").is_err());
+   }
+
+   #[test]
+   fn test_fast_commit_details_are_plain_strings() {
+      // FastCommitOutput.details is Vec<String>, so the fast parser must emit
+      // string details (not {text} objects like the analysis parser).
+      let md = "# refactor(web): derive provider order from options\n\n- Derived the \
+                metadata dynamically.\n- Reprioritized the default sequence.";
+      let r = parse_fast_commit(md).unwrap();
+      assert_eq!(r["type"], "refactor");
+      assert_eq!(r["scope"], "web");
+      let details = r["details"].as_array().unwrap();
+      assert_eq!(details.len(), 2);
+      assert!(details[0].is_string(), "fast details must be strings");
+      // It must deserialize into the real FastCommitOutput shape.
+      #[derive(serde::Deserialize)]
+      struct FastShape {
+         #[serde(rename = "type")]
+         _t:      String,
+         details: Vec<String>,
+      }
+      let parsed: FastShape = serde_json::from_value(r).unwrap();
+      assert_eq!(parsed.details.len(), 2);
    }
 
    // ===== summary: all the wrapping variations =====
