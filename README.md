@@ -154,7 +154,6 @@ changelog_enabled = true
 auto_fast_threshold_lines = 200           # Auto-use fast mode for small diffs; 0 disables
 map_reduce_enabled = true                 # Parallel analysis for large commits
 disable_git_background_features = true    # Disables fsmonitor/untrackedCache for lgit subprocesses
-temperature = 0.2                         # Structured-output-first, then tools, then JSON content parse
 
 # Commit signing
 gpg_sign = false                          # GPG sign commits by default (-S)
@@ -185,7 +184,7 @@ analysis_model = "gpt-4o"
 summary_model = "gpt-4o-mini"
 ```
 
-The client now prefers provider-native structured outputs, falls back to tool calling when unsupported, and only then falls back to parsing JSON content from the model response. Anthropic models only use structured outputs on the official Anthropic base URL; routed Anthropic models fall back directly to tool calling.
+The client uses tool calling for all models, falling back to parsing JSON content from the model response when a provider ignores `tool_choice`. This works across OpenRouter, LiteLLM, Anthropic, and OpenAI endpoints.
 
 ### Commit Types
 

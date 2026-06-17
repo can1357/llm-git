@@ -1,0 +1,629 @@
+diff --git a/src/diff.rs b/src/diff.rs
+index da8e266..12b9b2b 100644
+--- a/src/diff.rs
++++ b/src/diff.rs
+@@ -341,6 +341,151 @@ pub fn reconstruct_diff(files: &[FileDiff]) -> String {
+    result
+ }
+ 
++/// Classification of a changeset by whitespace footprint.
++///
++/// A file is "whitespace-only" when its added and removed lines are identical
++/// once *all* whitespace (including newlines) is stripped — i.e. only
++/// indentation, spacing, or line wrapping changed, never a token.
++#[derive(Debug, Clone, Default)]
++pub struct WhitespaceReport {
++   /// Paths of files whose only change is whitespace.
++   pub whitespace_only_files: Vec<String>,
++   /// Whether at least one file has a substantive (non-whitespace) change.
++   pub has_substantive:       bool,
++}
++
++impl WhitespaceReport {
++   /// True when every changed file differs only in whitespace (and there is at
++   /// least one such file). This is the signal to record a `style: reformatted`
++   /// commit without calling the model.
++   pub const fn all_whitespace(&self) -> bool {
++      !self.has_substantive && !self.whitespace_only_files.is_empty()
++   }
++}
++
++/// Byte offsets where each `diff --git` file section begins.
++///
++/// Only matches at the start of a line so that occurrences inside diff bodies
++/// (e.g. an edited line containing the literal text) are ignored.
++fn file_section_starts(diff: &str) -> Vec<usize> {
++   let bytes = diff.as_bytes();
++   diff
++      .match_indices("diff --git")
++      .filter(|&(i, _)| i == 0 || bytes[i - 1] == b'\n')
++      .map(|(i, _)| i)
++      .collect()
++}
++
++/// Split a unified diff into a leading preamble (commit metadata from
++/// `git show`, usually empty) and one `(path, section)` pair per file. Section
++/// slices borrow `diff` verbatim, including their trailing newline, so they can
++/// be concatenated back losslessly.
++fn file_sections(diff: &str) -> (&str, Vec<(&str, &str)>) {
++   let starts = file_section_starts(diff);
++   if starts.is_empty() {
++      return (diff, Vec::new());
++   }
++
++   let preamble = &diff[..starts[0]];
++   let mut sections = Vec::with_capacity(starts.len());
++   for (idx, &start) in starts.iter().enumerate() {
++      let end = starts.get(idx + 1).copied().unwrap_or(diff.len());
++      let section = &diff[start..end];
++      let path = section
++         .lines()
++         .next()
++         .and_then(|line| line.split_whitespace().nth(3))
++         .map_or("unknown", |s| s.trim_start_matches("b/"));
++      sections.push((path, section));
++   }
++   (preamble, sections)
++}
++
++/// Whether a single file section changes only whitespace.
++///
++/// Concatenates the added lines and the removed lines separately, strips all
++/// whitespace from each, and compares. Equal non-empty change ⇒ whitespace
++/// only. Binary files and renames are always treated as substantive so they
++/// never masquerade as a reformat.
++fn section_is_whitespace_only(section: &str) -> bool {
++   let mut added = String::new();
++   let mut removed = String::new();
++   let mut has_change = false;
++
++   for line in section.lines() {
++      if line.starts_with("Binary files")
++         || line.starts_with("rename from")
++         || line.starts_with("rename to")
++         || line.starts_with("copy from")
++         || line.starts_with("copy to")
++      {
++         return false;
++      }
++      // Skip the `+++`/`---` file headers; they are not content lines.
++      if line.starts_with("+++") || line.starts_with("---") {
++         continue;
++      }
++      if let Some(rest) = line.strip_prefix('+') {
++         has_change = true;
++         added.extend(rest.chars().filter(|c| !c.is_whitespace()));
++      } else if let Some(rest) = line.strip_prefix('-') {
++         has_change = true;
++         removed.extend(rest.chars().filter(|c| !c.is_whitespace()));
++      }
++   }
++
++   has_change && added == removed
++}
++
++/// Classify a unified diff by whitespace footprint.
++#[tracing::instrument(target = "lgit", name = "diff.classify_whitespace", skip_all, fields(diff_bytes = diff.len()))]
++pub fn classify_diff_whitespace(diff: &str) -> WhitespaceReport {
++   let (_preamble, sections) = file_sections(diff);
++   let mut report = WhitespaceReport::default();
++   for (path, section) in sections {
++      if section_is_whitespace_only(section) {
++         report.whitespace_only_files.push(path.to_string());
++      } else {
++         report.has_substantive = true;
++      }
++   }
++   report
++}
++
++/// Drop whitespace-only file sections from a diff, returning the trimmed diff.
++///
++/// Returns `None` when nothing would change (no whitespace-only files) or when
++/// every section is whitespace-only (stripping would empty the diff), so the
++/// caller keeps the original on the common path without reallocating.
++#[tracing::instrument(target = "lgit", name = "diff.strip_whitespace_only", skip_all, fields(diff_bytes = diff.len()))]
++pub fn strip_whitespace_only_files(diff: &str) -> Option<String> {
++   let (preamble, sections) = file_sections(diff);
++   if sections.is_empty() {
++      return None;
++   }
++
++   let mut kept = Vec::with_capacity(sections.len());
++   let mut stripped_any = false;
++   for (_path, section) in &sections {
++      if section_is_whitespace_only(section) {
++         stripped_any = true;
++      } else {
++         kept.push(*section);
++      }
++   }
++
++   if !stripped_any || kept.is_empty() {
++      return None;
++   }
++
++   let mut out = String::with_capacity(diff.len());
++   out.push_str(preamble);
++   for section in kept {
++      out.push_str(section);
++   }
++   Some(out)
++}
++
+ /// Truncate a diff to fit within a line budget, distributing lines across files
+ /// by priority.
+ ///
+@@ -993,4 +1138,135 @@ index 123..456 100644
+       let result = reconstruct_diff(&files);
+       assert_eq!(result, "");
+    }
++
++   const WS_ONLY_INDENT: &str = "diff --git a/src/foo.rs b/src/foo.rs
++index 1234567..89abcde 100644
++--- a/src/foo.rs
+++++ b/src/foo.rs
++@@ -1,3 +1,3 @@
++ fn main() {
++-let x = 1;
+++    let x = 1;
++ }
++";
++
++   const SUBSTANTIVE: &str = "diff --git a/src/bar.rs b/src/bar.rs
++index 1111111..2222222 100644
++--- a/src/bar.rs
+++++ b/src/bar.rs
++@@ -1,3 +1,3 @@
++ fn main() {
++-let x = 1;
+++let x = 2;
++ }
++";
++
++   #[test]
++   fn test_whitespace_only_indentation() {
++      let report = classify_diff_whitespace(WS_ONLY_INDENT);
++      assert!(report.all_whitespace());
++      assert!(!report.has_substantive);
++      assert_eq!(report.whitespace_only_files, vec!["src/foo.rs".to_string()]);
++   }
++
++   #[test]
++   fn test_whitespace_only_rewrap() {
++      // Reflowing one line into two is still whitespace-only: the tokens match
++      // once newlines are stripped.
++      let diff = "diff --git a/a.md b/a.md
++index 111..222 100644
++--- a/a.md
+++++ b/a.md
++@@ -1 +1,2 @@
++-one two three
+++one two
+++three
++";
++      let report = classify_diff_whitespace(diff);
++      assert!(report.all_whitespace());
++   }
++
++   #[test]
++   fn test_substantive_change_not_whitespace() {
++      let report = classify_diff_whitespace(SUBSTANTIVE);
++      assert!(!report.all_whitespace());
++      assert!(report.has_substantive);
++      assert!(report.whitespace_only_files.is_empty());
++   }
++
++   #[test]
++   fn test_new_file_is_substantive() {
++      let diff = "diff --git a/new.txt b/new.txt
++new file mode 100644
++index 0000000..e69de29
++--- /dev/null
+++++ b/new.txt
++@@ -0,0 +1,2 @@
+++hello
+++world
++";
++      let report = classify_diff_whitespace(diff);
++      assert!(!report.all_whitespace());
++      assert!(report.has_substantive);
++   }
++
++   #[test]
++   fn test_rename_is_substantive() {
++      let diff = "diff --git a/old.rs b/new.rs
++similarity index 100%
++rename from old.rs
++rename to new.rs
++";
++      let report = classify_diff_whitespace(diff);
++      assert!(!report.all_whitespace());
++      assert!(report.has_substantive);
++   }
++
++   #[test]
++   fn test_mixed_changeset() {
++      let diff = format!("{WS_ONLY_INDENT}{SUBSTANTIVE}");
++      let report = classify_diff_whitespace(&diff);
++      assert!(!report.all_whitespace());
++      assert!(report.has_substantive);
++      assert_eq!(report.whitespace_only_files, vec!["src/foo.rs".to_string()]);
++   }
++
++   #[test]
++   fn test_strip_drops_whitespace_only_file() {
++      let diff = format!("{WS_ONLY_INDENT}{SUBSTANTIVE}");
++      let stripped = strip_whitespace_only_files(&diff).expect("a file should be dropped");
++      assert!(!stripped.contains("src/foo.rs"));
++      assert!(stripped.contains("src/bar.rs"));
++      // Substantive section is preserved byte-for-byte.
++      assert_eq!(stripped, SUBSTANTIVE);
++   }
++
++   #[test]
++   fn test_strip_noop_when_no_whitespace_only() {
++      assert!(strip_whitespace_only_files(SUBSTANTIVE).is_none());
++   }
++
++   #[test]
++   fn test_strip_noop_when_all_whitespace() {
++      // Stripping everything would empty the diff, so the helper declines.
++      assert!(strip_whitespace_only_files(WS_ONLY_INDENT).is_none());
++   }
++
++   #[test]
++   fn test_diff_git_text_in_body_not_a_boundary() {
++      // A removed line that happens to contain the literal "diff --git" text
++      // must not be mistaken for a new file section.
++      let diff = "diff --git a/doc.md b/doc.md
++index 111..222 100644
++--- a/doc.md
+++++ b/doc.md
++@@ -1,2 +1,2 @@
++-Run diff --git to inspect changes
+++Run git diff to inspect changes
++ done
++";
++      let report = classify_diff_whitespace(diff);
++      assert_eq!(report.whitespace_only_files.len() + usize::from(report.has_substantive), 1);
++      assert!(report.has_substantive);
++   }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 0e421f9..e538e05 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -12,7 +12,10 @@ use arboard::Clipboard;
+ use clap::{CommandFactory, Parser};
+ use compose::run_compose_mode;
+ use config::CommitConfig;
+-use diff::{smart_truncate_diff, truncate_diff_by_lines};
++use diff::{
++   classify_diff_whitespace, smart_truncate_diff, strip_whitespace_only_files,
++   truncate_diff_by_lines,
++};
+ use error::{CommitGenError, Result};
+ use git::{
+    ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat, get_git_stat,
+@@ -20,7 +23,7 @@ use git::{
+ };
+ use llm_git::{style, tokens::create_token_counter, *};
+ use normalization::{format_commit_message, post_process_commit_message};
+-use types::{Args, ConventionalCommit, Mode, resolve_model_name};
++use types::{Args, CommitSummary, CommitType, ConventionalCommit, Mode, resolve_model_name};
+ use validation::{check_type_scope_consistency, validate_commit_message};
+ 
+ /// Print status messages to stderr in pipe mode, stdout otherwise.
+@@ -402,6 +405,48 @@ fn build_footers(args: &Args) -> Vec<String> {
+    footers
+ }
+ 
++/// Detect when a changeset differs only in whitespace and, if so, build a
++/// ready-to-commit `style: reformatted …` message without calling the model.
++///
++/// Returns `Ok(None)` when at least one file has a substantive change, so the
++/// caller continues with the normal generation pipeline. Compose mode is
++/// handled separately and never reaches here.
++#[tracing::instrument(target = "lgit", name = "standard.detect_reformat", skip_all, fields(mode = ?args.mode, dir = %args.dir))]
++fn detect_reformat_shortcut(
++   args: &Args,
++   config: &CommitConfig,
++) -> Result<Option<ConventionalCommit>> {
++   let diff = get_git_diff(&args.mode, args.target.as_deref(), &args.dir, config)?;
++   let report = classify_diff_whitespace(&diff);
++   if !report.all_whitespace() {
++      return Ok(None);
++   }
++   Ok(Some(build_reformat_commit(&report.whitespace_only_files, args, config)?))
++}
++
++/// Build a `style: reformatted …` commit for a whitespace-only changeset.
++fn build_reformat_commit(
++   files: &[String],
++   args: &Args,
++   config: &CommitConfig,
++) -> Result<ConventionalCommit> {
++   let summary_text = match files {
++      [single] => {
++         let name = single.rsplit('/').next().unwrap_or(single.as_str());
++         format!("reformatted {name}")
++      },
++      many => format!("reformatted {} files", many.len()),
++   };
++
++   Ok(ConventionalCommit {
++      commit_type: CommitType::new("style")?,
++      scope:       None,
++      summary:     CommitSummary::new(summary_text, config.summary_hard_limit)?,
++      body:        Vec::new(),
++      footers:     build_footers(args),
++   })
++}
++
+ fn resolve_fast_mode_model(args: &Args, config: &CommitConfig) -> String {
+    if args.model.is_some() || config.legacy_model.is_some() {
+       config.analysis_model.clone()
+@@ -448,6 +493,13 @@ async fn run_generation(
+       record_timing(timings, "write_debug_inputs", phase_start.elapsed());
+    }
+ 
++   // Drop whitespace-only files so the model focuses on substantive changes.
++   // A changeset that is *entirely* whitespace never reaches here — it is
++   // short-circuited to a reformat commit in `run_cli`.
++   let phase_start = Instant::now();
++   let diff = strip_whitespace_only_files(&diff).unwrap_or(diff);
++   record_timing(timings, "strip_whitespace_only", phase_start.elapsed());
++
+    status!(
+       "{} {} {} {} {} {} {}",
+       style::dim("›"),
+@@ -808,6 +860,11 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+       record_timing(&mut timings, "write_debug_inputs", phase_start.elapsed());
+    }
+ 
++   // Drop whitespace-only files so the model focuses on substantive changes.
++   let phase_start = Instant::now();
++   let diff = strip_whitespace_only_files(&diff).unwrap_or(diff);
++   record_timing(&mut timings, "strip_whitespace_only", phase_start.elapsed());
++
+    // Line-budget truncation for fast mode (10k lines)
+    let phase_start = Instant::now();
+    let diff = truncate_diff_by_lines(&diff, 10_000, config);
+@@ -1043,48 +1100,64 @@ async fn run_cli(args: Args) -> miette::Result<()> {
+       record_timing(&mut timings, "auto_stage_if_needed", phase_start.elapsed());
+    }
+ 
+-   // Route to fast mode if --fast flag is present
+-   if args.fast {
+-      return Ok(run_fast_mode(&args, &config).await?);
+-   }
++   // Whitespace-only changesets become a `style: reformatted …` commit with no
++   // model call. Checked before fast-mode routing so small reformats are not
++   // auto-switched into the LLM fast path.
++   let phase_start = Instant::now();
++   let reformat_commit = detect_reformat_shortcut(&args, &config)?;
++   record_timing(&mut timings, "detect_reformat_shortcut", phase_start.elapsed());
+ 
+-   if config.auto_fast_threshold_lines > 0 {
+-      let phase_start = Instant::now();
+-      let numstat = get_git_numstat(&args.mode, args.target.as_deref(), &args.dir, &config)?;
+-      record_timing(&mut timings, "get_git_numstat_for_auto_fast", phase_start.elapsed());
+-
+-      if let Some(changed_lines) = auto_fast_changed_lines(&numstat, &config) {
+-         status!(
+-            "{} {}",
+-            style::info("›"),
+-            style::dim(&format!(
+-               "Auto-switching to fast mode ({changed_lines} changed lines <= {})",
+-               config.auto_fast_threshold_lines
+-            ))
+-         );
++   let mut commit_msg = if let Some(commit) = reformat_commit {
++      status!(
++         "{} {}",
++         style::info("›"),
++         style::dim("Detected whitespace-only changes; recording as reformat")
++      );
++      commit
++   } else {
++      // Route to fast mode if --fast flag is present
++      if args.fast {
+          return Ok(run_fast_mode(&args, &config).await?);
+       }
+-   }
+ 
+-   // Run changelog maintenance if not disabled (check both CLI flag and config)
+-   if !args.no_changelog && config.changelog_enabled {
+-      let phase_start = Instant::now();
+-      if let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config).await {
+-         // Don't fail the commit, just warn
+-         eprintln!("Warning: Changelog update failed: {e}");
++      if config.auto_fast_threshold_lines > 0 {
++         let phase_start = Instant::now();
++         let numstat = get_git_numstat(&args.mode, args.target.as_deref(), &args.dir, &config)?;
++         record_timing(&mut timings, "get_git_numstat_for_auto_fast", phase_start.elapsed());
++
++         if let Some(changed_lines) = auto_fast_changed_lines(&numstat, &config) {
++            status!(
++               "{} {}",
++               style::info("›"),
++               style::dim(&format!(
++                  "Auto-switching to fast mode ({changed_lines} changed lines <= {})",
++                  config.auto_fast_threshold_lines
++               ))
++            );
++            return Ok(run_fast_mode(&args, &config).await?);
++         }
+       }
+-      record_timing(&mut timings, "run_changelog_flow", phase_start.elapsed());
+-   }
+ 
+-   status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
+-      Mode::Staged => style::bold("staged"),
+-      Mode::Commit => style::bold("commit"),
+-      Mode::Unstaged => style::bold("unstaged"),
+-      Mode::Compose => unreachable!("compose mode handled separately"),
+-   });
++      // Run changelog maintenance if not disabled (check both CLI flag and config)
++      if !args.no_changelog && config.changelog_enabled {
++         let phase_start = Instant::now();
++         if let Err(e) = llm_git::changelog::run_changelog_flow(&args, &config).await {
++            // Don't fail the commit, just warn
++            eprintln!("Warning: Changelog update failed: {e}");
++         }
++         record_timing(&mut timings, "run_changelog_flow", phase_start.elapsed());
++      }
+ 
+-   // Run generation pipeline
+-   let mut commit_msg = run_generation(&config, &args, &token_counter, &mut timings).await?;
++      status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
++         Mode::Staged => style::bold("staged"),
++         Mode::Commit => style::bold("commit"),
++         Mode::Unstaged => style::bold("unstaged"),
++         Mode::Compose => unreachable!("compose mode handled separately"),
++      });
++
++      // Run generation pipeline
++      run_generation(&config, &args, &token_counter, &mut timings).await?
++   };
+ 
+    // Get stat and detail points for validation retry
+    let phase_start = Instant::now();
+diff --git a/src/map_reduce.rs b/src/map_reduce.rs
+index 47d176a..07e0102 100644
+--- a/src/map_reduce.rs
++++ b/src/map_reduce.rs
+@@ -194,7 +194,6 @@ impl<'a> ContextHeaders<'a> {
+       Self { files, ranked_indices, large_commit_header: None }
+    }
+ 
+-
+    fn header_for_files(&self, current_files: &[&str]) -> Cow<'_, str> {
+       if let Some(header) = &self.large_commit_header {
+          return Cow::Borrowed(header.as_str());
+@@ -255,7 +254,6 @@ fn is_current_context_file(filename: &str, current_files: &[&str]) -> bool {
+    current_files.contains(&filename)
+ }
+ 
+-
+ /// Infer a brief description of what a file likely contains based on
+ /// name/content
+ fn infer_file_description(filename: &str, content: &str) -> &'static str {
+@@ -442,20 +440,20 @@ async fn map_file_batch(
+       .expect("batch output token cap fits in u32");
+ 
+    let response = run_oneshot::<BatchObservationResponse>(config, &OneShotSpec {
+-      operation:        "map-reduce/map",
+-      model:            model_name,
++      operation: "map-reduce/map",
++      model: model_name,
+       max_tokens,
+-      temperature:      config.temperature,
+-      prompt_family:    "map",
+-      prompt_variant:   "default",
+-      system_prompt:    &parts.system,
+-      user_prompt:      &parts.user,
+-      tool_name:        "create_file_observations",
++      temperature: config.temperature,
++      prompt_family: "map",
++      prompt_variant: "default",
++      system_prompt: &parts.system,
++      user_prompt: &parts.user,
++      tool_name: "create_file_observations",
+       tool_description: "Extract observations from a batch of file changes",
+-      schema:           &observation_schema,
+-      progress_label:   Some(progress_label),
+-      debug:            None,
+-      cacheable:        true,
++      schema: &observation_schema,
++      progress_label: Some(progress_label),
++      debug: None,
++      cacheable: true,
+    })
+    .await?;
+ 
+@@ -506,7 +504,10 @@ fn map_batch_response_to_observations(
+       crate::style::warn(
+          "Model returned batch observations as text; using fallback observations for every file.",
+       );
+-      return files.iter().map(|file| fallback_file_observation(file)).collect();
++      return files
++         .iter()
++         .map(|file| fallback_file_observation(file))
++         .collect();
+    }
+ 
+    let stopped_at_max_tokens = stop_reason == Some("max_tokens");
+@@ -514,12 +515,9 @@ fn map_batch_response_to_observations(
+    files
+       .iter()
+       .map(|file| {
+-         let Some(entry_idx) = find_observation_entry(
+-            file.filename.as_str(),
+-            &response.files,
+-            &used_entries,
+-            files,
+-         ) else {
++         let Some(entry_idx) =
++            find_observation_entry(file.filename.as_str(), &response.files, &used_entries, files)
++         else {
+             return fallback_file_observation(file);
+          };
+ 
+@@ -531,12 +529,7 @@ fn map_batch_response_to_observations(
+             entry.observations.clone()
+          };
+ 
+-         FileObservation {
+-            file: file.filename.clone(),
+-            observations,
+-            additions: 0,
+-            deletions: 0,
+-         }
++         FileObservation { file: file.filename.clone(), observations, additions: 0, deletions: 0 }
+       })
+       .collect()
+ }
+@@ -564,9 +557,7 @@ fn find_observation_entry(
+             .flatten()
+       })
+       .or_else(|| {
+-         find_entry_by(entries, used_entries, |entry| {
+-            path_suffix_matches(&entry.path, filename)
+-         })
++         find_entry_by(entries, used_entries, |entry| path_suffix_matches(&entry.path, filename))
+       })
+ }
+ 
+@@ -692,7 +683,7 @@ struct BatchObservationResponse {
+ 
+ #[derive(Debug, Deserialize, Serialize)]
+ struct FileObservationEntry {
+-   path: String,
++   path:         String,
+    #[serde(default, deserialize_with = "deserialize_observations")]
+    observations: Vec<String>,
+ }
+@@ -877,7 +868,6 @@ mod tests {
+       }
+    }
+ 
+-
+    #[test]
+    fn test_map_phase_model_uses_summary_model() {
+       let config = CommitConfig {
+diff --git a/src/templates.rs b/src/templates.rs
+index 65050a1..3cf6cbd 100644
+--- a/src/templates.rs
++++ b/src/templates.rs
+@@ -4,8 +4,8 @@ use std::{
+ };
+ 
+ use parking_lot::Mutex;
+-use serde::Serialize;
+ use rust_embed::RustEmbed;
++use serde::Serialize;
+ use tera::{Context, Tera};
+ 
+ use crate::error::{CommitGenError, Result};

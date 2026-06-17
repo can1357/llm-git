@@ -94,13 +94,20 @@ impl TestRunner {
       let fixture = Fixture::load(&self.fixtures_dir, name)?;
       let token_counter = create_token_counter(&self.config);
 
+      // Optional per-fixture debug capture (raw LLM I/O) via env var.
+      let debug_dir = std::env::var("LLM_GIT_TEST_DEBUG_DIR").ok().map(|root| {
+         let dir = std::path::PathBuf::from(root).join(name);
+         let _ = std::fs::create_dir_all(&dir);
+         dir
+      });
+
       // Build analysis context from fixture
       let ctx = AnalysisContext {
          user_context:    fixture.input.context.user_context.as_deref(),
          recent_commits:  fixture.input.context.recent_commits.as_deref(),
          common_scopes:   fixture.input.context.common_scopes.as_deref(),
          project_context: fixture.input.context.project_context.as_deref(),
-         debug_output:    None,
+         debug_output:    debug_dir.as_deref(),
          debug_prefix:    None,
       };
 

@@ -13,6 +13,7 @@ pub mod error;
 pub mod git;
 pub mod llm_cache;
 pub mod map_reduce;
+pub mod markdown_output;
 pub mod normalization;
 pub mod patch;
 pub mod profile;

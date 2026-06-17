@@ -437,18 +437,14 @@ async fn map_file_batch(
       .zip(&rendered_diffs)
       .map(|(file, diff)| templates::MapFile { path: file.filename.as_str(), diff })
       .collect();
-   let parts = templates::render_map_prompt("default", &prompt_files, context_header)?;
+   let variant = if config.markdown_output { "markdown" } else { "default" };
+   let parts = templates::render_map_prompt(variant, &prompt_files, context_header)?;
    let observation_schema = build_batch_observation_schema();
-   let max_tokens = u32::try_from((files.len() * 250).clamp(1500, 4000))
-      .expect("batch output token cap fits in u32");
-
    let response = run_oneshot::<BatchObservationResponse>(config, &OneShotSpec {
       operation: "map-reduce/map",
       model: model_name,
-      max_tokens,
-      temperature: config.temperature,
       prompt_family: "map",
-      prompt_variant: "default",
+      prompt_variant: variant,
       system_prompt: &parts.system,
       user_prompt: &parts.user,
       tool_name: "create_file_observations",
@@ -627,8 +623,9 @@ pub async fn reduce_phase(
       serde_json::to_string_pretty(observations).unwrap_or_else(|_| "[]".to_string());
 
    let types_description = crate::api::format_types_description(config);
+   let variant = if config.markdown_output { "markdown" } else { "default" };
    let parts = templates::render_reduce_prompt(
-      "default",
+      variant,
       &observations_json,
       stat,
       scope_candidates,
@@ -639,10 +636,8 @@ pub async fn reduce_phase(
    let response = run_oneshot::<ConventionalAnalysis>(config, &OneShotSpec {
       operation:        "map-reduce/reduce",
       model:            model_name,
-      max_tokens:       1500,
-      temperature:      config.temperature,
       prompt_family:    "reduce",
-      prompt_variant:   "default",
+      prompt_variant:   variant,
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "create_conventional_analysis",

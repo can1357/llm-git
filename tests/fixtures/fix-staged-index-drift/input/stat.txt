@@ -1,0 +1,6 @@
+ AGENTS.md      |   4 +-
+ src/compose.rs |  27 +++++---
+ src/error.rs   |  10 ---
+ src/git.rs     | 207 ++++++++++++++++++++++++++++++++++++++++++++++-----------
+ src/main.rs    | 133 +++++++++++++++++++++++++++---------
+ 5 files changed, 289 insertions(+), 92 deletions(-)

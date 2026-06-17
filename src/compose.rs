@@ -41,7 +41,6 @@ use crate::{
 
 const MAX_OBSERVATIONS_PER_FILE: usize = 3;
 const COMPOSE_PLAN_SCHEMA_VERSION: &str = "v3";
-const COMPOSE_PLANNER_TEMPERATURE: f32 = 0.0;
 const COMPOSE_SUMMARY_MEDIUM_FILE_THRESHOLD: usize = 60;
 const COMPOSE_SUMMARY_MEDIUM_HUNK_THRESHOLD: usize = 200;
 const COMPOSE_SUMMARY_LARGE_FILE_THRESHOLD: usize = 150;
@@ -1802,8 +1801,6 @@ async fn analyze_compose_intent(
    let response = run_oneshot::<ComposeIntentResponse>(config, &OneShotSpec {
       operation:        "compose/intent",
       model:            &config.analysis_model,
-      max_tokens:       3000,
-      temperature:      COMPOSE_PLANNER_TEMPERATURE,
       prompt_family:    "compose-intent",
       prompt_variant:   "default",
       system_prompt:    &parts.system,
@@ -1984,8 +1981,6 @@ async fn request_binding(
    let response = run_oneshot::<ComposeBindingResponse>(config, &OneShotSpec {
       operation:        "compose/bind",
       model:            &config.analysis_model,
-      max_tokens:       2500,
-      temperature:      COMPOSE_PLANNER_TEMPERATURE,
       prompt_family:    "compose-bind",
       prompt_variant:   "default",
       system_prompt:    &parts.system,

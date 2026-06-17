@@ -334,8 +334,6 @@ async fn call_changelog_api(
    let response = run_oneshot::<ChangelogResponse>(config, &OneShotSpec {
       operation:        "changelog",
       model:            &config.analysis_model,
-      max_tokens:       2000,
-      temperature:      config.temperature,
       prompt_family:    "changelog",
       prompt_variant:   "default",
       system_prompt:    &parts.system,

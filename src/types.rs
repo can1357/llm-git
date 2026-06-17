@@ -1067,9 +1067,6 @@ pub struct Args {
    #[arg(long, short = 'm')]
    pub model: Option<String>,
 
-   /// Temperature for API calls (0.0-1.0, default: 1.0)
-   #[arg(long, short = 't')]
-   pub temperature: Option<f32>,
 
    /// Issue numbers this commit fixes (e.g., --fixes 123 456)
    #[arg(long)]
@@ -1233,7 +1230,6 @@ impl Default for Args {
          push:                    false,
          dir:                     ".".to_string(),
          model:                   None,
-         temperature:             None,
          fixes:                   vec![],
          closes:                  vec![],
          resolves:                vec![],

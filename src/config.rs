@@ -63,7 +63,6 @@ pub struct CommitConfig {
    pub max_diff_length:           usize,
    pub max_diff_tokens:           usize,
    pub wide_change_threshold:     f32,
-   pub temperature:               f32,
    #[serde(default = "default_analysis_model")]
    pub analysis_model:            String,
    #[serde(default = "default_summary_model")]
@@ -91,6 +90,11 @@ pub struct CommitConfig {
    /// Enable abstract summaries for wide changes (cross-cutting refactors)
    #[serde(default = "default_wide_change_abstract")]
    pub wide_change_abstract: bool,
+
+   /// Emit LLM output as Markdown instead of JSON tool calls (default: true).
+   /// Set to false to use strict JSON tool/function calling instead.
+   #[serde(default = "default_markdown_output")]
+   pub markdown_output: bool,
 
    /// Exclude old commit message from context in commit mode (rewrite mode uses
    /// this)
@@ -189,6 +193,10 @@ const fn default_wide_change_abstract() -> bool {
    true
 }
 
+const fn default_markdown_output() -> bool {
+   true
+}
+
 const fn default_exclude_old_message() -> bool {
    true
 }
@@ -259,7 +267,6 @@ impl Default for CommitConfig {
          max_diff_length: 100000, // Increased to handle larger refactors better
          max_diff_tokens: 25000,  // ~100K chars = 25K tokens (4 chars/token estimate)
          wide_change_threshold: 0.50,
-         temperature: 0.2, // Low temperature for consistent structured output
          analysis_model: default_analysis_model(),
          summary_model: default_summary_model(),
          legacy_model: None,
@@ -317,6 +324,7 @@ impl Default for CommitConfig {
          analysis_prompt_variant: default_analysis_prompt_variant(),
          summary_prompt_variant: default_summary_prompt_variant(),
          wide_change_abstract: default_wide_change_abstract(),
+         markdown_output: default_markdown_output(),
          exclude_old_message: default_exclude_old_message(),
          gpg_sign: default_gpg_sign(),
          signoff: default_signoff(),

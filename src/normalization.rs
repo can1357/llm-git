@@ -207,8 +207,11 @@ pub fn cap_details(details: &mut Vec<String>, max_tokens: usize) {
 }
 
 /// Convert present-tense verbs to past-tense and handle type-specific
-/// replacements
+/// replacements. Uses the shared [`crate::validation::PAST_TENSE_MAP`] so
+/// normalization and validation stay in sync.
 pub fn normalize_summary_verb(summary: &mut String, commit_type: &str) {
+   use crate::validation::{present_to_past, split_verb_token, verb_stem};
+
    if summary.trim().is_empty() {
       return;
    }
@@ -221,7 +224,7 @@ pub fn normalize_summary_verb(summary: &mut String, commit_type: &str) {
    let rest = parts_iter.collect::<Vec<_>>().join(" ");
    let first_word_lower = first_word.to_lowercase();
 
-   // Check if already past tense
+   // Check if already past tense (full token, e.g. `re-enabled`).
    if is_past_tense_verb(&first_word_lower) {
       // Special case: refactor type shouldn't use "refactored"
       if commit_type == "refactor" && first_word_lower == "refactored" {
@@ -234,48 +237,101 @@ pub fn normalize_summary_verb(summary: &mut String, commit_type: &str) {
       return;
    }
 
-   // Convert present tense to past tense
-   let converted = match first_word_lower.as_str() {
-      "add" | "adds" => Some("added"),
-      "fix" | "fixes" => Some("fixed"),
-      "update" | "updates" => Some("updated"),
-      "refactor" | "refactors" => Some(if commit_type == "refactor" {
-         "restructured"
-      } else {
-         "refactored"
-      }),
-      "remove" | "removes" => Some("removed"),
-      "replace" | "replaces" => Some("replaced"),
-      "improve" | "improves" => Some("improved"),
-      "implement" | "implements" => Some("implemented"),
-      "migrate" | "migrates" => Some("migrated"),
-      "rename" | "renames" => Some("renamed"),
-      "move" | "moves" => Some("moved"),
-      "merge" | "merges" => Some("merged"),
-      "split" | "splits" => Some("split"),
-      "extract" | "extracts" => Some("extracted"),
-      "restructure" | "restructures" => Some("restructured"),
-      "reorganize" | "reorganizes" => Some("reorganized"),
-      "consolidate" | "consolidates" => Some("consolidated"),
-      "simplify" | "simplifies" => Some("simplified"),
-      "optimize" | "optimizes" => Some("optimized"),
-      "document" | "documents" => Some("documented"),
-      "test" | "tests" => Some("tested"),
-      "change" | "changes" => Some("changed"),
-      "introduce" | "introduces" => Some("introduced"),
-      "deprecate" | "deprecates" => Some("deprecated"),
-      "delete" | "deletes" => Some("deleted"),
-      "correct" | "corrects" => Some("corrected"),
-      "enhance" | "enhances" => Some("enhanced"),
-      "revert" | "reverts" => Some("reverted"),
-      _ => None,
+   // Skip tokens that aren't convertible verbs:
+   //  - all-caps acronyms (API, NFC, LSP)
+   //  - numeric-led tokens (403, v1.0, 2.0.0)
+   //  - tokens whose suffix isn't a simple dash/slash separator (e.g.
+   //    `fix(tui):` is a leaked type prefix, not a verb to convert)
+   let Some((stem_raw, suffix)) = split_verb_token(&first_word) else {
+      return;
+   };
+   let stem = stem_raw.to_ascii_lowercase();
+
+   // Skip all-caps acronyms: stem would be all uppercase, and verb_stem
+   // already returns None for those.
+   if verb_stem(&first_word).is_none() {
+      return;
+   }
+
+   // Only reattach suffix for simple separators (`-`, `/`). A suffix like
+   // `(tui):` means the model leaked the conventional prefix; leave it alone
+   // (strip_type_prefix handles that elsewhere).
+   let safe_suffix = if suffix.is_empty() || suffix.starts_with('-') || suffix.starts_with('/') {
+      suffix
+   } else {
+      // Non-separator suffix (e.g. `(tui):`): don't convert, to avoid
+      // producing `fixed(tui):`.
+      return;
    };
 
-   if let Some(past) = converted {
+   // Handle `re-` prefixed verbs: `split_verb_token("re-enable")` gives
+   // stem="re", suffix="-enable". Detect that, parse the verb segment from
+   // the suffix, convert it, and rebuild as `re-{past}{tail}`.
+   if stem == "re" && safe_suffix.starts_with('-') {
+      let after_dash = &safe_suffix[1..]; // skip '-'
+      let next_n = after_dash
+         .bytes()
+         .take_while(|&b| b.is_ascii_alphabetic())
+         .count();
+      if next_n > 0 {
+         let inner = after_dash[..next_n].to_ascii_lowercase();
+         let tail = &after_dash[next_n..]; // e.g. "" or "-checking"
+
+         let inner_past = present_to_past(&inner)
+            .or_else(|| inner.strip_suffix('s').and_then(|s| present_to_past(s)))
+            .or_else(|| inner.strip_suffix("es").and_then(|s| present_to_past(s)))
+            .or_else(|| {
+               inner.strip_suffix("ies").and_then(|s| present_to_past(&format!("{s}y")))
+            })
+            .map(|p| {
+               if commit_type == "refactor" && p == "refactored" {
+                  "restructured"
+               } else {
+                  p
+               }
+            });
+
+         if let Some(past) = inner_past {
+            *summary = if rest.is_empty() {
+               format!("re-{past}{tail}")
+            } else {
+               format!("re-{past}{tail} {rest}")
+            };
+         }
+      }
+      return;
+   }
+
+   // Normal case: look up the stem directly.
+   let past = present_to_past(&stem)
+      .or_else(|| {
+         // Strip trailing 's' for third-person present (adds -> add).
+         stem.strip_suffix('s').and_then(|s| present_to_past(s))
+      })
+      .or_else(|| {
+         // Strip trailing 'es' for verbs ending in s/sh/ch/x/z (fixes -> fix).
+         stem.strip_suffix("es").and_then(|s| present_to_past(s))
+      })
+      .or_else(|| {
+         // -ies -> -y (simplifies -> simplify, applies -> apply).
+         stem.strip_suffix("ies").and_then(|s| {
+            present_to_past(&format!("{s}y"))
+         })
+      })
+      .map(|p| {
+         // Special case: refactor type shouldn't use "refactored"
+         if commit_type == "refactor" && p == "refactored" {
+            "restructured"
+         } else {
+            p
+         }
+      });
+
+   if let Some(past) = past {
       *summary = if rest.is_empty() {
-         past.to_string()
+         format!("{past}{safe_suffix}")
       } else {
-         format!("{past} {rest}")
+         format!("{past}{safe_suffix} {rest}")
       };
    }
 }
@@ -598,6 +654,130 @@ mod tests {
       let mut s = "add".to_string();
       normalize_summary_verb(&mut s, "feat");
       assert_eq!(s, "added");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_harden_to_hardened() {
+      let mut s = "harden stealth scripts against detection".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "hardened stealth scripts against detection");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_bind_to_bound() {
+      let mut s = "bind native methods to local constants".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "bound native methods to local constants");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_third_person_ies() {
+      // -ies -> -y conversion (simplifies -> simplify -> simplified)
+      let mut s = "simplifies the config loading".to_string();
+      normalize_summary_verb(&mut s, "refactor");
+      assert_eq!(s, "simplified the config loading");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_third_person_es() {
+      // -es stripping (fixes -> fix -> fixed)
+      let mut s = "fixes race condition".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "fixed race condition");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_suffix_reattach_dash() {
+      // Dash suffix should be reattached after conversion
+      let mut s = "isolate-subagent from main flow".to_string();
+      normalize_summary_verb(&mut s, "refactor");
+      assert_eq!(s, "isolated-subagent from main flow");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_skip_type_prefix_leak() {
+      // `fix(tui):` is a leaked conventional prefix, NOT a verb to convert.
+      // The `(tui):` suffix is not a dash/slash separator, so we skip.
+      let mut s = "fix(tui): rendering bug".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "fix(tui): rendering bug");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_skip_acronym() {
+      // All-caps acronyms should not be converted
+      let mut s = "API response handling".to_string();
+      normalize_summary_verb(&mut s, "feat");
+      assert_eq!(s, "API response handling");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_skip_numeric() {
+      // Numeric-led tokens should not be converted
+      let mut s = "403 error handling".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "403 error handling");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_already_past_hardened() {
+      // Already past tense should not be re-converted
+      let mut s = "hardened stealth scripts".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "hardened stealth scripts");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_already_past_bound() {
+      let mut s = "bound native methods".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "bound native methods");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_preserves_existing_third_person() {
+      // The old test had "adds" and "fixes" - ensure they still work
+      let mut s = "adds feature".to_string();
+      normalize_summary_verb(&mut s, "feat");
+      assert_eq!(s, "added feature");
+
+      let mut s = "fixes bug".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "fixed bug");
+
+      let mut s = "updates docs".to_string();
+      normalize_summary_verb(&mut s, "docs");
+      assert_eq!(s, "updated docs");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_re_prefix_enable() {
+      let mut s = "re-enable formatting checks".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "re-enabled formatting checks");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_re_prefix_run() {
+      let mut s = "re-run the test suite".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "re-ran the test suite");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_re_prefix_with_tail() {
+      // re-format-checking -> re-formatted-checking
+      let mut s = "re-format-checking pipeline".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "re-formatted-checking pipeline");
+   }
+
+   #[test]
+   fn test_normalize_summary_verb_re_prefix_already_past() {
+      // re-enabled is already past tense, should not be re-converted
+      let mut s = "re-enabled linting".to_string();
+      normalize_summary_verb(&mut s, "fix");
+      assert_eq!(s, "re-enabled linting");
    }
 
    // cap_details tests (budget-based)

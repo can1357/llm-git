@@ -351,16 +351,6 @@ fn apply_cli_overrides(config: &mut CommitConfig, args: &Args) {
       config.analysis_model.clone_from(&resolved);
       config.summary_model = resolved;
    }
-   if let Some(temp) = args.temperature {
-      if (0.0..=1.0).contains(&temp) {
-         config.temperature = temp;
-      } else {
-         eprintln!(
-            "Warning: Temperature {} out of range [0.0, 1.0], using default {}",
-            temp, config.temperature
-         );
-      }
-   }
    if args.exclude_old_message {
       config.exclude_old_message = true;
    }
@@ -502,14 +492,13 @@ async fn run_generation(
    record_timing(timings, "strip_whitespace_only", phase_start.elapsed());
 
    status!(
-      "{} {} {} {} {} {} {}",
+      "{} {} {} {} {} {}",
       style::dim("›"),
       style::dim("models:"),
       style::dim("analysis"),
       style::model(&config.analysis_model),
       style::dim("summary"),
-      style::model(&config.summary_model),
-      style::dim(&format!("(temp: {})", config.temperature))
+      style::model(&config.summary_model)
    );
 
    // Check if map-reduce should be used for large diffs
@@ -944,11 +933,10 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
    };
 
    status!(
-      "{} {} {} {}",
+      "{} {} {}",
       style::dim("›"),
       style::dim("fast mode:"),
-      style::model(&model),
-      style::dim(&format!("(temp: {})", config.temperature))
+      style::model(&model)
    );
 
    status!("{} Analyzing {} changes...", style::info("›"), match args.mode {

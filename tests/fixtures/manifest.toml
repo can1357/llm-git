@@ -1,13 +1,33 @@
+[fixtures.build-deps-rusqlite]
+description = "From commit bdd4d79"
+tags = []
+
+[fixtures.chore-version-bump]
+description = "From commit 69cdd06"
+tags = []
+
 [fixtures.large-python-migration]
 description = "From commit 16d24d07c"
+tags = []
+
+[fixtures.fix-staged-index-drift]
+description = "From commit 9bcac64"
+tags = []
+
+[fixtures.feat-hybrid-pq-signatures]
+description = "From commit cede01cef"
+tags = []
+
+[fixtures.feat-whitespace-classification]
+description = "From commit a883c13"
 tags = []
 
 [fixtures.refactor-cell-to-controller]
 description = "From commit 7c8d1cf30"
 tags = []
 
-[fixtures.feat-hybrid-pq-signatures]
-description = "From commit cede01cef"
+[fixtures.style-rustfmt-format]
+description = "From commit 0bf9f23"
 tags = []
 
 [fixtures.small-bugfix]

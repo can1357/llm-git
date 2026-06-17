@@ -236,7 +236,6 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
 api_base_url = "http://localhost:4000"
 analysis_model = "claude-sonnet-4.5"
 summary_model = "claude-haiku-4-5-20251001"
-temperature = 1.0
 
 summary_guideline = 72        # Target length
 summary_soft_limit = 96       # Triggers retry

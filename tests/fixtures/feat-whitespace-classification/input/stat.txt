@@ -1,0 +1,5 @@
+ src/diff.rs       | 276 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/main.rs       | 147 +++++++++++++++++++++--------
+ src/map_reduce.rs |  54 +++++------
+ src/templates.rs  |   2 +-
+ 4 files changed, 409 insertions(+), 70 deletions(-)

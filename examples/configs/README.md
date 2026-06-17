@@ -62,6 +62,5 @@ All config files can be customized with:
 - **Timeouts**: Adjust `request_timeout_secs` and `connect_timeout_secs`
 - **Commit limits**: Modify `summary_guideline`, `summary_soft_limit`, `summary_hard_limit`
 - **Retries**: Configure `max_retries` and `initial_backoff_ms`
-- **Temperature**: Adjust model randomness (0.0 = deterministic, 1.0 = creative)
 
 See the main README.md for full configuration documentation.

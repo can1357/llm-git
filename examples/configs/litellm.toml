@@ -30,8 +30,6 @@ wide_change_threshold = 0.50
 # Compose Mode
 compose_max_rounds = 5
 
-# Model Temperature (lower = more deterministic)
-temperature = 0.2
 
 # GPG Signing (set to true to always sign commits)
 # Can also use --sign/-S CLI flag

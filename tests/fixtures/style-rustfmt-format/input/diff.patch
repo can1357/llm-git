@@ -1,0 +1,86 @@
+diff --git a/src/compose.rs b/src/compose.rs
+index 4bb04b6..d6b0c44 100644
+--- a/src/compose.rs
++++ b/src/compose.rs
+@@ -1215,7 +1215,10 @@ fn group_type_bonus(file: &ComposeFile, group: &ComposeIntentGroup) -> i32 {
+       (ComposeFileCategory::Test, "test") => 25,
+       (ComposeFileCategory::Dependency, "build" | "chore" | "ci") => 18,
+       (ComposeFileCategory::Config, "build" | "chore" | "ci") => 12,
+-      (ComposeFileCategory::Prompt | ComposeFileCategory::Source, "feat" | "fix" | "refactor" | "perf") => 10,
++      (
++         ComposeFileCategory::Prompt | ComposeFileCategory::Source,
++         "feat" | "fix" | "refactor" | "perf",
++      ) => 10,
+       _ => 0,
+    }
+ }
+@@ -3208,7 +3211,9 @@ index 3333333..4444444 100644
+ +new docs
+ ";
+       let snapshot = build_compose_snapshot(diff, "").unwrap();
+-      let prompt_file = snapshot.file_by_path("prompts/analysis/default.md").unwrap();
++      let prompt_file = snapshot
++         .file_by_path("prompts/analysis/default.md")
++         .unwrap();
+       let system_file = snapshot.file_by_path("system/analysis/default.md").unwrap();
+       let readme_file = snapshot.file_by_path("README.md").unwrap();
+ 
+@@ -3227,7 +3232,8 @@ index 3333333..4444444 100644
+       assert_eq!(group_type_bonus(prompt_file, &feat_group), 10);
+ 
+       let fallback_type =
+-         fallback_commit_type_for_group(&snapshot, &[], std::slice::from_ref(&prompt_file.file_id)).unwrap();
++         fallback_commit_type_for_group(&snapshot, &[], std::slice::from_ref(&prompt_file.file_id))
++            .unwrap();
+       assert_eq!(fallback_type.as_str(), "refactor");
+    }
+ 
+diff --git a/src/git.rs b/src/git.rs
+index 76044f5..118d7f9 100644
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -204,8 +204,7 @@ fn append_untracked_stat(mut stat: String, dir: &str, untracked_files: &[String]
+ 
+       if let Ok(metadata) = fs::metadata(format!("{dir}/{file}")) {
+          let lines = if metadata.is_file() {
+-            fs::read_to_string(format!("{dir}/{file}"))
+-               .map_or(0, |content| content.lines().count())
++            fs::read_to_string(format!("{dir}/{file}")).map_or(0, |content| content.lines().count())
+          } else {
+             0
+          };
+diff --git a/src/map_reduce.rs b/src/map_reduce.rs
+index ff59597..1d5cde8 100644
+--- a/src/map_reduce.rs
++++ b/src/map_reduce.rs
+@@ -1115,14 +1115,8 @@ diff --git a/e.rs b/e.rs
+    fn test_infer_file_description() {
+       assert_eq!(infer_file_description("src/test_utils.rs", ""), "test file");
+       assert_eq!(infer_file_description("README.md", ""), "documentation");
+-      assert_eq!(
+-         infer_file_description("prompts/analysis/default.md", ""),
+-         "prompt template"
+-      );
+-      assert_eq!(
+-         infer_file_description("system/analysis/default.md", ""),
+-         "prompt template"
+-      );
++      assert_eq!(infer_file_description("prompts/analysis/default.md", ""), "prompt template");
++      assert_eq!(infer_file_description("system/analysis/default.md", ""), "prompt template");
+       assert_eq!(infer_file_description("config.toml", ""), "configuration");
+       assert_eq!(infer_file_description("src/error.rs", ""), "error definitions");
+       assert_eq!(infer_file_description("src/types.rs", ""), "type definitions");
+diff --git a/src/types.rs b/src/types.rs
+index 778102d..c14ee0a 100644
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -114,7 +114,8 @@ pub fn default_types() -> IndexMap<String, TypeConfig> {
+       ("docs".to_string(), TypeConfig {
+          description: "Documentation only changes".to_string(),
+          file_patterns: vec!["*.md".to_string(), "doc comments".to_string()],
+-         hint: "Excludes prompt template files (prompts/*.md). Prompt changes are functional — use feat/fix/refactor."
++         hint: "Excludes prompt template files (prompts/*.md). Prompt changes are functional — \
++                use feat/fix/refactor."
+             .to_string(),
+          ..Default::default()
+       }),

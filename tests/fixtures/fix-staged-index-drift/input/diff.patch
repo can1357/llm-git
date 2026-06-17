@@ -1,0 +1,524 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index b8c0554..052ed42 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -148,10 +148,10 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
+   - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
+ - `splice_hunks_into_base()` - Reconstruct file content from base blob + selected hunks without `git apply`
+ 
+-**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the real branch/index update at the end is guarded by an index-tree comparison against the base state.
++**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). If the real index drifted mid-run, only the snapshot paths are refreshed (`reset_paths_to`) so mid-run staging stays staged; otherwise a full `reset --mixed` runs.
+ 
+ **Snapshot isolation elsewhere:**
+-- Standard/fast staged mode captures the index tree after auto-stage/changelog and aborts the commit (`ensure_index_unchanged`, `CommitGenError::IndexChangedDuringRun`) if the index changed while the message was generated.
++- Standard/fast staged mode captures the index tree after auto-stage/changelog (`commit_staged` in `src/main.rs`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit_snapshot_tree`: `commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
+ - Changelog maintenance (`src/changelog.rs`) generates entries against the *staged* copy of CHANGELOG.md and stages the result as an exact blob (`stage_changelog_blob`), so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately.
+ 
+ ## Prompt Engineering
+diff --git a/src/compose.rs b/src/compose.rs
+index 990c007..a995ed9 100644
+--- a/src/compose.rs
++++ b/src/compose.rs
+@@ -24,7 +24,7 @@ use crate::{
+    git::{
+       TempGitIndex, append_signoff_trailer, commit_tree, current_head_ref, get_compose_diff,
+       get_compose_stat, get_git_dir, get_head_hash, read_tree_into_index, reset_mixed_to,
+-      update_ref_checked, write_index_tree, write_real_index_tree,
++      reset_paths_to, update_ref_checked, write_index_tree, write_real_index_tree,
+    },
+    map_reduce::{FileObservation, observe_diff_files, run_map_reduce, should_use_map_reduce},
+    normalization::{format_commit_message, post_process_commit_message},
+@@ -2902,7 +2902,7 @@ fn execute_compose_with_prepared_messages(
+ 
+       let tree = write_index_tree(index.path(), dir)?;
+       let sign = args.sign || config.gpg_sign;
+-      let hash = commit_tree(&tree, &parent_hash, &formatted_message, dir, sign)?;
++      let hash = commit_tree(&tree, &[parent_hash.as_str()], &formatted_message, dir, sign)?;
+       parent_hash.clone_from(&hash);
+       commit_hashes.push(hash);
+ 
+@@ -2917,15 +2917,22 @@ fn execute_compose_with_prepared_messages(
+       return Ok(commit_hashes);
+    }
+ 
+-   let current_index_tree = write_real_index_tree(dir)?;
+-   if current_index_tree != base_state.index_tree {
+-      return Err(CommitGenError::Other(
+-         "Real git index changed during compose; aborting before updating HEAD".to_string(),
+-      ));
+-   }
+-
+    update_ref_checked(&base_state.head_ref, &parent_hash, &base_state.head_hash, dir)?;
+-   reset_mixed_to(&parent_hash, dir)?;
++
++   let current_index_tree = write_real_index_tree(dir)?;
++   if current_index_tree == base_state.index_tree {
++      reset_mixed_to(&parent_hash, dir)?;
++   } else {
++      // Someone staged while compose ran. The commits contain only pinned
++      // snapshot content, so just refresh the index entries for the paths
++      // compose committed and leave the drifted staging intact.
++      println!(
++         "{}",
++         style::warning("Index changed during compose; preserving newly staged changes")
++      );
++      let paths: Vec<String> = snapshot.files.iter().map(|file| file.path.clone()).collect();
++      reset_paths_to(&parent_hash, &paths, dir)?;
++   }
+ 
+    Ok(commit_hashes)
+ }
+diff --git a/src/error.rs b/src/error.rs
+index 56a20f0..d36cc6e 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -131,16 +131,6 @@ pub enum CommitGenError {
+       help("Add an ## [Unreleased] section to the changelog file")
+    )]
+    NoUnreleasedSection { path: String },
+-
+-   #[error("Staged changes were modified while the commit message was being generated")]
+-   #[diagnostic(
+-      code(lgit::git::index_changed),
+-      help(
+-         "The index no longer matches the analyzed snapshot. Re-run lgit to commit the current \
+-          staged changes."
+-      )
+-   )]
+-   IndexChangedDuringRun,
+ }
+ 
+ impl CommitGenError {
+diff --git a/src/git.rs b/src/git.rs
+index 532f25f..70ae8cf 100644
+--- a/src/git.rs
++++ b/src/git.rs
+@@ -746,18 +746,90 @@ pub fn write_real_index_tree(dir: &str) -> Result<String> {
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+ }
+ 
+-/// Error when the real index no longer writes to `expected_tree`.
++/// Commit `tree` directly, bypassing the live index.
+ ///
+-/// Guards staged-mode commits: the message was generated for a snapshot of
+-/// the index, so anything staged since must abort the commit instead of being
+-/// silently swept into it.
+-#[tracing::instrument(target = "lgit", name = "git.ensure_index_unchanged", skip_all, fields(dir))]
+-pub fn ensure_index_unchanged(expected_tree: &str, dir: &str) -> Result<()> {
+-   let current = write_real_index_tree(dir)?;
+-   if current != expected_tree {
+-      return Err(CommitGenError::IndexChangedDuringRun);
++/// Used when the index drifted while a message was being generated: the
++/// analyzed snapshot is committed as-is, the branch (or detached HEAD)
++/// advances, and the index and worktree are left untouched — anything staged
++/// mid-run stays staged for a later commit. Commit hooks do not run.
++///
++/// Returns `Ok(None)` when `tree` is already HEAD's tree (the same content
++/// was committed mid-run), `Ok(Some(hash))` otherwise.
++#[tracing::instrument(
++   target = "lgit",
++   name = "git.commit_snapshot_tree",
++   skip_all,
++   fields(dir, tree, sign, signoff, amend)
++)]
++pub fn commit_snapshot_tree(
++   message: &str,
++   tree: &str,
++   dir: &str,
++   sign: bool,
++   signoff: bool,
++   amend: bool,
++) -> Result<Option<String>> {
++   let message = if signoff {
++      append_signoff_trailer(message, dir)?
++   } else {
++      message.to_string()
++   };
++
++   // Unborn branch (no commits yet) has no head and no parents.
++   let head = get_head_hash(dir).ok();
++   let head_ref = current_head_ref(dir)?;
++
++   let mut parents: Vec<String> = Vec::new();
++   if let Some(head) = &head {
++      if amend {
++         parents = rev_parse_parents(head, dir)?;
++      } else {
++         if rev_parse_tree_of(head, dir)? == tree {
++            return Ok(None);
++         }
++         parents.push(head.clone());
++      }
+    }
+-   Ok(())
++
++   let parent_refs: Vec<&str> = parents.iter().map(String::as_str).collect();
++   let hash = commit_tree(tree, &parent_refs, &message, dir, sign)?;
++   update_ref_checked(&head_ref, &hash, head.as_deref().unwrap_or(""), dir)?;
++   Ok(Some(hash))
++}
++
++/// Tree oid of a commit-ish.
++fn rev_parse_tree_of(commitish: &str, dir: &str) -> Result<String> {
++   let output = git_command()
++      .args(["rev-parse", &format!("{commitish}^{{tree}}")])
++      .current_dir(dir)
++      .output()
++      .map_err(|e| CommitGenError::git(format!("Failed to resolve tree of {commitish}: {e}")))?;
++
++   if !output.status.success() {
++      let stderr = String::from_utf8_lossy(&output.stderr);
++      return Err(CommitGenError::git(format!("git rev-parse {commitish}^{{tree}} failed: {stderr}")));
++   }
++
++   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
++}
++
++/// Parent hashes of a commit-ish (empty for a root commit).
++fn rev_parse_parents(commitish: &str, dir: &str) -> Result<Vec<String>> {
++   let output = git_command()
++      .args(["rev-parse", &format!("{commitish}^@")])
++      .current_dir(dir)
++      .output()
++      .map_err(|e| CommitGenError::git(format!("Failed to resolve parents of {commitish}: {e}")))?;
++
++   if !output.status.success() {
++      let stderr = String::from_utf8_lossy(&output.stderr);
++      return Err(CommitGenError::git(format!("git rev-parse {commitish}^@ failed: {stderr}")));
++   }
++
++   Ok(String::from_utf8_lossy(&output.stdout)
++      .lines()
++      .map(str::to_string)
++      .collect())
+ }
+ 
+ #[tracing::instrument(target = "lgit", name = "git.read_tree_into_index", skip_all, fields(dir, treeish, index = %index_file.display()))]
+@@ -799,11 +871,11 @@ pub fn write_index_tree(index_file: &Path, dir: &str) -> Result<String> {
+    target = "lgit",
+    name = "git.commit_tree",
+    skip_all,
+-   fields(dir, parent, tree, sign)
++   fields(dir, parents = parents.len(), tree, sign)
+ )]
+ pub fn commit_tree(
+    tree: &str,
+-   parent: &str,
++   parents: &[&str],
+    message: &str,
+    dir: &str,
+    sign: bool,
+@@ -813,7 +885,11 @@ pub fn commit_tree(
+    if sign {
+       cmd.arg("-S");
+    }
+-   cmd.arg(tree).arg("-p").arg(parent).arg("-F").arg("-");
++   cmd.arg(tree);
++   for parent in parents {
++      cmd.arg("-p").arg(parent);
++   }
++   cmd.arg("-F").arg("-");
+ 
+    let mut child = cmd
+       .current_dir(dir)
+@@ -886,6 +962,33 @@ pub fn reset_mixed_to(treeish: &str, dir: &str) -> Result<()> {
+    Ok(())
+ }
+ 
++/// Reset the index entries for `paths` to their state in `treeish`, leaving
++/// every other index entry and the worktree untouched.
++///
++/// Used after compose when the real index drifted mid-run: the committed
++/// snapshot paths are refreshed while anything staged during the run stays
++/// staged.
++#[tracing::instrument(target = "lgit", name = "git.reset_paths", skip_all, fields(dir, treeish, path_count = paths.len()))]
++pub fn reset_paths_to(treeish: &str, paths: &[String], dir: &str) -> Result<()> {
++   if paths.is_empty() {
++      return Ok(());
++   }
++
++   let output = git_command()
++      .args(["reset", "-q", treeish, "--"])
++      .args(paths)
++      .current_dir(dir)
++      .output()
++      .map_err(|e| CommitGenError::git(format!("Failed to reset paths to {treeish}: {e}")))?;
++
++   if !output.status.success() {
++      let stderr = String::from_utf8_lossy(&output.stderr);
++      return Err(CommitGenError::git(format!("git reset {treeish} -- <paths> failed: {stderr}")));
++   }
++
++   Ok(())
++}
++
+ #[tracing::instrument(target = "lgit", name = "git.append_signoff", skip_all, fields(dir))]
+ pub fn append_signoff_trailer(message: &str, dir: &str) -> Result<String> {
+    let output = git_command()
+@@ -1372,38 +1475,64 @@ mod tests {
+       ]);
+    }
+ 
++   fn run_test_git(dir: &tempfile::TempDir, args: &[&str]) -> String {
++      let output = git_command()
++         .args(args)
++         .current_dir(dir.path())
++         .output()
++         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
++      assert!(
++         output.status.success(),
++         "git {:?} failed: {}",
++         args,
++         String::from_utf8_lossy(&output.stderr)
++      );
++      String::from_utf8_lossy(&output.stdout).to_string()
++   }
++
+    #[test]
+-   fn test_ensure_index_unchanged_detects_index_drift() {
++   fn test_commit_snapshot_tree_commits_snapshot_and_keeps_drifted_staging() {
+       let dir = tempfile::TempDir::new().unwrap();
+       let dir_str = dir.path().to_str().unwrap();
+-      let run = |args: &[&str]| {
+-         let output = git_command()
+-            .args(args)
+-            .current_dir(dir.path())
+-            .output()
+-            .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
+-         assert!(
+-            output.status.success(),
+-            "git {:?} failed: {}",
+-            args,
+-            String::from_utf8_lossy(&output.stderr)
+-         );
+-      };
+-      run(&["init"]);
+-      run(&["config", "user.name", "Guard Test"]);
+-      run(&["config", "user.email", "guard@test.local"]);
++      run_test_git(&dir, &["init"]);
++      run_test_git(&dir, &["config", "user.name", "Guard Test"]);
++      run_test_git(&dir, &["config", "user.email", "guard@test.local"]);
++      run_test_git(&dir, &["config", "commit.gpgsign", "false"]);
+       std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+-      run(&["add", "a.txt"]);
++      run_test_git(&dir, &["add", "a.txt"]);
++      run_test_git(&dir, &["commit", "-m", "base"]);
+ 
+-      let tree = write_real_index_tree(dir_str).unwrap();
+-      ensure_index_unchanged(&tree, dir_str).unwrap();
++      // The analyzed snapshot: a.txt modified and staged.
++      std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
++      run_test_git(&dir, &["add", "a.txt"]);
++      let snapshot_tree = write_real_index_tree(dir_str).unwrap();
+ 
+-      std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+-      run(&["add", "b.txt"]);
+-      assert!(matches!(
+-         ensure_index_unchanged(&tree, dir_str),
+-         Err(CommitGenError::IndexChangedDuringRun)
+-      ));
++      // Mid-run drift: another file gets staged.
++      std::fs::write(dir.path().join("b.txt"), "drift\n").unwrap();
++      run_test_git(&dir, &["add", "b.txt"]);
++
++      let hash = commit_snapshot_tree("feat: snapshot", &snapshot_tree, dir_str, false, false, false)
++         .unwrap()
++         .expect("snapshot differs from HEAD");
++
++      // HEAD advanced to exactly the snapshot tree.
++      assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD"]).trim(), hash);
++      assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD^{tree}"]).trim(), snapshot_tree);
++      assert_eq!(run_test_git(&dir, &["show", "HEAD:a.txt"]), "two\n");
++      assert!(
++         !run_test_git(&dir, &["ls-tree", "--name-only", "HEAD"]).contains("b.txt"),
++         "drifted staging must not enter the commit"
++      );
++
++      // The drifted staging survives, staged for the next commit.
++      assert_eq!(run_test_git(&dir, &["diff", "--cached", "--name-only"]).trim(), "b.txt");
++      assert_eq!(std::fs::read_to_string(dir.path().join("b.txt")).unwrap(), "drift\n");
++
++      // Re-committing the same snapshot is a no-op.
++      let again =
++         commit_snapshot_tree("feat: again", &snapshot_tree, dir_str, false, false, false).unwrap();
++      assert_eq!(again, None);
++      assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD"]).trim(), hash);
+    }
+ 
+    #[test]
+diff --git a/src/main.rs b/src/main.rs
+index 37cf6b4..089907f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -18,7 +18,7 @@ use diff::{
+ };
+ use error::{CommitGenError, Result};
+ use git::{
+-   ensure_git_repo, ensure_index_unchanged, get_common_scopes, get_git_diff, get_git_numstat,
++   commit_snapshot_tree, ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat,
+    get_git_stat, get_recent_commits, git_command, git_commit, git_push,
+    init_git_command_settings, write_real_index_tree,
+ };
+@@ -837,6 +837,54 @@ fn auto_stage_if_needed(dir: &str) -> Result<()> {
+    Ok(())
+ }
+ 
++/// Commit staged-mode output, tolerating mid-run index drift.
++///
++/// When the live index still matches the analyzed snapshot, plain `git
++/// commit` runs (hooks included). When something was staged while the message
++/// was generated, the snapshot tree is committed directly instead: the index
++/// and worktree are left untouched, so the mid-run staging stays staged for a
++/// later commit.
++#[tracing::instrument(target = "lgit", name = "git.commit_staged", skip_all, fields(dir = %args.dir))]
++fn commit_staged(
++   message: &str,
++   snapshot_tree: Option<&str>,
++   args: &Args,
++   config: &CommitConfig,
++) -> Result<()> {
++   let sign = args.sign || config.gpg_sign;
++   let signoff = args.signoff || config.signoff;
++
++   if !args.dry_run
++      && let Some(expected_tree) = snapshot_tree
++      && write_real_index_tree(&args.dir)? != expected_tree
++   {
++      status!(
++         "{} {}",
++         style::info("›"),
++         style::dim("Index changed during generation; committing the analyzed snapshot (hooks skipped)")
++      );
++      match commit_snapshot_tree(message, expected_tree, &args.dir, sign, signoff, args.amend)? {
++         Some(hash) => {
++            status!(
++               "{} {}",
++               style::success(style::icons::SUCCESS),
++               style::success(&format!("Successfully committed snapshot as {hash:.8}"))
++            );
++         },
++         None => {
++            status!(
++               "{} {}",
++               style::info("›"),
++               style::dim("Snapshot already committed; nothing to do")
++            );
++         },
++      }
++      return Ok(());
++   }
++
++   git_commit(message, args.dry_run, &args.dir, sign, signoff, args.skip_hooks, args.amend)
++}
++
+ /// Fast mode: single API call to generate a complete commit message.
+ #[tracing::instrument(target = "lgit", name = "fast.run_fast_mode", skip_all, fields(mode = ?args.mode, dir = %args.dir))]
+ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+@@ -1001,23 +1049,9 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
+          ));
+       }
+ 
+-      if let Some(expected_tree) = &staged_index_tree {
+-         ensure_index_unchanged(expected_tree, &args.dir)?;
+-      }
+-
+       status!("\n{}", style::info("Preparing to commit..."));
+-      let sign = args.sign || config.gpg_sign;
+-      let signoff = args.signoff || config.signoff;
+       let phase_start = Instant::now();
+-      git_commit(
+-         &formatted_message,
+-         args.dry_run,
+-         &args.dir,
+-         sign,
+-         signoff,
+-         args.skip_hooks,
+-         args.amend,
+-      )?;
++      commit_staged(&formatted_message, staged_index_tree.as_deref(), args, config)?;
+       record_timing(&mut timings, "git_commit", phase_start.elapsed());
+ 
+       // Auto-push if requested (only if not dry-run)
+@@ -1271,23 +1305,9 @@ async fn run_cli(args: Args) -> miette::Result<()> {
+          );
+       }
+ 
+-      if let Some(expected_tree) = &staged_index_tree {
+-         ensure_index_unchanged(expected_tree, &args.dir)?;
+-      }
+-
+       status!("\n{}", style::info("Preparing to commit..."));
+-      let sign = args.sign || config.gpg_sign;
+-      let signoff = args.signoff || config.signoff;
+       let phase_start = Instant::now();
+-      git_commit(
+-         &formatted_message,
+-         args.dry_run,
+-         &args.dir,
+-         sign,
+-         signoff,
+-         args.skip_hooks,
+-         args.amend,
+-      )?;
++      commit_staged(&formatted_message, staged_index_tree.as_deref(), &args, &config)?;
+       record_timing(&mut timings, "git_commit", phase_start.elapsed());
+ 
+       // Auto-push if requested (only if not dry-run)
+@@ -1321,6 +1341,57 @@ mod tests {
+       Args::command().debug_assert();
+    }
+ 
++   fn run_test_git(dir: &std::path::Path, args: &[&str]) -> String {
++      let output = git_command()
++         .args(args)
++         .current_dir(dir)
++         .output()
++         .unwrap_or_else(|err| panic!("git {args:?} failed to spawn: {err}"));
++      assert!(
++         output.status.success(),
++         "git {:?} failed: {}",
++         args,
++         String::from_utf8_lossy(&output.stderr)
++      );
++      String::from_utf8_lossy(&output.stdout).to_string()
++   }
++
++   #[test]
++   fn test_commit_staged_commits_snapshot_on_index_drift() {
++      let dir = tempfile::TempDir::new().unwrap();
++      let path = dir.path();
++      run_test_git(path, &["init"]);
++      run_test_git(path, &["config", "user.name", "Drift Test"]);
++      run_test_git(path, &["config", "user.email", "drift@test.local"]);
++      run_test_git(path, &["config", "commit.gpgsign", "false"]);
++      std::fs::write(path.join("a.txt"), "one\n").unwrap();
++      run_test_git(path, &["add", "a.txt"]);
++      run_test_git(path, &["commit", "-m", "base"]);
++
++      // Analyzed snapshot: a.txt modified and staged.
++      std::fs::write(path.join("a.txt"), "two\n").unwrap();
++      run_test_git(path, &["add", "a.txt"]);
++      let snapshot_tree = write_real_index_tree(path.to_str().unwrap()).unwrap();
++
++      // Mid-run drift: more staging while the message was generated.
++      std::fs::write(path.join("b.txt"), "drift\n").unwrap();
++      run_test_git(path, &["add", "b.txt"]);
++
++      let args = Args { dir: path.to_str().unwrap().to_string(), ..Default::default() };
++      let config = CommitConfig::default();
++      commit_staged("feat: snapshot commit", Some(&snapshot_tree), &args, &config).unwrap();
++
++      assert_eq!(run_test_git(path, &["rev-parse", "HEAD^{tree}"]).trim(), snapshot_tree);
++      assert!(run_test_git(path, &["log", "-1", "--format=%s"]).contains("feat: snapshot commit"));
++      assert_eq!(
++         run_test_git(path, &["diff", "--cached", "--name-only"]).trim(),
++         "b.txt",
++         "drifted staging stays staged for the next commit"
++      );
++      assert_eq!(std::fs::read_to_string(path.join("a.txt")).unwrap(), "two\n");
++      assert_eq!(std::fs::read_to_string(path.join("b.txt")).unwrap(), "drift\n");
++   }
++
+    #[test]
+    fn trace_output_flag_enables_file_profiling() {
+       let args = Args::try_parse_from(["lgit", "--trace-output", "profile.jsonl", "--dry-run"])

@@ -1,0 +1,10 @@
+recent_commits = """
+Scope usage: 35% of commits use scopes
+Common verbs: added (4), bumped (3), update (2), corrected (2), fed (1)
+Average length: 52 chars (range: 23-74)
+Capitalization: 85% start lowercase
+Top scopes: deps (3), git (2), cli (1), fast (1)"""
+common_scopes = "deps (6), cli (5), prompts (4), git (4), api (3), types (2), map-reduce (2), testing (2), changelog (2), config (2)"
+project_context = """
+Language: Rust
+Framework: Tokio async runtime"""

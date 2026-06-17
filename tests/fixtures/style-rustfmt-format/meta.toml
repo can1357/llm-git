@@ -1,0 +1,5 @@
+source_repo = "."
+source_commit = "0bf9f23"
+description = "Fixture from commit 0bf9f23"
+captured_at = "2026-06-17T20:06:04.049615+00:00"
+tags = []

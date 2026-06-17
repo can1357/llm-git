@@ -3,7 +3,7 @@
 //!
 //! Every successful one-shot LLM call writes the provider request JSON and
 //! parsed payload here keyed on the canonical request material (operation,
-//! model, prompts, schema, temperature, …). Subsequent calls with
+//! model, prompts, schema, …). Subsequent calls with
 //! byte-identical inputs short-circuit the network round-trip and replay the
 //! parsed value, which is the cheapest
 //! possible recovery when the caller (eg. `lgit --compose`) is rerun after a
@@ -221,8 +221,6 @@ pub struct CacheMaterial<'a> {
    pub system_prompt:    &'a str,
    pub user_prompt:      &'a str,
    pub schema:           &'a serde_json::Value,
-   pub temperature:      f32,
-   pub max_tokens:       u32,
    pub api_mode:         &'a str,
 }
 
@@ -242,10 +240,6 @@ pub fn compute_key(material: &CacheMaterial<'_>) -> String {
    // order without preserve_order, giving a canonical schema string.
    let schema_canonical = serde_json::to_string(material.schema).unwrap_or_else(|_| String::new());
    write_field(&mut hasher, "schema", &schema_canonical);
-   hasher.update(b"temperature\x00");
-   hasher.update(&material.temperature.to_bits().to_le_bytes());
-   hasher.update(b"\nmax_tokens\x00");
-   hasher.update(&material.max_tokens.to_le_bytes());
    hasher.update(b"\n");
    hasher.finalize().to_hex().to_string()
 }
@@ -278,8 +272,6 @@ mod tests {
          system_prompt:    "system",
          user_prompt:      "user",
          schema:           &SCHEMA,
-         temperature:      0.0,
-         max_tokens:       100,
          api_mode:         "ChatCompletions",
       }
    }

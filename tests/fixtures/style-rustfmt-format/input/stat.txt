@@ -1,0 +1,5 @@
+ src/compose.rs    | 12 +++++++++---
+ src/git.rs        |  3 +--
+ src/map_reduce.rs | 10 ++--------
+ src/types.rs      |  3 ++-
+ 4 files changed, 14 insertions(+), 14 deletions(-)

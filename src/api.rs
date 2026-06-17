@@ -1,11 +1,9 @@
 use std::{
-   collections::HashMap,
    path::Path,
    sync::{LazyLock, OnceLock},
    time::Duration,
 };
 
-use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -305,24 +303,6 @@ pub fn strict_json_schema(properties: serde_json::Value, required: &[&str]) -> s
    })
 }
 
-pub fn openai_response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
-   serde_json::json!({
-      "type": "json_schema",
-      "json_schema": {
-         "name": name,
-         "strict": true,
-         "schema": schema
-      }
-   })
-}
-
-pub fn anthropic_output_format(schema: serde_json::Value) -> serde_json::Value {
-   serde_json::json!({
-      "type": "json_schema",
-      "schema": schema
-   })
-}
-
 pub(crate) fn extract_json_from_content(content: &str) -> String {
    let trimmed = content.trim();
 
@@ -358,7 +338,6 @@ pub(crate) fn extract_json_from_content(content: &str) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OneShotSource {
-   StructuredOutput,
    ToolCall,
    OutputJsonParse,
    PlainTextContent,
@@ -376,8 +355,6 @@ pub struct OneShotDebug<'a> {
 pub struct OneShotSpec<'a> {
    pub operation:        &'a str,
    pub model:            &'a str,
-   pub max_tokens:       u32,
-   pub temperature:      f32,
    pub prompt_family:    &'a str,
    pub prompt_variant:   &'a str,
    pub system_prompt:    &'a str,
@@ -398,35 +375,6 @@ pub struct OneShotResponse<T> {
    pub source:       OneShotSource,
    pub text_content: Option<String>,
    pub stop_reason:  Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OneShotRequestKind {
-   StructuredOutput,
-   ToolCalling,
-}
-
-impl OneShotRequestKind {
-   const fn debug_label(self) -> &'static str {
-      match self {
-         Self::StructuredOutput => "structured",
-         Self::ToolCalling => "tool",
-      }
-   }
-
-   const fn progress_label(self) -> &'static str {
-      match self {
-         Self::StructuredOutput => "structured output",
-         Self::ToolCalling => "tool call",
-      }
-   }
-
-   const fn content_source(self) -> OneShotSource {
-      match self {
-         Self::StructuredOutput => OneShotSource::StructuredOutput,
-         Self::ToolCalling => OneShotSource::OutputJsonParse,
-      }
-   }
 }
 
 fn oneshot_progress_label<'a>(spec: &OneShotSpec<'a>) -> &'a str {
@@ -478,19 +426,17 @@ fn format_bytes(bytes: usize) -> String {
 fn format_llm_query_progress(
    spec: &OneShotSpec<'_>,
    mode: ResolvedApiMode,
-   kind: OneShotRequestKind,
 ) -> String {
    format!(
-      "LLM query: {} \u{2192} {} ({}/{}, {}, {}, prompt ~{} tokens/{} chars, max {} output tokens)",
+      "LLM query: {} \u{2192} {} ({}/{}, {}, {}, prompt ~{} tokens/{} chars)",
       oneshot_progress_label(spec),
       spec.model,
       spec.prompt_family,
       spec.prompt_variant,
       api_mode_label(mode),
-      kind.progress_label(),
+      "tool call",
       format_count(estimate_prompt_text_tokens(spec)),
-      format_count(prompt_text_chars(spec)),
-      spec.max_tokens
+      format_count(prompt_text_chars(spec))
    )
 }
 
@@ -523,7 +469,6 @@ fn format_llm_cache_progress(spec: &OneShotSpec<'_>) -> String {
 enum OneShotRequestOutcome {
    Response { request_json: String, response_text: String },
    Retry,
-   FallbackToTool,
 }
 
 enum OneShotParseOutcome<T> {
@@ -534,7 +479,6 @@ enum OneShotParseOutcome<T> {
 
 fn save_oneshot_debug<T: Serialize>(
    debug: Option<OneShotDebug<'_>>,
-   kind: OneShotRequestKind,
    phase: &str,
    value: &T,
 ) -> Result<()> {
@@ -544,7 +488,7 @@ fn save_oneshot_debug<T: Serialize>(
 
    let filename = debug_filename(
       debug.prefix,
-      &format!("{}_{}_{}.json", debug.name, kind.debug_label(), phase),
+      &format!("{}_{}.json", debug.name, phase),
    );
    let json = serde_json::to_string_pretty(value)?;
    save_debug_output(debug.dir, &filename, &json)
@@ -552,7 +496,6 @@ fn save_oneshot_debug<T: Serialize>(
 
 fn save_oneshot_debug_text(
    debug: Option<OneShotDebug<'_>>,
-   kind: OneShotRequestKind,
    phase: &str,
    text: &str,
 ) -> Result<()> {
@@ -562,7 +505,7 @@ fn save_oneshot_debug_text(
 
    let filename = debug_filename(
       debug.prefix,
-      &format!("{}_{}_{}.json", debug.name, kind.debug_label(), phase),
+      &format!("{}_{}.json", debug.name, phase),
    );
    save_debug_output(debug.dir, &filename, text)
 }
@@ -617,7 +560,6 @@ fn build_anthropic_tool(
    tool_description: &str,
    schema: &serde_json::Value,
    prompt_caching: bool,
-   kind: OneShotRequestKind,
 ) -> AnthropicTool {
    let mut tool = AnthropicTool {
       name:          tool_name.to_string(),
@@ -626,142 +568,11 @@ fn build_anthropic_tool(
       cache_control: None,
    };
 
-   if kind == OneShotRequestKind::ToolCalling && prompt_caching {
+   if prompt_caching {
       tool.cache_control = Some(prompt_cache_control());
    }
 
    tool
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StructuredOutputCapability {
-   Probing,
-   Supported,
-   Unsupported,
-}
-
-struct StructuredOutputCapabilityCache {
-   states:  Mutex<HashMap<String, StructuredOutputCapability>>,
-   condvar: Condvar,
-}
-
-static STRUCTURED_OUTPUT_CAPABILITIES: LazyLock<StructuredOutputCapabilityCache> =
-   LazyLock::new(|| StructuredOutputCapabilityCache {
-      states:  Mutex::new(HashMap::new()),
-      condvar: Condvar::new(),
-   });
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StructuredOutputAttempt {
-   Probe,
-   Supported,
-   SkipUnsupported,
-}
-
-fn structured_output_cache_key(
-   config: &CommitConfig,
-   model: &str,
-   mode: ResolvedApiMode,
-) -> String {
-   format!(
-      "{:?}:{}:{}",
-      mode,
-      config.api_base_url.trim().to_lowercase(),
-      model.trim().to_lowercase()
-   )
-}
-
-fn begin_structured_output_attempt(
-   config: &CommitConfig,
-   model: &str,
-   mode: ResolvedApiMode,
-) -> StructuredOutputAttempt {
-   let key = structured_output_cache_key(config, model, mode);
-
-   loop {
-      let mut states = STRUCTURED_OUTPUT_CAPABILITIES.states.lock();
-      match states.get(&key).copied() {
-         Some(StructuredOutputCapability::Unsupported) => {
-            return StructuredOutputAttempt::SkipUnsupported;
-         },
-         Some(StructuredOutputCapability::Supported) => {
-            return StructuredOutputAttempt::Supported;
-         },
-         Some(StructuredOutputCapability::Probing) => {
-            STRUCTURED_OUTPUT_CAPABILITIES.condvar.wait(&mut states);
-         },
-         None => {
-            states.insert(key.clone(), StructuredOutputCapability::Probing);
-            return StructuredOutputAttempt::Probe;
-         },
-      }
-   }
-}
-
-fn update_structured_output_capability(
-   config: &CommitConfig,
-   model: &str,
-   mode: ResolvedApiMode,
-   state: Option<StructuredOutputCapability>,
-) -> bool {
-   let key = structured_output_cache_key(config, model, mode);
-   let mut states = STRUCTURED_OUTPUT_CAPABILITIES.states.lock();
-   let previous = match state {
-      Some(state) => states.insert(key, state),
-      None => states.remove(&key),
-   };
-   STRUCTURED_OUTPUT_CAPABILITIES.condvar.notify_all();
-
-   matches!(state, Some(StructuredOutputCapability::Unsupported))
-      && previous != Some(StructuredOutputCapability::Unsupported)
-}
-
-fn is_official_anthropic_base_url(api_base_url: &str) -> bool {
-   api_base_url
-      .trim()
-      .to_lowercase()
-      .contains("api.anthropic.com")
-}
-
-fn is_anthropic_model(model: &str) -> bool {
-   let lower = model.trim().to_lowercase();
-   lower.starts_with("claude")
-      || lower.starts_with("anthropic/")
-      || lower.contains("/claude")
-      || lower.contains("anthropic.claude")
-}
-
-fn prefers_tool_calling_over_structured_output(model: &str) -> bool {
-   let lower = model.trim().to_lowercase();
-   lower.contains("codex-spark")
-}
-
-fn should_attempt_structured_output(config: &CommitConfig, model: &str) -> bool {
-   if prefers_tool_calling_over_structured_output(model) {
-      return false;
-   }
-
-   !is_anthropic_model(model) || is_official_anthropic_base_url(&config.api_base_url)
-}
-
-fn should_fallback_to_tool(status: reqwest::StatusCode, body: &str) -> bool {
-   if matches!(status.as_u16(), 401 | 403 | 429) {
-      return false;
-   }
-
-   let lower = body.to_lowercase();
-   [
-      "response_format",
-      "output_format",
-      "output_config",
-      "structured output",
-      "structured_outputs",
-      "json_schema",
-      "responsejsonschema",
-      "response schema",
-   ]
-   .iter()
-   .any(|needle| lower.contains(needle))
 }
 
 fn is_context_length_error(body: &str) -> bool {
@@ -783,13 +594,11 @@ async fn send_oneshot_request(
    config: &CommitConfig,
    spec: &OneShotSpec<'_>,
    mode: ResolvedApiMode,
-   kind: OneShotRequestKind,
    capture_request: bool,
 ) -> Result<OneShotRequestOutcome> {
-   print_llm_progress(|| format_llm_query_progress(spec, mode, kind));
+   print_llm_progress(|| format_llm_query_progress(spec, mode));
    match mode {
       ResolvedApiMode::ChatCompletions => {
-         let tool = build_openai_tool(spec.tool_name, spec.tool_description, spec.schema)?;
          let prompt_cache_key = openai_prompt_cache_key(
             config,
             spec.model,
@@ -807,24 +616,24 @@ async fn send_oneshot_request(
          messages
             .push(Message { role: "user".to_string(), content: spec.user_prompt.to_string() });
 
+         // In markdown mode, omit the tool entirely so the model emits plain
+         // markdown text (parsed by the markdown fallback) instead of a tool call.
+         let (tools, tool_choice) = if config.markdown_output {
+            (vec![], None)
+         } else {
+            let tool = build_openai_tool(spec.tool_name, spec.tool_description, spec.schema)?;
+            (vec![tool], Some(serde_json::json!("required")))
+         };
+
          let request = ApiRequest {
             model: spec.model.to_string(),
-            max_tokens: spec.max_tokens,
-            temperature: spec.temperature,
-            tools: if kind == OneShotRequestKind::ToolCalling {
-               vec![tool]
-            } else {
-               Vec::new()
-            },
-            tool_choice: (kind == OneShotRequestKind::ToolCalling)
-               .then(|| serde_json::json!("required")),
-            response_format: (kind == OneShotRequestKind::StructuredOutput)
-               .then(|| openai_response_format(spec.tool_name, spec.schema.clone())),
+            tools,
+            tool_choice,
             prompt_cache_key,
             messages,
          };
 
-         save_oneshot_debug(spec.debug, kind, "request", &request)?;
+         save_oneshot_debug(spec.debug, "request", &request)?;
 
          let client = get_client(config);
          let mut request_builder = client
@@ -846,7 +655,7 @@ async fn send_oneshot_request(
          print_llm_progress(|| {
             format_llm_response_progress(spec, status, request_start.elapsed(), response_text.len())
          });
-         save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
+         save_oneshot_debug_text(spec.debug, "response", &response_text)?;
          if !status.is_success() && is_context_length_error(&response_text) {
             return Err(CommitGenError::ApiContextLengthExceeded {
                operation: spec.operation.to_string(),
@@ -857,16 +666,6 @@ async fn send_oneshot_request(
          }
 
          if status.is_server_error() {
-            if kind == OneShotRequestKind::StructuredOutput
-               && should_fallback_to_tool(status, &response_text)
-            {
-               crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
-                   calling.",
-                  spec.operation, status
-               ));
-               return Ok(OneShotRequestOutcome::FallbackToTool);
-            }
             eprintln!(
                "{}",
                crate::style::error(&format!("Server error {status}: {response_text}"))
@@ -875,16 +674,6 @@ async fn send_oneshot_request(
          }
 
          if !status.is_success() {
-            if kind == OneShotRequestKind::StructuredOutput
-               && should_fallback_to_tool(status, &response_text)
-            {
-               crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
-                   calling.",
-                  spec.operation, status
-               ));
-               return Ok(OneShotRequestOutcome::FallbackToTool);
-            }
             return Err(CommitGenError::ApiError {
                status: status.as_u16(),
                body:   response_text,
@@ -903,36 +692,39 @@ async fn send_oneshot_request(
       },
       ResolvedApiMode::AnthropicMessages => {
          let prompt_caching = anthropic_prompt_caching_enabled(config);
-         let tools = if kind == OneShotRequestKind::ToolCalling {
-            vec![build_anthropic_tool(
-               spec.tool_name,
-               spec.tool_description,
-               spec.schema,
-               prompt_caching,
-               kind,
-            )]
+         // In markdown mode, omit the tool so the model emits plain markdown text.
+         let (tools, tool_choice) = if config.markdown_output {
+            (vec![], None)
          } else {
-            Vec::new()
+            (
+               vec![build_anthropic_tool(
+                  spec.tool_name,
+                  spec.tool_description,
+                  spec.schema,
+                  prompt_caching,
+               )],
+               Some(AnthropicToolChoice {
+                  choice_type: "tool".to_string(),
+                  name:        spec.tool_name.to_string(),
+               }),
+            )
          };
+         // The Anthropic Messages API requires max_tokens to be sent in the request.
+         // The user requested sending 16384 for Anthropic calls.
+         const ANTHROPIC_REQUIRED_MAX_TOKENS: u32 = 16384;
          let request = AnthropicRequest {
             model: spec.model.to_string(),
-            max_tokens: spec.max_tokens,
-            temperature: spec.temperature,
+            max_tokens: ANTHROPIC_REQUIRED_MAX_TOKENS,
             system: anthropic_system_content(spec.system_prompt, prompt_caching),
             tools,
-            tool_choice: (kind == OneShotRequestKind::ToolCalling).then(|| AnthropicToolChoice {
-               choice_type: "tool".to_string(),
-               name:        spec.tool_name.to_string(),
-            }),
-            output_format: (kind == OneShotRequestKind::StructuredOutput)
-               .then(|| anthropic_output_format(spec.schema.clone())),
+            tool_choice,
             messages: vec![AnthropicMessage {
                role:    "user".to_string(),
                content: vec![anthropic_text_content(spec.user_prompt.to_string(), false)],
             }],
          };
 
-         save_oneshot_debug(spec.debug, kind, "request", &request)?;
+         save_oneshot_debug(spec.debug, "request", &request)?;
 
          let client = get_client(config);
          let mut request_builder = append_anthropic_cache_beta_header(
@@ -958,7 +750,7 @@ async fn send_oneshot_request(
          print_llm_progress(|| {
             format_llm_response_progress(spec, status, request_start.elapsed(), response_text.len())
          });
-         save_oneshot_debug_text(spec.debug, kind, "response", &response_text)?;
+         save_oneshot_debug_text(spec.debug, "response", &response_text)?;
          if !status.is_success() && is_context_length_error(&response_text) {
             return Err(CommitGenError::ApiContextLengthExceeded {
                operation: spec.operation.to_string(),
@@ -969,16 +761,6 @@ async fn send_oneshot_request(
          }
 
          if status.is_server_error() {
-            if kind == OneShotRequestKind::StructuredOutput
-               && should_fallback_to_tool(status, &response_text)
-            {
-               crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
-                   calling.",
-                  spec.operation, status
-               ));
-               return Ok(OneShotRequestOutcome::FallbackToTool);
-            }
             eprintln!(
                "{}",
                crate::style::error(&format!("Server error {status}: {response_text}"))
@@ -987,16 +769,6 @@ async fn send_oneshot_request(
          }
 
          if !status.is_success() {
-            if kind == OneShotRequestKind::StructuredOutput
-               && should_fallback_to_tool(status, &response_text)
-            {
-               crate::style::warn(&format!(
-                  "Structured output request failed for {} (HTTP {}). Falling back to tool \
-                   calling.",
-                  spec.operation, status
-               ));
-               return Ok(OneShotRequestOutcome::FallbackToTool);
-            }
             return Err(CommitGenError::ApiError {
                status: status.as_u16(),
                body:   response_text,
@@ -1044,15 +816,33 @@ fn normalize_plain_text_content(content: &str) -> String {
 fn parse_plain_text_output<T: DeserializeOwned>(
    tool_name: &str,
    content: &str,
+   markdown_mode: bool,
 ) -> Result<Option<T>> {
    let trimmed = normalize_plain_text_content(content);
    if trimmed.is_empty() {
       return Ok(None);
    }
 
-   let value = match tool_name {
-      "create_commit_summary" => serde_json::json!({ "summary": trimmed }),
-      _ => return Ok(None),
+   let value = if markdown_mode {
+      // Try markdown parsing for all tool names in markdown mode
+      match tool_name {
+         "create_conventional_analysis" => {
+            crate::markdown_output::parse_conventional_analysis(&trimmed)
+         },
+         "create_commit_summary" => crate::markdown_output::parse_summary_output(&trimmed),
+         "create_changelog_entries" => crate::markdown_output::parse_changelog_response(&trimmed),
+         "create_compose_intent_plan" => crate::markdown_output::parse_compose_intent(&trimmed),
+         "bind_compose_hunks" => crate::markdown_output::parse_compose_binding(&trimmed),
+         "create_fast_commit" => crate::markdown_output::parse_conventional_analysis(&trimmed),
+         "create_file_observations" => crate::markdown_output::parse_batch_observations(&trimmed),
+         _ => return Ok(None),
+      }?
+   } else {
+      // Original JSON-wrapping behavior for backward compat
+      match tool_name {
+         "create_commit_summary" => serde_json::json!({ "summary": trimmed }),
+         _ => return Ok(None),
+      }
    };
 
    serde_json::from_value(value).map(Some).map_err(|e| {
@@ -1109,10 +899,10 @@ fn extract_anthropic_content(
 
 fn parse_oneshot_response<T: DeserializeOwned>(
    mode: ResolvedApiMode,
-   kind: OneShotRequestKind,
    tool_name: &str,
    operation: &str,
    response_text: &str,
+   markdown_mode: bool,
 ) -> OneShotParseOutcome<T> {
    match mode {
       ResolvedApiMode::ChatCompletions => {
@@ -1178,12 +968,12 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                Ok(output) => {
                   return OneShotParseOutcome::Success(OneShotResponse {
                      output,
-                     source: kind.content_source(),
+                     source: OneShotSource::OutputJsonParse,
                      text_content: Some(content.clone()),
                      stop_reason: None,
                   });
                },
-               Err(err) => match parse_plain_text_output::<T>(tool_name, content) {
+               Err(err) => match parse_plain_text_output::<T>(tool_name, content, markdown_mode) {
                   Ok(Some(output)) => {
                      return OneShotParseOutcome::Success(OneShotResponse {
                         output,
@@ -1237,11 +1027,11 @@ fn parse_oneshot_response<T: DeserializeOwned>(
          match parse_json_output::<T>(&text_content, &format!("{operation} content JSON")) {
             Ok(output) => OneShotParseOutcome::Success(OneShotResponse {
                output,
-               source: kind.content_source(),
+               source: OneShotSource::OutputJsonParse,
                text_content: Some(text_content),
                stop_reason,
             }),
-            Err(err) => match parse_plain_text_output::<T>(tool_name, &text_content) {
+            Err(err) => match parse_plain_text_output::<T>(tool_name, &text_content, markdown_mode) {
                Ok(Some(output)) => OneShotParseOutcome::Success(OneShotResponse {
                   output,
                   source: OneShotSource::PlainTextContent,
@@ -1284,112 +1074,11 @@ where
    let (response, request_json): (OneShotResponse<T>, Option<String>) =
       retry_api_call(config, async move || {
          let mode = config.resolved_api_mode(spec.model);
-         let structured_attempt = if should_attempt_structured_output(config, spec.model) {
-            begin_structured_output_attempt(config, spec.model, mode)
-         } else {
-            StructuredOutputAttempt::SkipUnsupported
-         };
-
-         let structured_result = match structured_attempt {
-            StructuredOutputAttempt::SkipUnsupported => None,
-            StructuredOutputAttempt::Probe | StructuredOutputAttempt::Supported => {
-               let request_result = send_oneshot_request(
-                  config,
-                  spec,
-                  mode,
-                  OneShotRequestKind::StructuredOutput,
-                  capture_request,
-               )
-               .await;
-               let request_outcome = match request_result {
-                  Ok(outcome) => outcome,
-                  Err(err) => {
-                     if structured_attempt == StructuredOutputAttempt::Probe {
-                        let _ = update_structured_output_capability(config, spec.model, mode, None);
-                     }
-                     return Err(err);
-                  },
-               };
-
-               match request_outcome {
-                  OneShotRequestOutcome::Response { request_json, response_text } => {
-                     if structured_attempt == StructuredOutputAttempt::Probe {
-                        let _ = update_structured_output_capability(
-                           config,
-                           spec.model,
-                           mode,
-                           Some(StructuredOutputCapability::Supported),
-                        );
-                     }
-                     Some((request_json, response_text))
-                  },
-                  OneShotRequestOutcome::Retry => {
-                     if structured_attempt == StructuredOutputAttempt::Probe {
-                        let _ = update_structured_output_capability(config, spec.model, mode, None);
-                     }
-                     return Ok((true, None));
-                  },
-                  OneShotRequestOutcome::FallbackToTool => {
-                     let first_detection = update_structured_output_capability(
-                        config,
-                        spec.model,
-                        mode,
-                        Some(StructuredOutputCapability::Unsupported),
-                     );
-                     if first_detection {
-                        crate::style::warn(&format!(
-                           "Structured outputs unsupported for model {}. Using tool calling for \
-                            the remainder of this run.",
-                           spec.model
-                        ));
-                     }
-                     None
-                  },
-               }
-            },
-         };
-
-         if let Some((request_json, response_text)) = structured_result {
-            match parse_oneshot_response::<T>(
-               mode,
-               OneShotRequestKind::StructuredOutput,
-               spec.tool_name,
-               spec.operation,
-               &response_text,
-            ) {
-               OneShotParseOutcome::Success(output) => {
-                  if output.source == OneShotSource::PlainTextContent {
-                     let first_detection = update_structured_output_capability(
-                        config,
-                        spec.model,
-                        mode,
-                        Some(StructuredOutputCapability::Unsupported),
-                     );
-                     if first_detection {
-                        crate::style::warn(&format!(
-                           "Structured outputs unsupported for model {}. Using tool calling for \
-                            the remainder of this run.",
-                           spec.model
-                        ));
-                     }
-                  }
-                  return Ok((false, Some((output, Some(request_json)))));
-               },
-               OneShotParseOutcome::Retry => return Ok((true, None)),
-               OneShotParseOutcome::Fatal(err) => {
-                  crate::style::warn(&format!(
-                     "Structured output parse failed for {}. Falling back to tool calling: {}",
-                     spec.operation, err
-                  ));
-               },
-            }
-         }
 
          let (request_json, response_text) = match send_oneshot_request(
             config,
             spec,
             mode,
-            OneShotRequestKind::ToolCalling,
             capture_request,
          )
          .await?
@@ -1398,20 +1087,14 @@ where
                (request_json, response_text)
             },
             OneShotRequestOutcome::Retry => return Ok((true, None)),
-            OneShotRequestOutcome::FallbackToTool => {
-               return Err(CommitGenError::Other(format!(
-                  "Tool-calling fallback recursively requested for {}",
-                  spec.operation
-               )));
-            },
          };
 
          match parse_oneshot_response::<T>(
             mode,
-            OneShotRequestKind::ToolCalling,
             spec.tool_name,
             spec.operation,
             &response_text,
+            config.markdown_output,
          ) {
             OneShotParseOutcome::Success(output) => Ok((false, Some((output, Some(request_json))))),
             OneShotParseOutcome::Retry => Ok((true, None)),
@@ -1450,8 +1133,6 @@ fn build_cache_entry(
       system_prompt: spec.system_prompt,
       user_prompt: spec.user_prompt,
       schema: spec.schema,
-      temperature: spec.temperature,
-      max_tokens: spec.max_tokens,
       api_mode,
    });
    Some((cache, key))
@@ -1488,14 +1169,10 @@ struct Tool {
 #[derive(Debug, Serialize)]
 struct ApiRequest {
    model:            String,
-   max_tokens:       u32,
-   temperature:      f32,
    #[serde(skip_serializing_if = "Vec::is_empty")]
    tools:            Vec<Tool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice:      Option<serde_json::Value>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   response_format:  Option<serde_json::Value>,
    #[serde(skip_serializing_if = "Option::is_none")]
    prompt_cache_key: Option<String>,
    messages:         Vec<Message>,
@@ -1505,15 +1182,12 @@ struct ApiRequest {
 struct AnthropicRequest {
    model:         String,
    max_tokens:    u32,
-   temperature:   f32,
    #[serde(skip_serializing_if = "Option::is_none")]
    system:        Option<Vec<AnthropicContent>>,
    #[serde(skip_serializing_if = "Vec::is_empty")]
    tools:         Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
    tool_choice:   Option<AnthropicToolChoice>,
-   #[serde(skip_serializing_if = "Option::is_none")]
-   output_format: Option<serde_json::Value>,
    messages:      Vec<AnthropicMessage>,
 }
 
@@ -1783,9 +1457,15 @@ pub async fn generate_conventional_analysis<'a>(
       &["type", "summary", "details", "issue_refs"],
    );
 
+   let prompt_variant = if config.markdown_output {
+      "markdown"
+   } else {
+      &config.analysis_prompt_variant
+   };
+
    let types_desc = format_types_description(config);
    let parts = templates::render_analysis_prompt(&templates::AnalysisParams {
-      variant: &config.analysis_prompt_variant,
+      variant: prompt_variant,
       stat,
       diff,
       scope_candidates: scope_candidates_str,
@@ -1804,10 +1484,8 @@ pub async fn generate_conventional_analysis<'a>(
    let response = run_oneshot::<ConventionalAnalysis>(config, &OneShotSpec {
       operation:        "analysis",
       model:            model_name,
-      max_tokens:       1200,
-      temperature:      config.temperature,
       prompt_family:    "analysis",
-      prompt_variant:   &config.analysis_prompt_variant,
+      prompt_variant,
       system_prompt:    &parts.system,
       user_prompt:      &user_prompt,
       tool_name:        "create_conventional_analysis",
@@ -1831,19 +1509,49 @@ pub async fn generate_conventional_analysis<'a>(
 ///
 /// Some models return the full format `feat(scope): summary` instead of just
 /// `summary`. This function removes the prefix to normalize the response.
+///
+/// Tries the exact `type(scope): ` prefix first, then `type: ` (no scope),
+/// then a generic `type(any-scope): ` pattern. All comparisons are
+/// case-insensitive on the type token so `Fix(tui):` / `Feat: ` are stripped
+/// too.
 pub fn strip_type_prefix(summary: &str, commit_type: &str, scope: Option<&str>) -> String {
    let scope_part = scope.map(|s| format!("({s})")).unwrap_or_default();
    let prefix = format!("{commit_type}{scope_part}: ");
 
-   summary
-      .strip_prefix(&prefix)
-      .or_else(|| {
-         // Also try without scope in case model omitted it
-         let prefix_no_scope = format!("{commit_type}: ");
-         summary.strip_prefix(&prefix_no_scope)
-      })
-      .unwrap_or(summary)
-      .to_string()
+   if let Some(stripped) = summary.strip_prefix(&prefix) {
+      return stripped.to_string();
+   }
+
+   // Try without scope in case model omitted it
+   let prefix_no_scope = format!("{commit_type}: ");
+   if let Some(stripped) = summary.strip_prefix(&prefix_no_scope) {
+      return stripped.to_string();
+   }
+
+   // Case-insensitive fallbacks: models sometimes emit `Fix(tui):` or
+   // `Feat: `. Check if the summary starts with the type token (ignoring
+   // case) followed by `(` or `:`.
+   let summary_lower = summary.to_ascii_lowercase();
+   let commit_lower = commit_type.to_ascii_lowercase();
+
+   // Generic `type(any-scope): ` — model emits a different scope than parsed.
+   let generic_prefix = format!("{commit_lower}(");
+   if let Some(after_type) = summary_lower.strip_prefix(&generic_prefix) {
+      if let Some(close) = after_type.find("): ") {
+         return summary[commit_type.len() + 1 + close + 3..].to_string();
+      }
+      if let Some(close) = after_type.find("):") {
+         return summary[commit_type.len() + 1 + close + 2..].trim_start().to_string();
+      }
+   }
+
+   // Case-insensitive `type: ` (no scope)
+   let prefix_no_scope_lower = format!("{commit_lower}: ");
+   if summary_lower.starts_with(&prefix_no_scope_lower) {
+      return summary[commit_type.len() + 2..].to_string();
+   }
+
+   summary.to_string()
 }
 
 /// Build a commit summary from the holistic analysis response when present.
@@ -1878,7 +1586,7 @@ fn validate_summary_quality(
    commit_type: &str,
    stat: &str,
 ) -> std::result::Result<(), String> {
-   use crate::validation::is_past_tense_verb;
+   use crate::validation::is_past_tense_first_word;
 
    let first_word = summary
       .split_whitespace()
@@ -1887,8 +1595,9 @@ fn validate_summary_quality(
 
    let first_word_lower = first_word.to_lowercase();
 
-   // Check past-tense verb
-   if !is_past_tense_verb(&first_word_lower) {
+   // Check past-tense verb (tolerates trailing non-alpha suffixes like
+   // `bound-check`, and all-caps acronyms are rejected).
+   if !is_past_tense_first_word(first_word) {
       return Err(format!(
          "must start with past-tense verb (ending in -ed/-d or irregular), got '{first_word}'"
       ));
@@ -2008,8 +1717,10 @@ pub async fn generate_summary_from_analysis<'a>(
          commit_type.len() + 2 + scope_str.len() + if scope_str.is_empty() { 0 } else { 2 };
       let max_summary_len = config.summary_guideline.saturating_sub(prefix_len);
 
+      let summary_variant = if config.markdown_output { "markdown" } else { &config.summary_prompt_variant };
+
       let parts = templates::render_summary_prompt(
-         &config.summary_prompt_variant,
+         summary_variant,
          commit_type,
          scope_str,
          &max_summary_len.to_string(),
@@ -2037,10 +1748,8 @@ pub async fn generate_summary_from_analysis<'a>(
       let response = run_oneshot::<SummaryOutput>(config, &OneShotSpec {
          operation:        "summary",
          model:            &config.summary_model,
-         max_tokens:       200,
-         temperature:      config.temperature,
          prompt_family:    "summary",
-         prompt_variant:   &config.summary_prompt_variant,
+         prompt_variant:   summary_variant,
          system_prompt:    &parts.system,
          user_prompt:      &user_prompt,
          tool_name:        "create_commit_summary",
@@ -2059,7 +1768,11 @@ pub async fn generate_summary_from_analysis<'a>(
       match response {
          Ok(response) => {
             let cleaned = strip_type_prefix(&response.output.summary, commit_type, scope);
-            let summary = CommitSummary::new(cleaned, config.summary_hard_limit)?;
+            // Normalize present->past tense before validation so Gemini
+            // summaries like "harden ..." get converted to "hardened ...".
+            let mut normalized = cleaned;
+            crate::normalization::normalize_summary_verb(&mut normalized, commit_type);
+            let summary = CommitSummary::new(&normalized, config.summary_hard_limit)?;
 
             match validate_summary_quality(summary.as_str(), commit_type, stat) {
                Ok(()) => return Ok(summary),
@@ -2139,7 +1852,7 @@ fn fallback_from_details_or_summary(
    let with_verb = if candidate
       .split_whitespace()
       .next()
-      .is_some_and(|w| crate::validation::is_past_tense_verb(&w.to_lowercase()))
+      .is_some_and(crate::validation::is_past_tense_first_word)
    {
       candidate
    } else {
@@ -2329,8 +2042,6 @@ pub async fn generate_fast_commit(
    let response = run_oneshot::<FastCommitOutput>(config, &OneShotSpec {
       operation:        "fast",
       model:            model_name,
-      max_tokens:       500,
-      temperature:      config.temperature,
       prompt_family:    "fast",
       prompt_variant:   "default",
       system_prompt:    &parts.system,
@@ -2354,7 +2065,12 @@ fn build_fast_commit(
 ) -> Result<ConventionalCommit> {
    let commit_type = CommitType::new(&output.commit_type)?;
    let scope = coerce_optional_scope(output.scope.as_deref());
-   let summary = CommitSummary::new(&output.summary, config.summary_hard_limit)?;
+   let cleaned_summary = strip_type_prefix(
+      &output.summary,
+      commit_type.as_str(),
+      scope.as_ref().map(|s| s.as_str()),
+   );
+   let summary = CommitSummary::new(&cleaned_summary, config.summary_hard_limit)?;
    Ok(ConventionalCommit { commit_type, scope, summary, body: output.details, footers: vec![] })
 }
 #[cfg(test)]
@@ -2363,24 +2079,61 @@ mod tests {
    use crate::config::CommitConfig;
 
    #[test]
+   fn test_strip_type_prefix_exact_scope() {
+      assert_eq!(strip_type_prefix("fix(api): fixed bug", "fix", Some("api")), "fixed bug");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_no_scope() {
+      assert_eq!(strip_type_prefix("fix: fixed bug", "fix", None), "fixed bug");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_different_scope() {
+      // Model emits scope we didn't parse (e.g. scope is None but model wrote fix(tui):)
+      assert_eq!(strip_type_prefix("fix(tui): fixed bug", "fix", None), "fixed bug");
+      // Model emits different scope than parsed
+      assert_eq!(strip_type_prefix("fix(tui): fixed bug", "fix", Some("api")), "fixed bug");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_no_prefix() {
+      // No prefix present — should return unchanged
+      assert_eq!(strip_type_prefix("fixed bug", "fix", None), "fixed bug");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_wrong_type_not_stripped() {
+      // Should not strip a prefix with a different type
+      assert_eq!(strip_type_prefix("feat(api): added feature", "fix", None), "feat(api): added feature");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_capitalized_type_with_scope() {
+      // Model emits `Fix(tui):` with capital F
+      assert_eq!(strip_type_prefix("Fix(tui): fixed bug", "fix", None), "fixed bug");
+      assert_eq!(strip_type_prefix("Fix(tui): fixed bug", "fix", Some("api")), "fixed bug");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_capitalized_type_no_scope() {
+      // Model emits `Feat: ` with capital F
+      assert_eq!(strip_type_prefix("Feat: added feature", "feat", None), "added feature");
+   }
+
+   #[test]
+   fn test_strip_type_prefix_uppercase_type() {
+      // Model emits `FIX(api):` all caps
+      assert_eq!(strip_type_prefix("FIX(api): fixed bug", "fix", Some("api")), "fixed bug");
+   }
+
+   #[test]
    fn test_strict_json_schema_disallows_extra_properties() {
       let schema =
          strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
       assert_eq!(schema["type"], "object");
       assert_eq!(schema["required"], serde_json::json!(["summary"]));
       assert_eq!(schema["additionalProperties"], serde_json::json!(false));
-   }
-
-   #[test]
-   fn test_openai_response_format_uses_strict_json_schema() {
-      let schema =
-         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
-      let response_format = openai_response_format("commit_summary", schema.clone());
-
-      assert_eq!(response_format["type"], "json_schema");
-      assert_eq!(response_format["json_schema"]["name"], "commit_summary");
-      assert_eq!(response_format["json_schema"]["strict"], serde_json::json!(true));
-      assert_eq!(response_format["json_schema"]["schema"], schema);
    }
 
    #[test]
@@ -2397,14 +2150,38 @@ mod tests {
       assert!(env_flag_value_enabled(Some("anything")));
    }
    #[test]
+   fn test_request_serialization() {
+      let api_req = ApiRequest {
+         model: "test-model".to_string(),
+         tools: vec![],
+         tool_choice: None,
+         prompt_cache_key: None,
+         messages: vec![],
+      };
+      let api_json = serde_json::to_string(&api_req).unwrap();
+      assert!(!api_json.contains("max_tokens"));
+      assert!(!api_json.contains("temperature"));
+
+      let anthropic_req = AnthropicRequest {
+         model: "test-model".to_string(),
+         max_tokens: 16384,
+         system: None,
+         tools: vec![],
+         tool_choice: None,
+         messages: vec![],
+      };
+      let anthropic_json = serde_json::to_string(&anthropic_req).unwrap();
+      assert!(anthropic_json.contains("\"max_tokens\":16384"));
+      assert!(!anthropic_json.contains("temperature"));
+   }
+
+   #[test]
    fn test_format_llm_progress_uses_operation_label_and_request_shape() {
       let schema =
          strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
       let spec = OneShotSpec {
          operation:        "map-reduce/map",
          model:            "claude-sonnet-4.5",
-         max_tokens:       1500,
-         temperature:      0.0,
          prompt_family:    "map",
          prompt_variant:   "default",
          system_prompt:    "system",
@@ -2418,13 +2195,9 @@ mod tests {
       };
 
       assert_eq!(
-         format_llm_query_progress(
-            &spec,
-            ResolvedApiMode::ChatCompletions,
-            OneShotRequestKind::ToolCalling
-         ),
+         format_llm_query_progress(&spec, ResolvedApiMode::ChatCompletions),
          "LLM query: map file 2/5 src/lib.rs \u{2192} claude-sonnet-4.5 (map/default, chat \
-          completions, tool call, prompt ~3 tokens/10 chars, max 1500 output tokens)"
+          completions, tool call, prompt ~3 tokens/10 chars)"
       );
       assert_eq!(
          format_llm_response_progress(
@@ -2473,7 +2246,7 @@ mod tests {
    }
 
    #[tokio::test]
-   async fn test_context_length_error_clears_structured_output_probe() {
+   async fn test_run_oneshot_returns_context_length_error() {
       let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
       let addr = listener.local_addr().unwrap();
       let server = std::thread::spawn(move || {
@@ -2505,8 +2278,6 @@ mod tests {
       let result = run_oneshot::<SummaryOutput>(&config, &OneShotSpec {
          operation: "summary",
          model,
-         max_tokens: 32,
-         temperature: 0.0,
          prompt_family: "summary",
          prompt_variant: "default",
          system_prompt: "Summarize.",
@@ -2519,28 +2290,9 @@ mod tests {
          cacheable: false,
       })
       .await;
+      assert!(result.is_err());
 
       server.join().unwrap();
-      assert!(matches!(result, Err(CommitGenError::ApiContextLengthExceeded { .. })));
-
-      let mode = config.resolved_api_mode(model);
-      let key = structured_output_cache_key(&config, model, mode);
-      assert!(
-         !STRUCTURED_OUTPUT_CAPABILITIES
-            .states
-            .lock()
-            .contains_key(&key)
-      );
-   }
-
-   #[test]
-   fn test_anthropic_output_format_wraps_schema() {
-      let schema =
-         strict_json_schema(serde_json::json!({ "summary": { "type": "string" } }), &["summary"]);
-      let output_format = anthropic_output_format(schema.clone());
-
-      assert_eq!(output_format["type"], "json_schema");
-      assert_eq!(output_format["schema"], schema);
    }
 
    #[test]
@@ -2552,18 +2304,6 @@ mod tests {
 ```
 "#;
       assert_eq!(extract_json_from_content(content), r#"{"summary":"added support"}"#);
-   }
-
-   #[test]
-   fn test_should_fallback_to_tool_for_structured_output_errors() {
-      assert!(should_fallback_to_tool(
-         reqwest::StatusCode::BAD_REQUEST,
-         "Unknown parameter: response_format",
-      ));
-      assert!(!should_fallback_to_tool(
-         reqwest::StatusCode::UNAUTHORIZED,
-         "Unknown parameter: response_format",
-      ));
    }
 
    #[test]
@@ -2602,101 +2342,6 @@ mod tests {
    }
 
    #[test]
-   fn test_is_anthropic_model_recognizes_common_names() {
-      assert!(is_anthropic_model("claude-haiku-4-5"));
-      assert!(is_anthropic_model("anthropic/claude-sonnet-4.5"));
-      assert!(is_anthropic_model("bedrock/anthropic.claude-3-5-sonnet"));
-      assert!(!is_anthropic_model("gpt-4o-mini"));
-   }
-
-   #[test]
-   fn test_should_attempt_structured_output_skips_claude_on_unofficial_base() {
-      let config = CommitConfig::default();
-      assert!(!should_attempt_structured_output(&config, "claude-haiku-4-5"));
-      assert!(should_attempt_structured_output(&config, "gpt-4o-mini"));
-   }
-
-   #[test]
-   fn test_should_attempt_structured_output_skips_codex_spark_models() {
-      let config = CommitConfig::default();
-      assert!(!should_attempt_structured_output(&config, "gpt-5.3-codex-spark"));
-      assert!(!should_attempt_structured_output(&config, "openai/gpt-5.3-codex-spark",));
-   }
-
-   #[test]
-   fn test_should_attempt_structured_output_allows_claude_on_official_anthropic_base() {
-      let config = CommitConfig {
-         api_base_url: "https://api.anthropic.com/v1".to_string(),
-         ..CommitConfig::default()
-      };
-      assert!(should_attempt_structured_output(&config, "claude-haiku-4-5"));
-   }
-
-   #[test]
-   fn test_structured_output_capability_cache_skips_after_unsupported() {
-      let config = CommitConfig::default();
-      let mode = ResolvedApiMode::ChatCompletions;
-      let model = "test-structured-skip-after-unsupported";
-
-      assert_eq!(
-         begin_structured_output_attempt(&config, model, mode),
-         StructuredOutputAttempt::Probe
-      );
-      assert!(update_structured_output_capability(
-         &config,
-         model,
-         mode,
-         Some(StructuredOutputCapability::Unsupported),
-      ));
-      assert_eq!(
-         begin_structured_output_attempt(&config, model, mode),
-         StructuredOutputAttempt::SkipUnsupported
-      );
-   }
-
-   #[test]
-   fn test_structured_output_capability_cache_remembers_supported() {
-      let config = CommitConfig::default();
-      let mode = ResolvedApiMode::ChatCompletions;
-      let model = "test-structured-remembers-supported";
-
-      assert_eq!(
-         begin_structured_output_attempt(&config, model, mode),
-         StructuredOutputAttempt::Probe
-      );
-      assert!(!update_structured_output_capability(
-         &config,
-         model,
-         mode,
-         Some(StructuredOutputCapability::Supported),
-      ));
-      assert_eq!(
-         begin_structured_output_attempt(&config, model, mode),
-         StructuredOutputAttempt::Supported
-      );
-   }
-
-   #[test]
-   fn test_structured_output_capability_cache_is_mode_scoped() {
-      let config = CommitConfig::default();
-      let model = "test-structured-mode-scoped";
-      assert_eq!(
-         begin_structured_output_attempt(&config, model, ResolvedApiMode::ChatCompletions,),
-         StructuredOutputAttempt::Probe
-      );
-      assert!(update_structured_output_capability(
-         &config,
-         model,
-         ResolvedApiMode::ChatCompletions,
-         Some(StructuredOutputCapability::Unsupported),
-      ));
-      assert_eq!(
-         begin_structured_output_attempt(&config, model, ResolvedApiMode::AnthropicMessages,),
-         StructuredOutputAttempt::Probe
-      );
-   }
-
-   #[test]
    fn test_parse_oneshot_response_prefers_tool_payload() {
       let response_text = serde_json::json!({
          "choices": [{
@@ -2715,10 +2360,10 @@ mod tests {
 
       let result = parse_oneshot_response::<SummaryOutput>(
          ResolvedApiMode::ChatCompletions,
-         OneShotRequestKind::ToolCalling,
          "create_commit_summary",
          "summary",
          &response_text,
+         false,
       );
 
       match result {
@@ -2750,10 +2395,10 @@ mod tests {
 
       let result = parse_oneshot_response::<SummaryOutput>(
          ResolvedApiMode::ChatCompletions,
-         OneShotRequestKind::ToolCalling,
          "create_commit_summary",
          "summary",
          &response_text,
+         false,
       );
 
       match result {
@@ -2779,10 +2424,10 @@ mod tests {
 
       let result = parse_oneshot_response::<SummaryOutput>(
          ResolvedApiMode::ChatCompletions,
-         OneShotRequestKind::ToolCalling,
          "create_commit_summary",
          "summary",
          &response_text,
+         false,
       );
 
       match result {
