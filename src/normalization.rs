@@ -240,8 +240,8 @@ pub fn normalize_summary_verb(summary: &mut String, commit_type: &str) {
    // Skip tokens that aren't convertible verbs:
    //  - all-caps acronyms (API, NFC, LSP)
    //  - numeric-led tokens (403, v1.0, 2.0.0)
-   //  - tokens whose suffix isn't a simple dash/slash separator (e.g.
-   //    `fix(tui):` is a leaked type prefix, not a verb to convert)
+   //  - tokens whose suffix isn't a simple dash/slash separator (e.g. `fix(tui):`
+   //    is a leaked type prefix, not a verb to convert)
    let Some((stem_raw, suffix)) = split_verb_token(&first_word) else {
       return;
    };
@@ -281,7 +281,9 @@ pub fn normalize_summary_verb(summary: &mut String, commit_type: &str) {
             .or_else(|| inner.strip_suffix('s').and_then(|s| present_to_past(s)))
             .or_else(|| inner.strip_suffix("es").and_then(|s| present_to_past(s)))
             .or_else(|| {
-               inner.strip_suffix("ies").and_then(|s| present_to_past(&format!("{s}y")))
+               inner
+                  .strip_suffix("ies")
+                  .and_then(|s| present_to_past(&format!("{s}y")))
             })
             .map(|p| {
                if commit_type == "refactor" && p == "refactored" {
@@ -314,9 +316,9 @@ pub fn normalize_summary_verb(summary: &mut String, commit_type: &str) {
       })
       .or_else(|| {
          // -ies -> -y (simplifies -> simplify, applies -> apply).
-         stem.strip_suffix("ies").and_then(|s| {
-            present_to_past(&format!("{s}y"))
-         })
+         stem
+            .strip_suffix("ies")
+            .and_then(|s| present_to_past(&format!("{s}y")))
       })
       .map(|p| {
          // Special case: refactor type shouldn't use "refactored"

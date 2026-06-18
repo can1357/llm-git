@@ -1788,7 +1788,11 @@ async fn analyze_compose_intent(
    let planning_notes = render_planning_notes(&planning_index);
    let split_bias = render_split_bias(&planning_index);
    let schema = build_intent_schema(config);
-   let variant = if config.markdown_output { "markdown" } else { "default" };
+   let variant = if config.markdown_output {
+      "markdown"
+   } else {
+      "default"
+   };
    let parts = templates::render_compose_intent_prompt(&templates::ComposeIntentPromptParams {
       variant,
       max_commits,
@@ -1974,10 +1978,14 @@ async fn request_binding(
    let schema = build_binding_schema();
    let groups_text = render_binding_groups(groups);
    let ambiguous_files_text = render_binding_ambiguous_files(snapshot, ambiguous_files);
-   let variant = if config.markdown_output { "markdown" } else { "default" };
+   let variant = if config.markdown_output {
+      "markdown"
+   } else {
+      "default"
+   };
    let parts = templates::render_compose_bind_prompt(&templates::ComposeBindPromptParams {
       variant,
-      groups:          &groups_text,
+      groups: &groups_text,
       ambiguous_files: &ambiguous_files_text,
    })?;
    let response = run_oneshot::<ComposeBindingResponse>(config, &OneShotSpec {
@@ -2927,7 +2935,11 @@ fn execute_compose_with_prepared_messages(
          "{}",
          style::warning("Index changed during compose; preserving newly staged changes")
       );
-      let paths: Vec<String> = snapshot.files.iter().map(|file| file.path.clone()).collect();
+      let paths: Vec<String> = snapshot
+         .files
+         .iter()
+         .map(|file| file.path.clone())
+         .collect();
       reset_paths_to(&parent_hash, &paths, dir)?;
    }
 

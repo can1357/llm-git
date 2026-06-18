@@ -5,7 +5,9 @@ use std::{
 };
 
 use crate::{
-   compose_types::{ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot, WorktreePin},
+   compose_types::{
+      ComposeExecutableGroup, ComposeFile, ComposeHunk, ComposeSnapshot, WorktreePin,
+   },
    error::{CommitGenError, Result},
    git::{git_command, git_command_with_index},
 };
@@ -481,7 +483,9 @@ pub fn pin_snapshot_worktree_state(snapshot: &mut ComposeSnapshot, dir: &str) ->
       let metadata = match std::fs::symlink_metadata(&full_path) {
          Ok(metadata) => metadata,
          Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            snapshot.pins.insert(file.path.clone(), WorktreePin::Deleted);
+            snapshot
+               .pins
+               .insert(file.path.clone(), WorktreePin::Deleted);
             continue;
          },
          Err(err) => {
@@ -520,7 +524,9 @@ pub fn pin_snapshot_worktree_state(snapshot: &mut ComposeSnapshot, dir: &str) ->
    let oids = hash_worktree_paths(&regular_paths, dir)?;
    for (path, oid) in regular_paths.iter().zip(oids) {
       let mode = worktree_file_mode(&Path::new(dir).join(path));
-      snapshot.pins.insert(path.clone(), WorktreePin::Object { mode, oid });
+      snapshot
+         .pins
+         .insert(path.clone(), WorktreePin::Object { mode, oid });
    }
 
    Ok(())

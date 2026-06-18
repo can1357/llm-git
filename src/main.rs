@@ -19,8 +19,8 @@ use diff::{
 use error::{CommitGenError, Result};
 use git::{
    commit_snapshot_tree, ensure_git_repo, get_common_scopes, get_git_diff, get_git_numstat,
-   get_git_stat, get_recent_commits, git_command, git_commit, git_push,
-   init_git_command_settings, write_real_index_tree,
+   get_git_stat, get_recent_commits, git_command, git_commit, git_push, init_git_command_settings,
+   write_real_index_tree,
 };
 use llm_git::{style, tokens::create_token_counter, *};
 use normalization::{format_commit_message, post_process_commit_message};
@@ -850,7 +850,9 @@ fn commit_staged(
       status!(
          "{} {}",
          style::info("›"),
-         style::dim("Index changed during generation; committing the analyzed snapshot (hooks skipped)")
+         style::dim(
+            "Index changed during generation; committing the analyzed snapshot (hooks skipped)"
+         )
       );
       match commit_snapshot_tree(message, expected_tree, &args.dir, sign, signoff, args.amend)? {
          Some(hash) => {
@@ -932,12 +934,7 @@ async fn run_fast_mode(args: &Args, config: &CommitConfig) -> Result<()> {
       Some(args.context.join(" "))
    };
 
-   status!(
-      "{} {} {}",
-      style::dim("›"),
-      style::dim("fast mode:"),
-      style::model(&model)
-   );
+   status!("{} {} {}", style::dim("›"), style::dim("fast mode:"), style::model(&model));
 
    status!("{} Analyzing {} changes...", style::info("›"), match args.mode {
       Mode::Staged => style::bold("staged"),

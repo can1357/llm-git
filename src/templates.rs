@@ -556,9 +556,9 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
 mod tests {
    use super::{
       AnalysisParams, ComposeBindPromptParams, ComposeIntentPromptParams, FastPromptParams,
-      ensure_prompts_dir, render_analysis_prompt, render_changelog_prompt, render_compose_bind_prompt,
-      render_compose_intent_prompt, render_fast_prompt, render_reduce_prompt,
-      render_summary_prompt, split_prompt_template,
+      ensure_prompts_dir, render_analysis_prompt, render_changelog_prompt,
+      render_compose_bind_prompt, render_compose_intent_prompt, render_fast_prompt,
+      render_reduce_prompt, render_summary_prompt, split_prompt_template,
    };
 
    #[test]

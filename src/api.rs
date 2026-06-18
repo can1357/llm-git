@@ -423,10 +423,7 @@ fn format_bytes(bytes: usize) -> String {
    }
 }
 
-fn format_llm_query_progress(
-   spec: &OneShotSpec<'_>,
-   mode: ResolvedApiMode,
-) -> String {
+fn format_llm_query_progress(spec: &OneShotSpec<'_>, mode: ResolvedApiMode) -> String {
    format!(
       "LLM query: {} \u{2192} {} ({}/{}, {}, {}, prompt ~{} tokens/{} chars)",
       oneshot_progress_label(spec),
@@ -486,27 +483,17 @@ fn save_oneshot_debug<T: Serialize>(
       return Ok(());
    };
 
-   let filename = debug_filename(
-      debug.prefix,
-      &format!("{}_{}.json", debug.name, phase),
-   );
+   let filename = debug_filename(debug.prefix, &format!("{}_{}.json", debug.name, phase));
    let json = serde_json::to_string_pretty(value)?;
    save_debug_output(debug.dir, &filename, &json)
 }
 
-fn save_oneshot_debug_text(
-   debug: Option<OneShotDebug<'_>>,
-   phase: &str,
-   text: &str,
-) -> Result<()> {
+fn save_oneshot_debug_text(debug: Option<OneShotDebug<'_>>, phase: &str, text: &str) -> Result<()> {
    let Some(debug) = debug else {
       return Ok(());
    };
 
-   let filename = debug_filename(
-      debug.prefix,
-      &format!("{}_{}.json", debug.name, phase),
-   );
+   let filename = debug_filename(debug.prefix, &format!("{}_{}.json", debug.name, phase));
    save_debug_output(debug.dir, &filename, text)
 }
 
@@ -1031,7 +1018,8 @@ fn parse_oneshot_response<T: DeserializeOwned>(
                text_content: Some(text_content),
                stop_reason,
             }),
-            Err(err) => match parse_plain_text_output::<T>(tool_name, &text_content, markdown_mode) {
+            Err(err) => match parse_plain_text_output::<T>(tool_name, &text_content, markdown_mode)
+            {
                Ok(Some(output)) => OneShotParseOutcome::Success(OneShotResponse {
                   output,
                   source: OneShotSource::PlainTextContent,
@@ -1075,19 +1063,13 @@ where
       retry_api_call(config, async move || {
          let mode = config.resolved_api_mode(spec.model);
 
-         let (request_json, response_text) = match send_oneshot_request(
-            config,
-            spec,
-            mode,
-            capture_request,
-         )
-         .await?
-         {
-            OneShotRequestOutcome::Response { request_json, response_text } => {
-               (request_json, response_text)
-            },
-            OneShotRequestOutcome::Retry => return Ok((true, None)),
-         };
+         let (request_json, response_text) =
+            match send_oneshot_request(config, spec, mode, capture_request).await? {
+               OneShotRequestOutcome::Response { request_json, response_text } => {
+                  (request_json, response_text)
+               },
+               OneShotRequestOutcome::Retry => return Ok((true, None)),
+            };
 
          match parse_oneshot_response::<T>(
             mode,
@@ -1180,15 +1162,15 @@ struct ApiRequest {
 
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
-   model:         String,
-   max_tokens:    u32,
+   model:       String,
+   max_tokens:  u32,
    #[serde(skip_serializing_if = "Option::is_none")]
-   system:        Option<Vec<AnthropicContent>>,
+   system:      Option<Vec<AnthropicContent>>,
    #[serde(skip_serializing_if = "Vec::is_empty")]
-   tools:         Vec<AnthropicTool>,
+   tools:       Vec<AnthropicTool>,
    #[serde(skip_serializing_if = "Option::is_none")]
-   tool_choice:   Option<AnthropicToolChoice>,
-   messages:      Vec<AnthropicMessage>,
+   tool_choice: Option<AnthropicToolChoice>,
+   messages:    Vec<AnthropicMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1482,23 +1464,23 @@ pub async fn generate_conventional_analysis<'a>(
    };
 
    let response = run_oneshot::<ConventionalAnalysis>(config, &OneShotSpec {
-      operation:        "analysis",
-      model:            model_name,
-      prompt_family:    "analysis",
+      operation: "analysis",
+      model: model_name,
+      prompt_family: "analysis",
       prompt_variant,
-      system_prompt:    &parts.system,
-      user_prompt:      &user_prompt,
-      tool_name:        "create_conventional_analysis",
+      system_prompt: &parts.system,
+      user_prompt: &user_prompt,
+      tool_name: "create_conventional_analysis",
       tool_description: "Analyze changes and classify as conventional commit with type, scope, \
                          summary, details, and metadata",
-      schema:           &analysis_schema,
-      progress_label:   Some("analysis"),
-      debug:            Some(OneShotDebug {
+      schema: &analysis_schema,
+      progress_label: Some("analysis"),
+      debug: Some(OneShotDebug {
          dir:    ctx.debug_output,
          prefix: ctx.debug_prefix,
          name:   "analysis",
       }),
-      cacheable:        true,
+      cacheable: true,
    })
    .await?;
 
@@ -1541,7 +1523,9 @@ pub fn strip_type_prefix(summary: &str, commit_type: &str, scope: Option<&str>) 
          return summary[commit_type.len() + 1 + close + 3..].to_string();
       }
       if let Some(close) = after_type.find("):") {
-         return summary[commit_type.len() + 1 + close + 2..].trim_start().to_string();
+         return summary[commit_type.len() + 1 + close + 2..]
+            .trim_start()
+            .to_string();
       }
    }
 
@@ -1717,7 +1701,11 @@ pub async fn generate_summary_from_analysis<'a>(
          commit_type.len() + 2 + scope_str.len() + if scope_str.is_empty() { 0 } else { 2 };
       let max_summary_len = config.summary_guideline.saturating_sub(prefix_len);
 
-      let summary_variant = if config.markdown_output { "markdown" } else { &config.summary_prompt_variant };
+      let summary_variant = if config.markdown_output {
+         "markdown"
+      } else {
+         &config.summary_prompt_variant
+      };
 
       let parts = templates::render_summary_prompt(
          summary_variant,
@@ -2006,7 +1994,11 @@ pub async fn generate_fast_commit(
    let type_enum: Vec<&str> = config.types.keys().map(|s| s.as_str()).collect();
    let types_desc = format_types_description(config);
 
-   let fast_variant = if config.markdown_output { "markdown" } else { "default" };
+   let fast_variant = if config.markdown_output {
+      "markdown"
+   } else {
+      "default"
+   };
    let parts = templates::render_fast_prompt(&templates::FastPromptParams {
       variant: fast_variant,
       stat,
@@ -2066,11 +2058,8 @@ fn build_fast_commit(
 ) -> Result<ConventionalCommit> {
    let commit_type = CommitType::new(&output.commit_type)?;
    let scope = coerce_optional_scope(output.scope.as_deref());
-   let cleaned_summary = strip_type_prefix(
-      &output.summary,
-      commit_type.as_str(),
-      scope.as_ref().map(|s| s.as_str()),
-   );
+   let cleaned_summary =
+      strip_type_prefix(&output.summary, commit_type.as_str(), scope.as_ref().map(|s| s.as_str()));
    let summary = CommitSummary::new(&cleaned_summary, config.summary_hard_limit)?;
    Ok(ConventionalCommit { commit_type, scope, summary, body: output.details, footers: vec![] })
 }
@@ -2091,7 +2080,8 @@ mod tests {
 
    #[test]
    fn test_strip_type_prefix_different_scope() {
-      // Model emits scope we didn't parse (e.g. scope is None but model wrote fix(tui):)
+      // Model emits scope we didn't parse (e.g. scope is None but model wrote
+      // fix(tui):)
       assert_eq!(strip_type_prefix("fix(tui): fixed bug", "fix", None), "fixed bug");
       // Model emits different scope than parsed
       assert_eq!(strip_type_prefix("fix(tui): fixed bug", "fix", Some("api")), "fixed bug");
@@ -2106,7 +2096,10 @@ mod tests {
    #[test]
    fn test_strip_type_prefix_wrong_type_not_stripped() {
       // Should not strip a prefix with a different type
-      assert_eq!(strip_type_prefix("feat(api): added feature", "fix", None), "feat(api): added feature");
+      assert_eq!(
+         strip_type_prefix("feat(api): added feature", "fix", None),
+         "feat(api): added feature"
+      );
    }
 
    #[test]
@@ -2153,23 +2146,23 @@ mod tests {
    #[test]
    fn test_request_serialization() {
       let api_req = ApiRequest {
-         model: "test-model".to_string(),
-         tools: vec![],
-         tool_choice: None,
+         model:            "test-model".to_string(),
+         tools:            vec![],
+         tool_choice:      None,
          prompt_cache_key: None,
-         messages: vec![],
+         messages:         vec![],
       };
       let api_json = serde_json::to_string(&api_req).unwrap();
       assert!(!api_json.contains("max_tokens"));
       assert!(!api_json.contains("temperature"));
 
       let anthropic_req = AnthropicRequest {
-         model: "test-model".to_string(),
-         max_tokens: 16384,
-         system: None,
-         tools: vec![],
+         model:       "test-model".to_string(),
+         max_tokens:  16384,
+         system:      None,
+         tools:       vec![],
          tool_choice: None,
-         messages: vec![],
+         messages:    vec![],
       };
       let anthropic_json = serde_json::to_string(&anthropic_req).unwrap();
       assert!(anthropic_json.contains("\"max_tokens\":16384"));

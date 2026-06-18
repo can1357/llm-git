@@ -96,10 +96,7 @@ pub fn is_past_tense_verb(word: &str) -> bool {
    // Values in PAST_TENSE_MAP that are genuinely past-tense (key != value).
    // Same-form entries like `("reset", "reset")` are NOT accepted here;
    // they're handled by UNCHANGED_IRREGULAR below.
-   if PAST_TENSE_MAP
-      .iter()
-      .any(|(k, v)| *v == word && *k != *v)
-   {
+   if PAST_TENSE_MAP.iter().any(|(k, v)| *v == word && *k != *v) {
       return true;
    }
 
@@ -957,13 +954,19 @@ mod tests {
    fn test_validate_bound_and_hardened() {
       let config = CommitConfig::default();
       // "bound" should pass validation (the original failing case)
-      let msg = create_commit("fix", Some("stealth"), "bound native Reflect methods to variables", vec![]);
+      let msg =
+         create_commit("fix", Some("stealth"), "bound native Reflect methods to variables", vec![]);
       assert!(
          validate_commit_message(&msg, &config).is_ok(),
          "'bound' should be accepted as past-tense verb"
       );
       // "hardened" should pass validation
-      let msg = create_commit("fix", Some("stealth"), "hardened stealth scripts against detection", vec![]);
+      let msg = create_commit(
+         "fix",
+         Some("stealth"),
+         "hardened stealth scripts against detection",
+         vec![],
+      );
       assert!(
          validate_commit_message(&msg, &config).is_ok(),
          "'hardened' should be accepted as past-tense verb"

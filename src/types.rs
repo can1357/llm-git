@@ -1067,7 +1067,6 @@ pub struct Args {
    #[arg(long, short = 'm')]
    pub model: Option<String>,
 
-
    /// Issue numbers this commit fixes (e.g., --fixes 123 456)
    #[arg(long)]
    pub fixes: Vec<String>,

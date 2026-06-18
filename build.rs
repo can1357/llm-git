@@ -31,18 +31,14 @@ fn main() {
    let mut seen_present: HashSet<&str> = HashSet::new();
    out.push_str("pub const PAST_TENSE_MAP: &[(&str, &str)] = &[\n");
    for pair in pairs {
-      let arr = pair.as_array().expect("past_tense entry must be [present, past]");
+      let arr = pair
+         .as_array()
+         .expect("past_tense entry must be [present, past]");
       assert_eq!(arr.len(), 2, "past_tense entry must have exactly 2 elements: {pair}");
       let present = lc(arr[0].as_str().expect("present must be a string"), "past_tense present");
-      assert!(
-         seen_present.insert(present),
-         "duplicate present key in past_tense: {present:?}"
-      );
+      assert!(seen_present.insert(present), "duplicate present key in past_tense: {present:?}");
       let past = lc(arr[1].as_str().expect("past must be a string"), "past_tense past");
-      assert!(
-         !past.contains(' '),
-         "past form must be a single token, got {past:?}"
-      );
+      assert!(!past.contains(' '), "past form must be a single token, got {past:?}");
       writeln!(out, "   ({present:?}, {past:?}),").unwrap();
       if present == past {
          irregular.push(past);
@@ -55,7 +51,8 @@ fn main() {
       .as_array()
       .expect("irregular_past must be an array")
    {
-      irregular.push(lc(s.as_str().expect("irregular_past entry must be a string"), "irregular_past"));
+      irregular
+         .push(lc(s.as_str().expect("irregular_past entry must be a string"), "irregular_past"));
    }
    irregular.sort_unstable();
    irregular.dedup();
@@ -96,8 +93,13 @@ fn main() {
       emit_slice(
          &mut out,
          name,
-         arr.iter()
-            .map(|v| lc(v.as_str().unwrap_or_else(|| panic!("{key} entries must be strings")), key)),
+         arr.iter().map(|v| {
+            lc(
+               v.as_str()
+                  .unwrap_or_else(|| panic!("{key} entries must be strings")),
+               key,
+            )
+         }),
       );
    }
 

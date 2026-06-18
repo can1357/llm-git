@@ -122,8 +122,7 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
          None => (worktree_content.as_str(), false),
       };
 
-      let unreleased = match parse_unreleased_section(changelog_content, &boundary.changelog_path)
-      {
+      let unreleased = match parse_unreleased_section(changelog_content, &boundary.changelog_path) {
          Ok(u) => u,
          Err(CommitGenError::NoUnreleasedSection { path }) => {
             eprintln!(
@@ -205,9 +204,7 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
       // the index, the worktree copy keeps the user's unrelated edits.
       let updated_staged = write_entries(changelog_content, &unreleased, &new_entries);
       let updated_worktree = match &worktree_unreleased {
-         Some(worktree_section) => {
-            write_entries(&worktree_content, worktree_section, &new_entries)
-         },
+         Some(worktree_section) => write_entries(&worktree_content, worktree_section, &new_entries),
          None => updated_staged.clone(),
       };
       std::fs::write(&boundary.changelog_path, updated_worktree).map_err(|e| {
@@ -250,7 +247,11 @@ async fn generate_changelog_entries(
    existing_entries: Option<&str>,
    config: &CommitConfig,
 ) -> Result<HashMap<ChangelogCategory, Vec<String>>> {
-   let variant = if config.markdown_output { "markdown" } else { "default" };
+   let variant = if config.markdown_output {
+      "markdown"
+   } else {
+      "default"
+   };
    let parts = templates::render_changelog_prompt(
       variant,
       &changelog_path.display().to_string(),
@@ -336,7 +337,11 @@ async fn call_changelog_api(
       operation:        "changelog",
       model:            &config.analysis_model,
       prompt_family:    "changelog",
-      prompt_variant:   if config.markdown_output { "markdown" } else { "default" },
+      prompt_variant:   if config.markdown_output {
+         "markdown"
+      } else {
+         "default"
+      },
       system_prompt:    &parts.system,
       user_prompt:      &parts.user,
       tool_name:        "create_changelog_entries",
@@ -760,8 +765,8 @@ mod tests {
       );
    }
 
-   const BASE_CHANGELOG: &str = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - \
-                                 2020-01-01\n\n### Added\n\n- Old entry.\n";
+   const BASE_CHANGELOG: &str =
+      "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2020-01-01\n\n### Added\n\n- Old entry.\n";
 
    #[test]
    fn test_changelog_staging_keeps_unrelated_unstaged_edits_out() {

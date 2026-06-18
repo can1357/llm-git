@@ -807,7 +807,9 @@ fn rev_parse_tree_of(commitish: &str, dir: &str) -> Result<String> {
 
    if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr);
-      return Err(CommitGenError::git(format!("git rev-parse {commitish}^{{tree}} failed: {stderr}")));
+      return Err(CommitGenError::git(format!(
+         "git rev-parse {commitish}^{{tree}} failed: {stderr}"
+      )));
    }
 
    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -1511,9 +1513,10 @@ mod tests {
       std::fs::write(dir.path().join("b.txt"), "drift\n").unwrap();
       run_test_git(&dir, &["add", "b.txt"]);
 
-      let hash = commit_snapshot_tree("feat: snapshot", &snapshot_tree, dir_str, false, false, false)
-         .unwrap()
-         .expect("snapshot differs from HEAD");
+      let hash =
+         commit_snapshot_tree("feat: snapshot", &snapshot_tree, dir_str, false, false, false)
+            .unwrap()
+            .expect("snapshot differs from HEAD");
 
       // HEAD advanced to exactly the snapshot tree.
       assert_eq!(run_test_git(&dir, &["rev-parse", "HEAD"]).trim(), hash);

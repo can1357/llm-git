@@ -437,22 +437,26 @@ async fn map_file_batch(
       .zip(&rendered_diffs)
       .map(|(file, diff)| templates::MapFile { path: file.filename.as_str(), diff })
       .collect();
-   let variant = if config.markdown_output { "markdown" } else { "default" };
+   let variant = if config.markdown_output {
+      "markdown"
+   } else {
+      "default"
+   };
    let parts = templates::render_map_prompt(variant, &prompt_files, context_header)?;
    let observation_schema = build_batch_observation_schema();
    let response = run_oneshot::<BatchObservationResponse>(config, &OneShotSpec {
-      operation: "map-reduce/map",
-      model: model_name,
-      prompt_family: "map",
-      prompt_variant: variant,
-      system_prompt: &parts.system,
-      user_prompt: &parts.user,
-      tool_name: "create_file_observations",
+      operation:        "map-reduce/map",
+      model:            model_name,
+      prompt_family:    "map",
+      prompt_variant:   variant,
+      system_prompt:    &parts.system,
+      user_prompt:      &parts.user,
+      tool_name:        "create_file_observations",
       tool_description: "Extract observations from a batch of file changes",
-      schema: &observation_schema,
-      progress_label: Some(progress_label),
-      debug: None,
-      cacheable: true,
+      schema:           &observation_schema,
+      progress_label:   Some(progress_label),
+      debug:            None,
+      cacheable:        true,
    })
    .await?;
 
@@ -623,7 +627,11 @@ pub async fn reduce_phase(
       serde_json::to_string_pretty(observations).unwrap_or_else(|_| "[]".to_string());
 
    let types_description = crate::api::format_types_description(config);
-   let variant = if config.markdown_output { "markdown" } else { "default" };
+   let variant = if config.markdown_output {
+      "markdown"
+   } else {
+      "default"
+   };
    let parts = templates::render_reduce_prompt(
       variant,
       &observations_json,

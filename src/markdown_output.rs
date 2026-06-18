@@ -1,6 +1,7 @@
 //! Markdown format parsers for structured LLM outputs
 //!
-//! Provides parsers for markdown-formatted responses as an alternative to JSON tool calls.
+//! Provides parsers for markdown-formatted responses as an alternative to JSON
+//! tool calls.
 
 use std::collections::HashMap;
 
@@ -26,7 +27,8 @@ fn normalize_escaped_whitespace(text: &str) -> String {
    if literal == 0 || literal < real {
       return text.to_string();
    }
-   text.replace("\\r\\n", "\n")
+   text
+      .replace("\\r\\n", "\n")
       .replace("\\n", "\n")
       .replace("\\r", "\n")
       .replace("\\t", "\t")
@@ -202,8 +204,11 @@ fn parse_analysis_parts(text: &str) -> Result<AnalysisParts> {
 /// glyph variations, and `Fixes:`/`Closes:`/`Resolves:` footers.
 pub fn parse_conventional_analysis(text: &str) -> Result<serde_json::Value> {
    let p = parse_analysis_parts(text)?;
-   let details: Vec<serde_json::Value> =
-      p.details.into_iter().map(|t| serde_json::json!({ "text": t })).collect();
+   let details: Vec<serde_json::Value> = p
+      .details
+      .into_iter()
+      .map(|t| serde_json::json!({ "text": t }))
+      .collect();
    Ok(serde_json::json!({
       "type": p.commit_type,
       "scope": p.scope,
@@ -242,7 +247,14 @@ fn parse_heading(line: &str) -> Option<(String, Option<String>, String)> {
       }
       let ty = type_scope[..p_start].trim().to_string();
       let sc = type_scope[p_start + 1..p_end].trim();
-      (ty, if sc.is_empty() { None } else { Some(sc.to_string()) })
+      (
+         ty,
+         if sc.is_empty() {
+            None
+         } else {
+            Some(sc.to_string())
+         },
+      )
    } else {
       (type_scope.to_string(), None)
    };
@@ -312,12 +324,18 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
 
       // Header detection:
       //  - `#`/`##`/`###` prefixed line (any text), or
-      //  - a bare line that *exactly* equals a known category (with optional
-      //    trailing `:`), e.g. `Added`, `Added:` — but NOT `Added rate limiting`.
+      //  - a bare line that *exactly* equals a known category (with optional trailing
+      //    `:`), e.g. `Added`, `Added:` — but NOT `Added rate limiting`.
       let header = if trimmed_line.starts_with('#') {
-         let h = trimmed_line.trim_start_matches('#').trim().trim_end_matches(':').trim();
+         let h = trimmed_line
+            .trim_start_matches('#')
+            .trim()
+            .trim_end_matches(':')
+            .trim();
          Some(canonical(h).unwrap_or_else(|| h.to_string()))
-      } else { canonical(trimmed_line) };
+      } else {
+         canonical(trimmed_line)
+      };
 
       if let Some(h) = header {
          current_category = Some(h);
@@ -327,9 +345,13 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
       // Otherwise it's an entry. Accept bulleted (`-`, `*`, `•`, …) or bare lines.
       let entry = bullet_content(trimmed_line).unwrap_or(trimmed_line).trim();
       if let Some(cat) = &current_category
-         && !entry.is_empty() {
-            entries.entry(cat.clone()).or_default().push(entry.to_string());
-         }
+         && !entry.is_empty()
+      {
+         entries
+            .entry(cat.clone())
+            .or_default()
+            .push(entry.to_string());
+      }
    }
 
    if entries.is_empty() {
@@ -343,8 +365,9 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
 
 /// Parse markdown compose intent format.
 ///
-/// Lenient: strips code fences before parsing the `G1 := type(scope): rationale`,
-/// `G2 <- G1`, and `Files:` sections; bullet glyphs in the files section vary.
+/// Lenient: strips code fences before parsing the `G1 := type(scope):
+/// rationale`, `G2 <- G1`, and `Files:` sections; bullet glyphs in the files
+/// section vary.
 pub fn parse_compose_intent(text: &str) -> Result<serde_json::Value> {
    let trimmed = strip_fences(text);
 
@@ -406,7 +429,10 @@ pub fn parse_compose_intent(text: &str) -> Result<serde_json::Value> {
             }
             if let Some(group_obj) = groups.get_mut(*idx) {
                group_obj["dependencies"] = serde_json::Value::Array(
-                  dependencies.into_iter().map(serde_json::Value::String).collect(),
+                  dependencies
+                     .into_iter()
+                     .map(serde_json::Value::String)
+                     .collect(),
                );
             }
          }
@@ -423,23 +449,30 @@ pub fn parse_compose_intent(text: &str) -> Result<serde_json::Value> {
          continue;
       }
 
-      if in_files_section && let Some(bullet) = bullet_content(trimmed_line)
-         && let Some(colon_pos) = bullet.find(':') {
-            let gid = bullet[..colon_pos].trim().to_string();
-            let files_str = bullet[colon_pos + 1..].trim();
+      if in_files_section
+         && let Some(bullet) = bullet_content(trimmed_line)
+         && let Some(colon_pos) = bullet.find(':')
+      {
+         let gid = bullet[..colon_pos].trim().to_string();
+         let files_str = bullet[colon_pos + 1..].trim();
 
-            if let Some(idx) = group_map.get(&gid)
-               && let Some(group_obj) = groups.get_mut(*idx) {
-               group_obj["file_ids"] = serde_json::Value::Array(
-                  files_str.split(',').map(|f| serde_json::Value::String(f.trim().to_string())).collect(),
-               );
-            }
+         if let Some(idx) = group_map.get(&gid)
+            && let Some(group_obj) = groups.get_mut(*idx)
+         {
+            group_obj["file_ids"] = serde_json::Value::Array(
+               files_str
+                  .split(',')
+                  .map(|f| serde_json::Value::String(f.trim().to_string()))
+                  .collect(),
+            );
          }
+      }
    }
 
    if groups.is_empty() {
       return Err(CommitGenError::Other(
-         "markdown compose intent: no groups found (format: G1 := type(scope): rationale)".to_string(),
+         "markdown compose intent: no groups found (format: G1 := type(scope): rationale)"
+            .to_string(),
       ));
    }
 
@@ -493,7 +526,8 @@ pub fn parse_compose_binding(text: &str) -> Result<serde_json::Value> {
 
    if assignments.is_empty() {
       return Err(CommitGenError::Other(
-         "markdown compose binding: no assignments found (format: # group_id\\n- hunk_id)".to_string(),
+         "markdown compose binding: no assignments found (format: # group_id\\n- hunk_id)"
+            .to_string(),
       ));
    }
 
@@ -505,8 +539,8 @@ pub fn parse_compose_binding(text: &str) -> Result<serde_json::Value> {
 /// Parse markdown map-phase batch observations.
 ///
 /// Format: each file is a `## path` (or `# path`) header, followed by bullet or
-/// bare-line observations. Produces `{ "files": [{ "path", "observations" }] }`.
-/// Files with no observations are kept with an empty array. Lenient: strips
+/// bare-line observations. Produces `{ "files": [{ "path", "observations" }]
+/// }`. Files with no observations are kept with an empty array. Lenient: strips
 /// fences, accepts varied bullet glyphs and bare-line observations.
 pub fn parse_batch_observations(text: &str) -> Result<serde_json::Value> {
    let unfenced = strip_fences(text);
@@ -593,8 +627,8 @@ mod tests {
 
    #[test]
    fn test_conventional_analysis() {
-      let md = "# feat(api): add user authentication endpoint\n\n- Added POST \
-                /auth/login endpoint\n- Implemented bcrypt password hashing\n\nFixes: #123";
+      let md = "# feat(api): add user authentication endpoint\n\n- Added POST /auth/login \
+                endpoint\n- Implemented bcrypt password hashing\n\nFixes: #123";
       let r = parse_conventional_analysis(md).unwrap();
       assert_eq!(r["type"], "feat");
       assert_eq!(r["scope"], "api");
@@ -605,8 +639,8 @@ mod tests {
    #[test]
    fn test_analysis_lenient_variations() {
       // fenced, no `#`, bold heading, `*` bullets, Closes: footer
-      let md = "```md\n**fix(core): corrected null deref**\n\n* fixed a crash\n* \
-                guarded the pointer\n\nCloses: #7, #8\n```";
+      let md = "```md\n**fix(core): corrected null deref**\n\n* fixed a crash\n* guarded the \
+                pointer\n\nCloses: #7, #8\n```";
       let r = parse_conventional_analysis(md).unwrap();
       assert_eq!(r["type"], "fix");
       assert_eq!(r["scope"], "core");
@@ -636,8 +670,8 @@ mod tests {
    fn test_fast_commit_details_are_plain_strings() {
       // FastCommitOutput.details is Vec<String>, so the fast parser must emit
       // string details (not {text} objects like the analysis parser).
-      let md = "# refactor(web): derive provider order from options\n\n- Derived the \
-                metadata dynamically.\n- Reprioritized the default sequence.";
+      let md = "# refactor(web): derive provider order from options\n\n- Derived the metadata \
+                dynamically.\n- Reprioritized the default sequence.";
       let r = parse_fast_commit(md).unwrap();
       assert_eq!(r["type"], "refactor");
       assert_eq!(r["scope"], "web");
@@ -661,13 +695,13 @@ mod tests {
    fn test_summary_variations() {
       let cases = [
          "<summary>Added JWT auth</summary>",
-         "Added JWT auth",                      // bare
-         "\"Added JWT auth\"",                  // quoted
-         "<summary>\"Added JWT auth\"</title>", // quoted + mismatched close tag
+         "Added JWT auth",                                    // bare
+         "\"Added JWT auth\"",                                // quoted
+         "<summary>\"Added JWT auth\"</title>",               // quoted + mismatched close tag
          "```md\n<summary>\nAdded JWT auth\n</summary>\n```", // fenced + multiline
-         "Title: Added JWT auth",               // labeled
-         "# Added JWT auth",                    // heading marker
-         "\n\n  Added JWT auth  \n\n",          // stray whitespace
+         "Title: Added JWT auth",                             // labeled
+         "# Added JWT auth",                                  // heading marker
+         "\n\n  Added JWT auth  \n\n",                        // stray whitespace
       ];
       for c in cases {
          let r = parse_summary_output(c).unwrap();
@@ -752,8 +786,8 @@ mod tests {
 
    #[test]
    fn test_compose_intent_fenced() {
-      let md = "```\nG1 := feat(api): add endpoints\nG2 := test(api): add tests\n\nG2 \
-                <- G1\n\nFiles:\n- G1: a.rs, b.rs\n* G2: c.test.ts\n```";
+      let md = "```\nG1 := feat(api): add endpoints\nG2 := test(api): add tests\n\nG2 <- \
+                G1\n\nFiles:\n- G1: a.rs, b.rs\n* G2: c.test.ts\n```";
       let r = parse_compose_intent(md).unwrap();
       let g = r["groups"].as_array().unwrap();
       assert_eq!(g.len(), 2);
@@ -776,8 +810,8 @@ mod tests {
 
    #[test]
    fn test_batch_observations() {
-      let md = "## src/config.rs\n- added TOML loading\n- changed timeout\n\n## \
-                src/main.rs\n- wired CLI flag\n\n## src/empty.rs";
+      let md = "## src/config.rs\n- added TOML loading\n- changed timeout\n\n## src/main.rs\n- \
+                wired CLI flag\n\n## src/empty.rs";
       let r = parse_batch_observations(md).unwrap();
       let files = r["files"].as_array().unwrap();
       assert_eq!(files.len(), 3);
