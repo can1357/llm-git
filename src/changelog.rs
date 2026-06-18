@@ -85,8 +85,7 @@ pub async fn run_changelog_flow(args: &crate::types::Args, config: &CommitConfig
    let mut untracked_changelogs = Vec::new();
 
    for boundary in boundaries {
-      // Get diff and stat for this boundary's files
-      let diff = get_diff_for_files(&boundary.files, &args.dir)?;
+      let diff = get_diff_for_files(&boundary.files, &args.dir, config)?;
       let stat = get_stat_for_files(&boundary.files, &args.dir)?;
 
       if diff.is_empty() {
@@ -597,11 +596,12 @@ fn detect_boundaries(
 }
 
 /// Get diff for specific files
-fn get_diff_for_files(files: &[String], dir: &str) -> Result<String> {
+fn get_diff_for_files(files: &[String], dir: &str, config: &CommitConfig) -> Result<String> {
    if files.is_empty() {
       return Ok(String::new());
    }
 
+   let max_len = config.max_diff_length;
    let output = git_command()
       .args(["diff", "--cached", "--"])
       .args(files)
@@ -609,7 +609,27 @@ fn get_diff_for_files(files: &[String], dir: &str) -> Result<String> {
       .output()
       .map_err(|e| CommitGenError::git(format!("Failed to get diff for files: {e}")))?;
 
-   Ok(String::from_utf8_lossy(&output.stdout).to_string())
+   if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      return Err(CommitGenError::git(format!("git diff --cached -- failed: {stderr}")));
+   }
+
+   if output.stdout.len() > max_len {
+      tracing::info!("Changelog diff exceeds max_diff_length ({max_len}), retrying with -U1");
+      let output = git_command()
+         .args(["diff", "--cached", "-U1", "--"])
+         .args(files)
+         .current_dir(dir)
+         .output()
+         .map_err(|e| CommitGenError::git(format!("Failed to get diff for files -U1: {e}")))?;
+      if !output.status.success() {
+         let stderr = String::from_utf8_lossy(&output.stderr);
+         return Err(CommitGenError::git(format!("git diff --cached -U1 -- failed: {stderr}")));
+      }
+      Ok(String::from_utf8_lossy(&output.stdout).to_string())
+   } else {
+      Ok(String::from_utf8_lossy(&output.stdout).to_string())
+   }
 }
 
 /// Get stat for specific files

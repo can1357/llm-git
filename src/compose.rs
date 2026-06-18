@@ -22,9 +22,10 @@ use crate::{
    diff::smart_truncate_diff,
    error::{CommitGenError, Result},
    git::{
-      TempGitIndex, append_signoff_trailer, commit_tree, current_head_ref, get_compose_diff,
-      get_compose_stat, get_git_dir, get_head_hash, read_tree_into_index, reset_mixed_to,
-      reset_paths_to, update_ref_checked, write_index_tree, write_real_index_tree,
+      TempGitIndex, append_signoff_trailer, commit_tree, current_head_ref,
+      get_compose_diff_with_config, get_compose_stat, get_git_dir, get_head_hash,
+      read_tree_into_index, reset_mixed_to, reset_paths_to, update_ref_checked, write_index_tree,
+      write_real_index_tree,
    },
    map_reduce::{FileObservation, observe_diff_files, run_map_reduce, should_use_map_reduce},
    normalization::{format_commit_message, post_process_commit_message},
@@ -2966,8 +2967,7 @@ pub async fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> 
       if args.compose_preview {
          break;
       }
-
-      match get_compose_diff(&args.dir) {
+      match get_compose_diff_with_config(&args.dir, config) {
          Err(CommitGenError::NoChanges { .. }) => {
             println!(
                "\n{}",
@@ -3009,7 +3009,7 @@ pub async fn run_compose_mode(args: &Args, config: &CommitConfig) -> Result<()> 
 #[tracing::instrument(target = "lgit", name = "compose.round", skip_all, fields(dir = %args.dir, round))]
 async fn run_compose_round(args: &Args, config: &CommitConfig, round: usize) -> Result<()> {
    let base_state = capture_compose_base_state(&args.dir)?;
-   let diff = get_compose_diff(&args.dir)?;
+   let diff = get_compose_diff_with_config(&args.dir, config)?;
    let stat = get_compose_stat(&args.dir)?;
    let mut snapshot = build_compose_snapshot(&diff, &stat)?;
    // Freeze every file's on-disk content into the odb before any LLM call:
@@ -3128,7 +3128,9 @@ mod tests {
    use tempfile::TempDir;
 
    use super::*;
-   use crate::{config::CommitConfig, patch::build_compose_snapshot, types::CommitType};
+   use crate::{
+      config::CommitConfig, git::get_compose_diff, patch::build_compose_snapshot, types::CommitType,
+   };
 
    fn shared_file_diff() -> (&'static str, &'static str) {
       (

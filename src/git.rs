@@ -324,12 +324,31 @@ pub fn get_git_diff(
    dir: &str,
    config: &CommitConfig,
 ) -> Result<String> {
+   let max_len = config.max_diff_length;
    let output = match mode {
-      Mode::Staged => git_command()
-         .args(["diff", "--cached"])
-         .current_dir(dir)
-         .output()
-         .map_err(|e| CommitGenError::git(format!("Failed to run git diff --cached: {e}")))?,
+      Mode::Staged => {
+         let output = git_command()
+            .args(["diff", "--cached"])
+            .current_dir(dir)
+            .output()
+            .map_err(|e| CommitGenError::git(format!("Failed to run git diff --cached: {e}")))?;
+         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CommitGenError::git(format!("git diff --cached failed: {stderr}")));
+         }
+         if output.stdout.len() > max_len {
+            tracing::info!("Diff exceeds max_diff_length ({max_len}), retrying with -U1");
+            git_command()
+               .args(["diff", "--cached", "-U1"])
+               .current_dir(dir)
+               .output()
+               .map_err(|e| {
+                  CommitGenError::git(format!("Failed to run git diff --cached -U1: {e}"))
+               })?
+         } else {
+            output
+         }
+      },
       Mode::Commit => {
          let target = target.ok_or_else(|| {
             CommitGenError::ValidationError("--target required for commit mode".to_string())
@@ -339,10 +358,30 @@ pub fn get_git_diff(
          if config.exclude_old_message {
             cmd.arg("--format=");
          }
-         cmd.arg(target)
+         cmd.arg(target);
+         let output = cmd
             .current_dir(dir)
             .output()
-            .map_err(|e| CommitGenError::git(format!("Failed to run git show: {e}")))?
+            .map_err(|e| CommitGenError::git(format!("Failed to run git show: {e}")))?;
+         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CommitGenError::git(format!("git show failed: {stderr}")));
+         }
+         if output.stdout.len() > max_len {
+            tracing::info!("Diff exceeds max_diff_length ({max_len}), retrying with -U1");
+            let mut cmd = git_command();
+            cmd.arg("show");
+            if config.exclude_old_message {
+               cmd.arg("--format=");
+            }
+            cmd.arg("-U1")
+               .arg(target)
+               .current_dir(dir)
+               .output()
+               .map_err(|e| CommitGenError::git(format!("Failed to run git show -U1: {e}")))?
+         } else {
+            output
+         }
       },
       Mode::Unstaged => {
          // Get diff for tracked files
@@ -358,8 +397,24 @@ pub fn get_git_diff(
          }
 
          let tracked_diff = String::from_utf8_lossy(&tracked_output.stdout).to_string();
+         let diff = if tracked_diff.len() > max_len {
+            tracing::info!("Diff exceeds max_diff_length ({max_len}), retrying with -U1");
+            let output = git_command()
+               .args(["diff", "-U1"])
+               .current_dir(dir)
+               .output()
+               .map_err(|e| CommitGenError::git(format!("Failed to run git diff -U1: {e}")))?;
+            if !output.status.success() {
+               let stderr = String::from_utf8_lossy(&output.stderr);
+               return Err(CommitGenError::git(format!("git diff -U1 failed: {stderr}")));
+            }
+            String::from_utf8_lossy(&output.stdout).to_string()
+         } else {
+            tracked_diff
+         };
+
          let untracked_files = list_untracked_files(dir)?;
-         return append_untracked_diff(tracked_diff, dir, &untracked_files);
+         return append_untracked_diff(diff, dir, &untracked_files);
       },
       Mode::Compose => unreachable!("compose mode handled separately"),
    };
@@ -502,6 +557,17 @@ pub fn get_git_numstat(
 
 #[tracing::instrument(target = "lgit", name = "git.compose_diff", skip_all, fields(dir))]
 pub fn get_compose_diff(dir: &str) -> Result<String> {
+   get_compose_diff_with_config(dir, &CommitConfig::default())
+}
+
+#[tracing::instrument(
+   target = "lgit",
+   name = "git.compose_diff_with_config",
+   skip_all,
+   fields(dir)
+)]
+pub fn get_compose_diff_with_config(dir: &str, config: &CommitConfig) -> Result<String> {
+   let max_len = config.max_diff_length;
    let output = git_command()
       .args([
          "diff",
@@ -521,7 +587,31 @@ pub fn get_compose_diff(dir: &str) -> Result<String> {
       return Err(CommitGenError::git(format!("git diff HEAD failed: {stderr}")));
    }
 
-   let diff = String::from_utf8_lossy(&output.stdout).to_string();
+   let diff = if output.stdout.len() > max_len {
+      tracing::info!("Compose diff exceeds max_diff_length ({max_len}), retrying with -U1");
+      let output = git_command()
+         .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "-U1",
+            "HEAD",
+         ])
+         .current_dir(dir)
+         .output()
+         .map_err(|e| CommitGenError::git(format!("Failed to run git diff HEAD -U1: {e}")))?;
+      if !output.status.success() {
+         let stderr = String::from_utf8_lossy(&output.stderr);
+         return Err(CommitGenError::git(format!("git diff HEAD -U1 failed: {stderr}")));
+      }
+      String::from_utf8_lossy(&output.stdout).to_string()
+   } else {
+      String::from_utf8_lossy(&output.stdout).to_string()
+   };
+
    let untracked_files = list_untracked_files(dir)?;
    let diff = append_untracked_diff(diff, dir, &untracked_files)?;
 
@@ -1543,5 +1633,53 @@ mod tests {
       let cmd =
          git_command_with_settings(GitCommandSettings { disable_git_background_features: false });
       assert!(cmd.get_args().next().is_none());
+   }
+
+   #[test]
+   fn test_get_git_diff_uses_minimal_context_when_large() {
+      let dir = tempfile::TempDir::new().unwrap();
+      let dir_str = dir.path().to_str().unwrap();
+      run_test_git(&dir, &["init"]);
+      run_test_git(&dir, &["config", "user.name", "Context Test"]);
+      run_test_git(&dir, &["config", "user.email", "context@test.local"]);
+      run_test_git(&dir, &["config", "commit.gpgsign", "false"]);
+
+      // Base file with many lines; every 5th line will change.
+      let base: String = (0..200)
+         .map(|i| {
+            if i % 5 == 0 {
+               format!("base {i}\n")
+            } else {
+               format!("stable {i}\n")
+            }
+         })
+         .collect();
+      std::fs::write(dir.path().join("file.txt"), &base).unwrap();
+      run_test_git(&dir, &["add", "file.txt"]);
+      run_test_git(&dir, &["commit", "-m", "base"]);
+
+      // Modify every 5th line.
+      let changed: String = (0..200)
+         .map(|i| {
+            if i % 5 == 0 {
+               format!("changed {i}\n")
+            } else {
+               format!("stable {i}\n")
+            }
+         })
+         .collect();
+      std::fs::write(dir.path().join("file.txt"), changed).unwrap();
+      run_test_git(&dir, &["add", "file.txt"]);
+
+      // Force -U1 fallback by setting a small max_diff_length.
+      let config = CommitConfig { max_diff_length: 500, ..Default::default() };
+      let minimal_diff = get_git_diff(&Mode::Staged, None, dir_str, &config).unwrap();
+
+      // Verify the fallback was triggered and the output matches the explicit -U1
+      // diff.
+      let default_diff = run_test_git(&dir, &["diff", "--cached"]);
+      assert!(default_diff.len() > config.max_diff_length);
+      let explicit_u1 = run_test_git(&dir, &["diff", "--cached", "-U1"]);
+      assert_eq!(minimal_diff, explicit_u1);
    }
 }
