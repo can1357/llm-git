@@ -556,7 +556,7 @@ pub fn render_fast_prompt(p: &FastPromptParams<'_>) -> Result<PromptParts> {
 mod tests {
    use super::{
       AnalysisParams, ComposeBindPromptParams, ComposeIntentPromptParams, FastPromptParams,
-      ensure_prompts_dir, render_analysis_prompt, render_compose_bind_prompt,
+      ensure_prompts_dir, render_analysis_prompt, render_changelog_prompt, render_compose_bind_prompt,
       render_compose_intent_prompt, render_fast_prompt, render_reduce_prompt,
       render_summary_prompt, split_prompt_template,
    };
@@ -611,6 +611,54 @@ mod tests {
             .contains("umbrella headline for the whole changeset")
       );
       assert!(parts.system.contains("Does not copy detail #1"));
+   }
+
+   #[test]
+   fn test_render_changelog_prompt_variants_render() {
+      // Each changelog variant must reference only the variables
+      // render_changelog_prompt supplies. A drifted variable (e.g. the old
+      // `{{ commits }}`) makes Tera fail to render with `__tera_one_off`.
+      ensure_prompts_dir().unwrap();
+
+      for variant in ["default", "markdown"] {
+         let parts = render_changelog_prompt(
+            variant,
+            "CHANGELOG.md",
+            false,
+            "src/api.rs | 4 ++--",
+            "diff --git a/src/api.rs b/src/api.rs\n",
+            Some("- Added existing entry"),
+         )
+         .unwrap_or_else(|e| panic!("{variant} changelog prompt failed to render: {e}"));
+
+         assert!(parts.user.contains("src/api.rs"), "{variant}: diff missing");
+         assert!(
+            parts.user.contains("Added existing entry"),
+            "{variant}: existing entries missing"
+         );
+
+         // Pin the output contract per variant: markdown mode omits the JSON
+         // tool (src/api.rs) and parses markdown sections
+         // (markdown_output::parse_changelog_response), so its prompt MUST
+         // advertise `# Category` sections; default mode is parsed as JSON.
+         match variant {
+            "markdown" => {
+               assert!(
+                  parts.system.contains("# Added"),
+                  "markdown variant must advertise markdown sections"
+               );
+               assert!(
+                  !parts.system.contains("{\"entries\""),
+                  "markdown variant must not advertise JSON output"
+               );
+            },
+            "default" => assert!(
+               parts.system.contains("{\"entries\""),
+               "default variant must advertise JSON output"
+            ),
+            _ => unreachable!(),
+         }
+      }
    }
 
    #[test]
