@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                  |  5 ++++-
+ packages/coding-agent/src/core/tools/task/render.ts |  4 ++--
+ packages/coding-agent/src/lib/worktree/constants.ts | 12 ++++++------
+ 3 files changed, 12 insertions(+), 9 deletions(-)

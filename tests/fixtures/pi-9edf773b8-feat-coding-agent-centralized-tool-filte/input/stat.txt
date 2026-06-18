@@ -1,0 +1,6 @@
+ packages/ai/package.json                           |  8 ++++
+ packages/coding-agent/src/sdk.ts                   | 29 +++++++-------
+ packages/coding-agent/src/session/agent-session.ts | 10 +++--
+ packages/coding-agent/src/tools/index.ts           | 32 ++++++++++++++++
+ .../test/tool-discovery/initial-tools.test.ts      | 44 +++++++++++++++++++++-
+ 5 files changed, 106 insertions(+), 17 deletions(-)

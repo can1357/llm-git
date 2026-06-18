@@ -1,0 +1,111 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 7cdd0c5ba..5d2db8590 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -19,6 +19,7 @@
+ 
+ - Bash execution now preserves minimized shell output inline while saving the untouched capture as an `artifact://…` footer when shell minimization rewrites a command's output.
+ - Task tool live progress now renders finished subagents first and keeps unfinished (pending/running) ones pinned at the bottom of the list.
++- `OutputSink` artifact files (`~/.omp/agent/artifacts/<id>.<tool>.log`) are unbounded by default again, so `artifact://<id>` references preserve the complete raw stream. The head + rolling-tail capping machinery from [#2081](https://github.com/can1357/oh-my-pi/issues/2081) (with its `[ARTIFACT TRUNCATED: …]` close notice) remains available as an opt-in via `artifactMaxBytes`, and the head window now closes permanently on first overflow so later small chunks cannot be written out of order before the tail replay.
+ 
+ ### Fixed
+ 
+@@ -38,7 +39,6 @@
+ - Fixed bare `omp extensions` being treated as a chat prompt instead of returning an actionable plugin-command error ([#2089](https://github.com/can1357/oh-my-pi/issues/2089)).
+ - Fixed hide-secrets redaction so configured secrets are scrubbed from provider-facing system prompts, tool definitions, developer/system-reminder messages, and assistant tool-call arguments before model requests ([#2146](https://github.com/can1357/oh-my-pi/issues/2146)).
+ - Fixed subagents looping indefinitely on byte-identical no-op `edit` calls. The hashline executor previously surfaced a soft "your body row(s) are byte-identical to the file" hint that some models ignored; one captured session emitted 182 such repeats in 205 calls over 16 minutes before the user aborted. A new per-`ToolSession` `noopLoopGuard` now tracks consecutive identical no-op payloads per canonical path and escalates to a thrown `ToolError` after `NOOP_HARD_LIMIT` (3) repeats, so the agent loop sees a tool *failure* and breaks the cycle ([#2081](https://github.com/can1357/oh-my-pi/issues/2081)).
+-- Fixed the bash tool's `~/.omp/agent/artifacts/<id>.bash.log` growing unbounded when a command (e.g. `Get-Content | ConvertTo-Json` spraying rich PowerShell `PSObject` metadata) emitted multi-MB output; one capture reached 7.6MB on disk. `OutputSink` now defaults `artifactMaxBytes` to 4 MiB (3 MiB head + 1 MiB rolling tail) and replays the tail behind a single `[ARTIFACT TRUNCATED: kept first … + last … of …; … elided from the middle]` notice on close. Set `artifactMaxBytes: 0` to restore unbounded streaming ([#2081](https://github.com/can1357/oh-my-pi/issues/2081)).
+ - Fixed the bash result renderer recomputing styled output (`split` / `replaceTabs` / `truncateToVisualLines`) on every TUI repaint, which scaled with both transcript length and per-row output size. With a long captured session every keystroke walked hundreds of bash rows; the reporter on issue #2081 observed Ctrl+X/Ctrl+C feeling unresponsive because the main thread was pinned re-styling scrollback. The result renderer now caches its produced lines keyed by `(width, previewLines, expanded, rawOutput, isPartial)`, mirroring the existing eval-renderer cache; `invalidate()` clears the cache as before. Hot-path repaints with unchanged inputs are now O(1) ([#2081](https://github.com/can1357/oh-my-pi/issues/2081)).
+ - Fixed ACP `available_commands_update` to include extension-registered slash commands so clients like Zed surface them in the slash-command palette.
+ - Fixed ACP cancel button leaving the session in a stuck state — a new prompt sent while a turn is still in-flight (e.g. immediately after pressing Stop in Zed before `session/cancel` is processed) now implicitly cancels the running turn and queues the new message, instead of throwing an error that blocks further interaction.
+diff --git a/packages/coding-agent/src/session/streaming-output.ts b/packages/coding-agent/src/session/streaming-output.ts
+index 39a08537e..2eee2dd25 100644
+--- a/packages/coding-agent/src/session/streaming-output.ts
++++ b/packages/coding-agent/src/session/streaming-output.ts
+@@ -12,20 +12,12 @@ export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+ export const DEFAULT_MAX_COLUMN = 512; // Max chars per grep match line
+ 
+ /**
+- * Default upper bound on bytes the {@link OutputSink} will write to the
+- * artifact-on-disk file (`~/.omp/agent/artifacts/<id>.<tool>.log`). When a
+- * stream exceeds this, the sink keeps a head window verbatim, drops the
+- * middle, and replays the most recent {@link ARTIFACT_DEFAULT_TAIL_BYTES} on
+- * close behind a `[ARTIFACT TRUNCATED: …]` notice.
++ * Default artifact-on-disk cap for {@link OutputSink}.
+  *
+- * Sized to comfortably bracket any tool output a model would reasonably
+- * scroll through via `artifact://<id>` while preventing a single runaway
+- * command (e.g. `Get-Content | ConvertTo-Json` spraying multi-MB rich-object
+- * metadata — issue #2081) from sitting on disk indefinitely. Callers can
+- * override via {@link OutputSinkOptions.artifactMaxBytes}; pass `0` to
+- * disable the cap and restore unbounded streaming.
++ * `0` means unbounded: by default, `artifact://<id>` references preserve the
++ * complete raw stream instead of a capped head/tail sample.
+  */
+-export const ARTIFACT_DEFAULT_MAX_BYTES = 4 * 1024 * 1024; // 4 MiB
++export const ARTIFACT_DEFAULT_MAX_BYTES = 0;
+ /** Default head budget; the remainder becomes the rolling tail window. */
+ export const ARTIFACT_DEFAULT_HEAD_BYTES = 3 * 1024 * 1024; // 3 MiB
+ 
+@@ -77,12 +69,11 @@ export interface OutputSinkOptions {
+ 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
+ 	chunkThrottleMs?: number;
+ 	/**
+-	 * Cap on bytes written to the artifact-on-disk file. When the cap is hit,
+-	 * the head window is preserved verbatim and the tail window is filled with
+-	 * the most recent {@link artifactTailBytes} of subsequent output; on
+-	 * close, the sink writes a single `[ARTIFACT TRUNCATED: …]` notice
+-	 * between them. Default {@link ARTIFACT_DEFAULT_MAX_BYTES}. Pass `0` to
+-	 * disable the cap and restore unbounded streaming.
++	 * Optional cap on bytes written to the artifact-on-disk file. When the cap
++	 * is hit, the head window is preserved verbatim and subsequent output feeds
++	 * a rolling tail window; on close, the sink writes a single
++	 * `[ARTIFACT TRUNCATED: …]` notice between them. Default
++	 * {@link ARTIFACT_DEFAULT_MAX_BYTES} (unbounded).
+ 	 */
+ 	artifactMaxBytes?: number;
+ 	/**
+@@ -709,17 +700,17 @@ export class OutputSink {
+ 	readonly #chunkThrottleMs: number;
+ 	readonly #maxColumns: number;
+ 
+-	// Artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink owns a
+-	// head budget + a rolling tail buffer; once the head is full, subsequent
+-	// chunks are diverted into `#artifactTailRing` (bounded by
++	// Optional artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink
++	// owns a head budget + a rolling tail buffer; once the head is closed,
++	// subsequent chunks are diverted into `#artifactTailRing` (bounded by
+ 	// `#artifactTailBudget`). On `dump()` the tail is flushed back to the sink
+-	// behind a `[ARTIFACT TRUNCATED: …]` notice. Sized to bracket reasonable
+-	// `artifact://<id>` scrollback while preventing the runaway captures seen
+-	// in issue #2081 (a 7.6MB PowerShell rich-object spray).
++	// behind a `[ARTIFACT TRUNCATED: …]` notice. The default cap is disabled so
++	// advertised `artifact://<id>` captures are lossless.
+ 	readonly #artifactMaxBytes: number;
+ 	readonly #artifactHeadBudget: number;
+ 	readonly #artifactTailBudget: number;
+ 	#artifactHeadBytesWritten = 0;
++	#artifactHeadClosed = false;
+ 	#artifactTailRing = "";
+ 	#artifactTailRingBytes = 0;
+ 	#artifactTailIncomingBytes = 0;
+@@ -956,7 +947,7 @@ export class OutputSink {
+ 			return;
+ 		}
+ 		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
+-		const room = this.#artifactHeadBudget - this.#artifactHeadBytesWritten;
++		const room = this.#artifactHeadClosed ? 0 : this.#artifactHeadBudget - this.#artifactHeadBytesWritten;
+ 		if (room >= chunkBytes) {
+ 			this.#file.sink.write(chunk);
+ 			this.#artifactHeadBytesWritten += chunkBytes;
+@@ -969,6 +960,10 @@ export class OutputSink {
+ 				this.#file.sink.write(headSlice.text);
+ 				this.#artifactHeadBytesWritten += headSlice.bytes;
+ 			}
++			// Even when UTF-8 boundary safety leaves a few bytes of nominal room,
++			// this chunk has already overflowed the head window. Close it now so a
++			// later small ASCII chunk cannot be written before this overflow tail.
++			this.#artifactHeadClosed = true;
+ 			overflow = chunk.substring(headSlice.text.length);
+ 		}
+ 		if (overflow.length === 0 || this.#artifactTailBudget === 0) {

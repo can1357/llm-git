@@ -1,0 +1,10 @@
+recent_commits = """
+Scope usage: 90% of commits use scopes
+Common verbs: integrated (2), prevented (2), skipped (1), aligned (1), hardened (1)
+Average length: 54 chars (range: 34-80)
+Capitalization: 90% start lowercase
+Top scopes: coding-agent (12), pi-natives (3), ai (2), agent (1)"""
+common_scopes = "coding-agent (30), tui (7), minimax (5), ai (4), auth (4), agent (3), pi-natives (3), catalog (3), coding-agent/tools (3), mnemopi (3)"
+project_context = """
+Language: Rust (workspace, 1 packages)
+Framework: Tokio async runtime"""

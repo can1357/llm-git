@@ -1,0 +1,10 @@
+ packages/agent/CHANGELOG.md                     |  4 ++
+ packages/agent/src/agent.ts                     |  7 ++++
+ packages/ai/CHANGELOG.md                        |  8 ++++
+ packages/ai/src/providers/anthropic.ts          |  4 +-
+ packages/ai/src/providers/openai-completions.ts |  7 +++-
+ packages/ai/src/providers/openai-responses.ts   |  9 ++++-
+ packages/ai/src/types.ts                        | 11 +++++
+ packages/ai/src/utils/provider-response.ts      | 30 ++++++++++++++
+ packages/ai/test/provider-response.test.ts      | 53 +++++++++++++++++++++++++
+ 9 files changed, 130 insertions(+), 3 deletions(-)

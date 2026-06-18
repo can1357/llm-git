@@ -1,0 +1,5 @@
+ packages/coding-agent/CHANGELOG.md         |   1 +
+ packages/coding-agent/src/task/index.ts    | 136 +++++++++++++++--------------
+ packages/coding-agent/src/task/worktree.ts |  60 ++++++++-----
+ packages/coding-agent/src/utils/git.ts     |  20 +++++
+ 4 files changed, 133 insertions(+), 84 deletions(-)

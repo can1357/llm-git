@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                 |   1 +
+ packages/coding-agent/src/tools/search.ts          | 251 ++++++++++++++-------
+ .../test/tools/search-renderer.test.ts             |  51 ++++-
+ 3 files changed, 218 insertions(+), 85 deletions(-)

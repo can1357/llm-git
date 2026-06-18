@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                 |  1 +
+ packages/coding-agent/src/main.ts                  | 15 ++++-
+ .../test/main-cross-project-resume.test.ts         | 65 ++++++++++++++++++++++
+ 3 files changed, 79 insertions(+), 2 deletions(-)

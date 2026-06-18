@@ -1,0 +1,194 @@
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index 3e3df85c8..b0331bb14 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -128,6 +128,14 @@
+ 			"types": "./src/registry/oauth/*.ts",
+ 			"import": "./src/registry/oauth/*.ts"
+ 		},
++		"./registry": {
++			"types": "./src/registry/index.ts",
++			"import": "./src/registry/index.ts"
++		},
++		"./registry/oauth": {
++			"types": "./src/registry/oauth/index.ts",
++			"import": "./src/registry/oauth/index.ts"
++		},
+ 		"./utils/schema": {
+ 			"types": "./src/utils/schema/index.ts",
+ 			"import": "./src/utils/schema/index.ts"
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index ac5ac5553..75fdb3966 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -154,6 +154,7 @@ import {
+ 	EditTool,
+ 	EvalTool,
+ 	FindTool,
++	filterInitialToolsForDiscoveryAll,
+ 	getSearchTools,
+ 	HIDDEN_TOOLS,
+ 	isImageProviderPreference,
+@@ -1965,19 +1966,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		// from the initial set unless they were explicitly requested or restored from persistence.
+ 		// The model finds them via search_tool_bm25 and activates them on demand.
+ 		if (effectiveDiscoveryMode === "all") {
+-			const essentialBuiltinNames = new Set(computeEssentialBuiltinNames(settings));
+-			const explicitlyRequestedToolNames = new Set(options.toolNames?.map(name => name.toLowerCase()) ?? []);
+-			// Back-compat: persisted activations live under selectedMCPToolNames today (built-in
+-			// activation persistence is a follow-up). MCP names won't collide with built-in names.
+-			const restoredDiscoveredNames = new Set(existingSession.selectedMCPToolNames);
+-			initialToolNames = initialToolNames.filter(name => {
+-				const tool = toolRegistry.get(name);
+-				if (!tool?.loadMode) return true; // not a built-in — leave MCP/custom/extension to existing logic
+-				if (tool.loadMode === "essential") return true;
+-				if (essentialBuiltinNames.has(name)) return true;
+-				if (explicitlyRequestedToolNames.has(name)) return true;
+-				if (restoredDiscoveredNames.has(name)) return true;
+-				return false;
++			// Tools a forced tool_choice will target must stay active, or the named
++			// choice references a tool absent from the request (provider 400). Eager
++			// todos force a named `todo` choice on the first turn.
++			const forceActive = new Set<string>();
++			if (settings.get("todo.eager") && settings.get("todo.enabled") && toolRegistry.has("todo")) {
++				forceActive.add("todo");
++			}
++			initialToolNames = filterInitialToolsForDiscoveryAll(initialToolNames, {
++				loadModeOf: name => toolRegistry.get(name)?.loadMode,
++				essentialNames: new Set(computeEssentialBuiltinNames(settings)),
++				explicitlyRequested: new Set(options.toolNames?.map(name => name.toLowerCase()) ?? []),
++				// Back-compat: persisted activations live under selectedMCPToolNames today (built-in
++				// activation persistence is a follow-up). MCP names won't collide with built-in names.
++				restored: new Set(existingSession.selectedMCPToolNames),
++				forceActive,
+ 			});
+ 		}
+ 
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index 69d75c53b..6a799fcca 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -6808,9 +6808,13 @@ export class AgentSession {
+ 			return undefined;
+ 		}
+ 
+-		if (!this.#toolRegistry.has("todo")) {
+-			logger.warn("Eager todo enforcement skipped because todo is unavailable", {
+-				activeToolNames: this.agent.state.tools.map(tool => tool.name),
++		// Must check the active tool set, not just the registry: tool discovery
++		// (tools.discoveryMode === "all") can register `todo` while hiding it from
++		// the exposed tools. Forcing a named tool_choice for an inactive tool makes
++		// the provider reject the request (HTTP 400).
++		if (!this.getActiveToolNames().includes("todo")) {
++			logger.warn("Eager todo enforcement skipped because todo is not active", {
++				activeToolNames: this.getActiveToolNames(),
+ 			});
+ 			return undefined;
+ 		}
+diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
+index b70d56684..bd18ef8f9 100644
+--- a/packages/coding-agent/src/tools/index.ts
++++ b/packages/coding-agent/src/tools/index.ts
+@@ -342,6 +342,38 @@ export function computeEssentialBuiltinNames(settings: Settings): string[] {
+ 	return [...DEFAULT_ESSENTIAL_TOOL_NAMES];
+ }
+ 
++/**
++ * Filter the initial active tool set when `tools.discoveryMode === "all"`.
++ *
++ * Non-essential discoverable built-ins are hidden — the model rediscovers them
++ * via `search_tool_bm25` and activates them on demand. A tool survives hiding
++ * when it is essential, explicitly requested, restored from a prior selection,
++ * or required by a forced tool_choice feature (`forceActive`). The last case is
++ * load-bearing: a named tool_choice (e.g. the eager `todo` prelude) must
++ * reference a tool present in the request, or the provider rejects it with 400.
++ */
++export function filterInitialToolsForDiscoveryAll(
++	initialToolNames: string[],
++	opts: {
++		loadModeOf: (name: string) => BuiltinToolLoadMode | undefined;
++		essentialNames: ReadonlySet<string>;
++		explicitlyRequested: ReadonlySet<string>;
++		restored: ReadonlySet<string>;
++		forceActive: ReadonlySet<string>;
++	},
++): string[] {
++	return initialToolNames.filter(name => {
++		const loadMode = opts.loadModeOf(name);
++		if (!loadMode) return true; // not a built-in — leave MCP/custom/extension to existing logic
++		if (loadMode === "essential") return true;
++		if (opts.essentialNames.has(name)) return true;
++		if (opts.explicitlyRequested.has(name)) return true;
++		if (opts.restored.has(name)) return true;
++		if (opts.forceActive.has(name)) return true;
++		return false;
++	});
++}
++
+ /**
+  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or
+  * `BUILTIN_TOOLS[name](session)` to construct a tool directly.
+diff --git a/packages/coding-agent/test/tool-discovery/initial-tools.test.ts b/packages/coding-agent/test/tool-discovery/initial-tools.test.ts
+index 845dc46f0..635dcec20 100644
+--- a/packages/coding-agent/test/tool-discovery/initial-tools.test.ts
++++ b/packages/coding-agent/test/tool-discovery/initial-tools.test.ts
+@@ -1,12 +1,13 @@
+ import { describe, expect, it } from "bun:test";
+ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import type { BuiltinToolLoadMode, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+ import {
+ 	AskTool,
+ 	BUILTIN_TOOLS,
+ 	computeEssentialBuiltinNames,
+ 	createTools,
+ 	DEFAULT_ESSENTIAL_TOOL_NAMES,
++	filterInitialToolsForDiscoveryAll,
+ 	IrcTool,
+ 	JobTool,
+ 	SshTool,
+@@ -121,3 +122,44 @@ describe("tools.discoveryMode settings schema", () => {
+ 		expect(settings.get("mcp.discoveryMode")).toBe(true);
+ 	});
+ });
++
++describe("filterInitialToolsForDiscoveryAll", () => {
++	const loadModes: Record<string, BuiltinToolLoadMode> = {
++		read: "essential",
++		edit: "essential",
++		todo: "discoverable",
++		find: "discoverable",
++	};
++	const base = {
++		loadModeOf: (name: string): BuiltinToolLoadMode | undefined => loadModes[name],
++		essentialNames: new Set(["read", "bash", "edit"]),
++		explicitlyRequested: new Set<string>(),
++		restored: new Set<string>(),
++		forceActive: new Set<string>(),
++	};
++
++	it("hides non-essential discoverable built-ins", () => {
++		expect(filterInitialToolsForDiscoveryAll(["read", "edit", "todo", "find"], base)).toEqual(["read", "edit"]);
++	});
++
++	it("keeps discoverable tools required by a forced tool_choice (eager todo)", () => {
++		const result = filterInitialToolsForDiscoveryAll(["read", "todo", "find"], {
++			...base,
++			forceActive: new Set(["todo"]),
++		});
++		expect(result).toEqual(["read", "todo"]);
++	});
++
++	it("keeps explicitly requested and restored discoverable tools", () => {
++		const result = filterInitialToolsForDiscoveryAll(["todo", "find"], {
++			...base,
++			explicitlyRequested: new Set(["find"]),
++			restored: new Set(["todo"]),
++		});
++		expect([...result].sort()).toEqual(["find", "todo"]);
++	});
++
++	it("never hides tools without a built-in loadMode (MCP/custom/extension)", () => {
++		expect(filterInitialToolsForDiscoveryAll(["mcp__server__tool", "find"], base)).toEqual(["mcp__server__tool"]);
++	});
++});

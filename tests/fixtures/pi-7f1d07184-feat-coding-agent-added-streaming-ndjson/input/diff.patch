@@ -1,0 +1,1118 @@
+diff --git a/packages/coding-agent/examples/sdk/11-sessions.ts b/packages/coding-agent/examples/sdk/11-sessions.ts
+index e22f53ba3..8255f4508 100644
+--- a/packages/coding-agent/examples/sdk/11-sessions.ts
++++ b/packages/coding-agent/examples/sdk/11-sessions.ts
+@@ -20,7 +20,7 @@ console.log("New session file:", newSession.sessionFile);
+ 
+ // Continue most recent session (or create new if none)
+ const { session: continued, modelFallbackMessage } = await createAgentSession({
+-	sessionManager: SessionManager.continueRecent(process.cwd()),
++	sessionManager: await SessionManager.continueRecent(process.cwd()),
+ });
+ if (modelFallbackMessage) console.log("Note:", modelFallbackMessage);
+ console.log("Continued session:", continued.sessionFile);
+@@ -34,7 +34,7 @@ for (const info of sessions.slice(0, 3)) {
+ 
+ if (sessions.length > 0) {
+ 	const { session: opened } = await createAgentSession({
+-		sessionManager: SessionManager.open(sessions[0].path),
++		sessionManager: await SessionManager.open(sessions[0].path),
+ 	});
+ 	console.log(`\nOpened: ${opened.sessionId}`);
+ }
+diff --git a/packages/coding-agent/src/core/export-html/index.ts b/packages/coding-agent/src/core/export-html/index.ts
+index 2552d6dba..84713308c 100644
+--- a/packages/coding-agent/src/core/export-html/index.ts
++++ b/packages/coding-agent/src/core/export-html/index.ts
+@@ -144,7 +144,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions
+ 
+ 	if (!existsSync(inputPath)) throw new Error(`File not found: ${inputPath}`);
+ 
+-	const sm = SessionManager.open(inputPath);
++	const sm = await SessionManager.open(inputPath);
+ 	const sessionData: SessionData = {
+ 		header: sm.getHeader(),
+ 		entries: sm.getEntries(),
+diff --git a/packages/coding-agent/src/core/session-manager.ts b/packages/coding-agent/src/core/session-manager.ts
+index 81b489746..3f2aea1dc 100644
+--- a/packages/coding-agent/src/core/session-manager.ts
++++ b/packages/coding-agent/src/core/session-manager.ts
+@@ -3,20 +3,23 @@ import {
+ 	closeSync,
+ 	createWriteStream,
+ 	existsSync,
++	fsyncSync,
+ 	mkdirSync,
+ 	openSync,
+ 	readdirSync,
+ 	readFileSync,
+ 	readSync,
++	renameSync,
+ 	statSync,
+-	writeFileSync,
++	unlinkSync,
+ 	type WriteStream,
++	writeFileSync,
+ } from "node:fs";
+-import { join, resolve } from "node:path";
++import { basename, join, resolve } from "node:path";
+ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+-import type { ImageContent, Message, TextContent, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai";
++import type { ImageContent, Message, TextContent, Usage } from "@oh-my-pi/pi-ai";
+ import { nanoid } from "nanoid";
+-import ndjson from "ndjson";
++import sharp from "sharp";
+ import { getAgentDir as getDefaultAgentDir } from "../config";
+ import {
+ 	type BashExecutionMessage,
+@@ -287,6 +290,10 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
+ 	return null;
+ }
+ 
++function toError(value: unknown): Error {
++	return value instanceof Error ? value : new Error(String(value));
++}
++
+ /**
+  * Build the session context from entries using tree traversal.
+  * If leafId is provided, walks from that entry to root.
+@@ -574,347 +581,287 @@ function formatTimeAgo(date: Date): string {
+ 	return date.toLocaleDateString();
+ }
+ 
+-const MAX_PERSIST_CONTENT_CHARS = 500_000;
+-const PERSIST_TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
++const MAX_PERSIST_CHARS = 500_000;
++const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
++const PLACEHOLDER_IMAGE_DATA =
++	"/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAAQABADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAgP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCkA//Z";
+ 
+-type TextOrImageContent = TextContent | ImageContent;
+-type AssistantContent = TextContent | ThinkingContent | ToolCall;
+-type FileMentionFile = { path: string; content: string; lineCount: number };
++const TEXT_CONTENT_KEY = "content";
+ 
+-function truncateStringForPersistence(
+-	text: string,
+-	maxChars: number = MAX_PERSIST_CONTENT_CHARS,
+-): { text: string; truncated: boolean } {
+-	if (text.length <= maxChars) {
+-		return { text, truncated: false };
++function fsyncDirSync(dir: string): void {
++	try {
++		const fd = openSync(dir, "r");
++		try {
++			fsyncSync(fd);
++		} finally {
++			closeSync(fd);
++		}
++	} catch {
++		// Best-effort: some platforms/filesystems don't support fsync on directories.
+ 	}
+-	const limit = Math.max(0, maxChars - PERSIST_TRUNCATION_NOTICE.length);
+-	return {
+-		text: `${text.slice(0, limit)}${PERSIST_TRUNCATION_NOTICE}`,
+-		truncated: true,
+-	};
+ }
+ 
+-function textImageContentExceedsLimit(content: TextOrImageContent[], maxChars: number): boolean {
+-	let total = 0;
+-	for (const block of content) {
+-		if (block.type === "text") {
+-			total += block.text.length;
+-		} else if (block.type === "image") {
+-			total += block.data.length;
++/**
++ * Recursively truncate large strings in an object for session persistence.
++ * - Truncates any oversized string fields (key-agnostic)
++ * - Replaces oversized image blocks with text notices
++ * - Updates lineCount when content is truncated
++ * - Returns original object if no changes needed (structural sharing)
++ */
++function truncateString(value: string, maxLength: number): string {
++	if (value.length <= maxLength) return value;
++	let truncated = value.slice(0, maxLength);
++	if (truncated.length > 0) {
++		const last = truncated.charCodeAt(truncated.length - 1);
++		if (last >= 0xd800 && last <= 0xdbff) {
++			truncated = truncated.slice(0, -1);
+ 		}
+-		if (total > maxChars) return true;
+ 	}
+-	return false;
++	return truncated;
+ }
+ 
+-function truncateTextImageContent(
+-	content: TextOrImageContent[],
+-	maxChars: number,
+-): { content: TextOrImageContent[]; truncated: boolean } {
+-	if (!textImageContentExceedsLimit(content, maxChars)) {
+-		return { content, truncated: false };
+-	}
+-
+-	const result: TextOrImageContent[] = [];
+-	let remaining = maxChars;
+-
+-	for (const block of content) {
+-		if (block.type === "text") {
+-			if (block.text.length <= remaining) {
+-				result.push(block);
+-				remaining -= block.text.length;
+-				continue;
+-			}
+-
+-			const limit = Math.max(0, remaining - PERSIST_TRUNCATION_NOTICE.length);
+-			result.push({
+-				...block,
+-				text: `${block.text.slice(0, limit)}${PERSIST_TRUNCATION_NOTICE}`,
+-			});
+-			return { content: result, truncated: true };
+-		}
+-
+-		if (block.type === "image") {
+-			if (block.data.length <= remaining) {
+-				result.push(block);
+-				remaining -= block.data.length;
+-				continue;
+-			}
+-
+-			result.push({
+-				type: "text",
+-				text: `[Image omitted in session persistence]${PERSIST_TRUNCATION_NOTICE}`,
+-			});
+-			return { content: result, truncated: true };
+-		}
+-	}
+-
+-	return { content: result, truncated: true };
++function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
++	return (
++		typeof value === "object" &&
++		value !== null &&
++		"type" in value &&
++		(value as { type?: string }).type === "image" &&
++		"data" in value &&
++		typeof (value as { data?: string }).data === "string"
++	);
+ }
+ 
+-function assistantContentExceedsLimit(content: AssistantContent[], maxChars: number): boolean {
+-	let total = 0;
+-	for (const block of content) {
+-		if (block.type === "text") {
+-			total += block.text.length;
+-		} else if (block.type === "thinking") {
+-			total += block.thinking.length;
++async function compressImageForPersistence(image: ImageContent): Promise<ImageContent> {
++	try {
++		const buffer = Buffer.from(image.data, "base64");
++		const pipeline = sharp(buffer, { failOnError: false });
++		const metadata = await pipeline.metadata();
++		const width = metadata.width ?? 0;
++		const height = metadata.height ?? 0;
++		const hasDims = width > 0 && height > 0;
++		const targetWidth = hasDims && width >= height ? 512 : undefined;
++		const targetHeight = hasDims && height > width ? 512 : undefined;
++		const resized = await pipeline
++			.resize({
++				width: hasDims ? targetWidth : 512,
++				height: hasDims ? targetHeight : 512,
++				fit: "inside",
++				withoutEnlargement: true,
++			})
++			.jpeg({ quality: 70 })
++			.toBuffer();
++		const base64 = resized.toString("base64");
++		if (base64.length > MAX_PERSIST_CHARS) {
++			return { type: "image", data: PLACEHOLDER_IMAGE_DATA, mimeType: "image/jpeg" };
+ 		}
+-		if (total > maxChars) return true;
++		return { type: "image", data: base64, mimeType: "image/jpeg" };
++	} catch {
++		return { type: "image", data: PLACEHOLDER_IMAGE_DATA, mimeType: "image/jpeg" };
+ 	}
+-	return false;
+ }
+ 
+-function truncateAssistantContent(
+-	content: AssistantContent[],
+-	maxChars: number,
+-): { content: AssistantContent[]; truncated: boolean } {
+-	if (!assistantContentExceedsLimit(content, maxChars)) {
+-		return { content, truncated: false };
++async function truncateForPersistence<T>(obj: T, key?: string): Promise<T> {
++	if (obj === null || obj === undefined) return obj;
++
++	if (typeof obj === "string") {
++		if (obj.length > MAX_PERSIST_CHARS) {
++			const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
++			return `${truncateString(obj, limit)}${TRUNCATION_NOTICE}` as T;
++		}
++		return obj;
+ 	}
+ 
+-	const result: AssistantContent[] = [];
+-	let remaining = maxChars;
+-
+-	for (const block of content) {
+-		if (block.type === "text") {
+-			if (block.text.length <= remaining) {
+-				result.push(block);
+-				remaining -= block.text.length;
+-				continue;
+-			}
+-
+-			const limit = Math.max(0, remaining - PERSIST_TRUNCATION_NOTICE.length);
+-			result.push({
+-				...block,
+-				text: `${block.text.slice(0, limit)}${PERSIST_TRUNCATION_NOTICE}`,
+-			});
+-			return { content: result, truncated: true };
+-		}
+-
+-		if (block.type === "thinking") {
+-			if (block.thinking.length <= remaining) {
+-				result.push(block);
+-				remaining -= block.thinking.length;
+-				continue;
+-			}
+-
+-			const limit = Math.max(0, remaining - PERSIST_TRUNCATION_NOTICE.length);
+-			result.push({
+-				...block,
+-				thinking: `${block.thinking.slice(0, limit)}${PERSIST_TRUNCATION_NOTICE}`,
+-			});
+-			return { content: result, truncated: true };
+-		}
+-
+-		if (block.type === "toolCall") {
+-			if (remaining <= 0) {
+-				result.push({ type: "text", text: PERSIST_TRUNCATION_NOTICE });
+-				return { content: result, truncated: true };
+-			}
+-			result.push(block);
+-		}
++	if (Array.isArray(obj)) {
++		let changed = false;
++		const result = await Promise.all(
++			obj.map(async (item) => {
++				// Special handling: compress oversized images while preserving shape
++				if (key === TEXT_CONTENT_KEY && isImageBlock(item)) {
++					if (item.data.length > MAX_PERSIST_CHARS) {
++						changed = true;
++						return compressImageForPersistence({
++							type: "image",
++							data: item.data,
++							mimeType: item.mimeType ?? "image/jpeg",
++						});
++					}
++				}
++				const newItem = await truncateForPersistence(item, key);
++				if (newItem !== item) changed = true;
++				return newItem;
++			}),
++		);
++		return changed ? (result as T) : obj;
+ 	}
+ 
+-	return { content: result, truncated: true };
++	if (typeof obj === "object") {
++		let changed = false;
++		const result: Record<string, unknown> = {};
++		for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
++			const newV = await truncateForPersistence(v, k);
++			result[k] = newV;
++			if (newV !== v) changed = true;
++		}
++		// Update lineCount if content was truncated (for FileMentionFile)
++		if (changed && "lineCount" in result && "content" in result && typeof result.content === "string") {
++			result.lineCount = result.content.split("\n").length;
++		}
++		return changed ? (result as T) : obj;
++	}
++
++	return obj;
+ }
+ 
+-function truncateContentValue(
+-	content: string | TextOrImageContent[],
+-	maxChars: number,
+-): { content: string | TextOrImageContent[]; truncated: boolean } {
+-	if (typeof content === "string") {
+-		const result = truncateStringForPersistence(content, maxChars);
+-		return { content: result.text, truncated: result.truncated };
+-	}
+-	return truncateTextImageContent(content, maxChars);
+-}
+-
+-function fileMentionsExceedLimit(files: FileMentionFile[], maxChars: number): boolean {
+-	let total = 0;
+-	for (const file of files) {
+-		total += file.content.length;
+-		if (total > maxChars) return true;
+-	}
+-	return false;
+-}
+-
+-function truncateFileMentions(
+-	files: FileMentionFile[],
+-	maxChars: number,
+-): { files: FileMentionFile[]; truncated: boolean } {
+-	if (!fileMentionsExceedLimit(files, maxChars)) {
+-		return { files, truncated: false };
+-	}
+-
+-	const result: FileMentionFile[] = [];
+-	let remaining = maxChars;
+-
+-	for (const file of files) {
+-		if (file.content.length <= remaining) {
+-			result.push(file);
+-			remaining -= file.content.length;
+-			continue;
+-		}
+-
+-		const limit = Math.max(0, remaining - PERSIST_TRUNCATION_NOTICE.length);
+-		const truncatedContent = `${file.content.slice(0, limit)}${PERSIST_TRUNCATION_NOTICE}`;
+-		result.push({
+-			...file,
+-			content: truncatedContent,
+-			lineCount: truncatedContent.split("\n").length,
+-		});
+-		return { files: result, truncated: true };
+-	}
+-
+-	return { files: result, truncated: true };
+-}
+-
+-function truncateDetailsForPersistence(details: unknown, maxChars: number): unknown {
+-	if (!details || typeof details !== "object" || Array.isArray(details)) {
+-		return details;
+-	}
+-
+-	let changed = false;
+-	const result: Record<string, unknown> = {};
+-	for (const [key, value] of Object.entries(details as Record<string, unknown>)) {
+-		if (typeof value === "string") {
+-			const truncated = truncateStringForPersistence(value, maxChars);
+-			result[key] = truncated.text;
+-			if (truncated.truncated) changed = true;
+-		} else {
+-			result[key] = value;
+-		}
+-	}
+-
+-	return changed ? result : details;
+-}
+-
+-function truncateAgentMessageForPersistence(message: AgentMessage): AgentMessage {
+-	if (message.role === "user") {
+-		const result = truncateContentValue(message.content, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return message;
+-		return { ...message, content: result.content };
+-	}
+-
+-	if (message.role === "assistant") {
+-		const result = truncateAssistantContent(message.content, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return message;
+-		return { ...message, content: result.content };
+-	}
+-
+-	if (message.role === "toolResult") {
+-		const contentResult = truncateTextImageContent(message.content, MAX_PERSIST_CONTENT_CHARS);
+-		const detailsResult = truncateDetailsForPersistence(message.details, MAX_PERSIST_CONTENT_CHARS);
+-		const contentChanged = contentResult.truncated;
+-		const detailsChanged = detailsResult !== message.details;
+-
+-		if (!contentChanged && !detailsChanged) return message;
+-
+-		if (contentChanged && detailsChanged) {
+-			return { ...message, content: contentResult.content, details: detailsResult };
+-		}
+-		if (contentChanged) {
+-			return { ...message, content: contentResult.content };
+-		}
+-		return { ...message, details: detailsResult };
+-	}
+-
+-	if (message.role === "hookMessage") {
+-		const result = truncateContentValue(message.content, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return message;
+-		return { ...message, content: result.content };
+-	}
+-
+-	if (message.role === "bashExecution") {
+-		const result = truncateStringForPersistence(message.output, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return message;
+-		return { ...message, output: result.text };
+-	}
+-
+-	if (message.role === "fileMention") {
+-		const result = truncateFileMentions(message.files, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return message;
+-		return { ...message, files: result.files };
+-	}
+-
+-	return message;
+-}
+-
+-function prepareEntryForPersistence(entry: FileEntry): FileEntry {
+-	if (entry.type === "message") {
+-		const message = truncateAgentMessageForPersistence(entry.message);
+-		if (message === entry.message) return entry;
+-		return { ...entry, message };
+-	}
+-
+-	if (entry.type === "custom_message") {
+-		const result = truncateContentValue(entry.content, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return entry;
+-		return { ...entry, content: result.content };
+-	}
+-
+-	if (entry.type === "compaction" || entry.type === "branch_summary") {
+-		const result = truncateStringForPersistence(entry.summary, MAX_PERSIST_CONTENT_CHARS);
+-		if (!result.truncated) return entry;
+-		return { ...entry, summary: result.text };
+-	}
+-
+-	return entry;
++async function prepareEntryForPersistence(entry: FileEntry): Promise<FileEntry> {
++	return truncateForPersistence(entry);
+ }
+ 
+ class NdjsonFileWriter {
+-	private encoder: ReturnType<typeof ndjson.stringify>;
+ 	private writeStream: WriteStream;
+ 	private closed = false;
++	private closing = false;
+ 	private error: Error | undefined;
++	private pendingWrites: Promise<void> = Promise.resolve();
++	private ready: Promise<void>;
++	private fd: number | null = null;
++	private onError: ((err: Error) => void) | undefined;
+ 
+-	constructor(path: string) {
+-		this.encoder = ndjson.stringify();
+-		this.writeStream = createWriteStream(path, { flags: "a" });
+-		this.encoder.pipe(this.writeStream);
+-
+-		this.encoder.on("error", (err: Error) => {
+-			this.error = err;
++	constructor(path: string, options?: { flags?: string; onError?: (err: Error) => void }) {
++		this.onError = options?.onError;
++		this.writeStream = createWriteStream(path, { flags: options?.flags ?? "a" });
++		this.ready = new Promise<void>((resolve, reject) => {
++			const onOpen = (fd: number) => {
++				this.fd = fd;
++				this.writeStream.off("error", onError);
++				resolve();
++			};
++			const onError = (err: Error) => {
++				this.writeStream.off("open", onOpen);
++				reject(err);
++			};
++			this.writeStream.once("open", onOpen);
++			this.writeStream.once("error", onError);
+ 		});
+ 		this.writeStream.on("error", (err: Error) => {
+-			this.error = err;
++			const writeErr = toError(err);
++			if (!this.error) this.error = writeErr;
++			this.onError?.(writeErr);
+ 		});
+ 	}
+ 
+-	write(entry: FileEntry): void {
+-		if (this.closed) throw new Error("Writer closed");
+-		if (this.error) throw this.error;
+-		this.encoder.write(entry);
++	private enqueue(task: () => Promise<void>): Promise<void> {
++		const run = async () => {
++			if (this.error) throw this.error;
++			await task();
++		};
++		const next = this.pendingWrites.then(run);
++		this.pendingWrites = next.catch((err) => {
++			if (!this.error) this.error = toError(err);
++		});
++		return next;
+ 	}
+ 
+-	flush(): Promise<void> {
+-		if (this.error) return Promise.reject(this.error);
+-		return new Promise((resolve) => {
+-			// Cork/uncork forces immediate flush through transform
+-			this.encoder.cork();
+-			process.nextTick(() => {
+-				this.encoder.uncork();
+-				// Wait for writeStream to drain
+-				if (this.writeStream.writableNeedDrain) {
+-					this.writeStream.once("drain", resolve);
++	private async writeLine(line: string): Promise<void> {
++		if (this.error) throw this.error;
++		await new Promise<void>((resolve, reject) => {
++			let settled = false;
++			const onError = (err: Error) => {
++				if (settled) return;
++				settled = true;
++				const writeErr = toError(err);
++				if (!this.error) this.error = writeErr;
++				this.writeStream.off("error", onError);
++				reject(writeErr);
++			};
++			this.writeStream.once("error", onError);
++			this.writeStream.write(line, (err) => {
++				if (settled) return;
++				settled = true;
++				this.writeStream.off("error", onError);
++				if (err) {
++					const writeErr = toError(err);
++					if (!this.error) this.error = writeErr;
++					reject(writeErr);
++				} else {
++					resolve();
++				}
++			});
++			if (this.error && !settled) {
++				settled = true;
++				this.writeStream.off("error", onError);
++				reject(this.error);
++			}
++		});
++	}
++
++	/** Queue a write. Returns a promise so callers can await if needed. */
++	write(entry: FileEntry): Promise<void> {
++		if (this.closed || this.closing) throw new Error("Writer closed");
++		if (this.error) throw this.error;
++		const line = `${JSON.stringify(entry)}\n`;
++		return this.enqueue(() => this.writeLine(line));
++	}
++
++	/** Flush all buffered data to disk. Waits for all queued writes and fsync. */
++	async flush(): Promise<void> {
++		if (this.closed) return;
++		if (this.error) throw this.error;
++
++		await this.enqueue(async () => {});
++
++		if (this.error) throw this.error;
++
++		await this.ready;
++		const fd = this.fd;
++		if (typeof fd === "number") {
++			try {
++				fsyncSync(fd);
++			} catch (err) {
++				const fsyncErr = toError(err);
++				if (!this.error) this.error = fsyncErr;
++				throw fsyncErr;
++			}
++		}
++
++		if (this.error) throw this.error;
++	}
++
++	/** Close the writer, flushing all data. */
++	async close(): Promise<void> {
++		if (this.closed || this.closing) return;
++		this.closing = true;
++
++		let closeError: Error | undefined;
++		try {
++			await this.flush();
++		} catch (err) {
++			closeError = toError(err);
++		}
++
++		await this.pendingWrites;
++
++		await new Promise<void>((resolve, reject) => {
++			this.writeStream.end((err?: Error | null) => {
++				if (err) {
++					const endErr = toError(err);
++					if (!this.error) this.error = endErr;
++					reject(endErr);
+ 				} else {
+ 					resolve();
+ 				}
+ 			});
+ 		});
++
++		this.closed = true;
++		this.writeStream.removeAllListeners();
++
++		if (closeError) throw closeError;
++		if (this.error) throw this.error;
+ 	}
+ 
+-	close(): Promise<void> {
+-		if (this.closed) return Promise.resolve();
+-		this.closed = true;
+-
+-		return new Promise((resolve, reject) => {
+-			this.writeStream.on("finish", resolve);
+-			this.writeStream.on("error", reject);
+-			this.encoder.end();
+-		});
++	/** Check if there's a stored error. */
++	getError(): Error | undefined {
++		return this.error;
+ 	}
+ }
+ 
+@@ -942,6 +889,14 @@ export interface UsageStatistics {
+ 	cost: number;
+ }
+ 
++function getTaskToolUsage(details: unknown): Usage | undefined {
++	if (!details || typeof details !== "object") return undefined;
++	const record = details as Record<string, unknown>;
++	const usage = record.usage;
++	if (!usage || typeof usage !== "object") return undefined;
++	return usage as Usage;
++}
++
+ export class SessionManager {
+ 	private sessionId: string = "";
+ 	private sessionTitle: string | undefined;
+@@ -957,25 +912,35 @@ export class SessionManager {
+ 	private usageStatistics: UsageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+ 	private persistWriter: NdjsonFileWriter | undefined;
+ 	private persistWriterPath: string | undefined;
++	private persistChain: Promise<void> = Promise.resolve();
++	private persistError: Error | undefined;
++	private persistErrorReported = false;
+ 
+-	private constructor(cwd: string, sessionDir: string, sessionFile: string | undefined, persist: boolean) {
++	private constructor(cwd: string, sessionDir: string, persist: boolean) {
+ 		this.cwd = cwd;
+ 		this.sessionDir = sessionDir;
+ 		this.persist = persist;
+ 		if (persist && sessionDir && !existsSync(sessionDir)) {
+ 			mkdirSync(sessionDir, { recursive: true });
+ 		}
++		// Note: call _initSession() or _initSessionFile() after construction
++	}
+ 
+-		if (sessionFile) {
+-			this.setSessionFile(sessionFile);
+-		} else {
+-			this.newSession();
+-		}
++	/** Initialize with a specific session file (used by factory methods) */
++	private async _initSessionFile(sessionFile: string): Promise<void> {
++		await this.setSessionFile(sessionFile);
++	}
++
++	/** Initialize with a new session (used by factory methods) */
++	private _initNewSession(): void {
++		this._newSessionSync();
+ 	}
+ 
+ 	/** Switch to a different session file (used for resume and branching) */
+-	setSessionFile(sessionFile: string): void {
+-		this._closePersistWriterSync();
++	async setSessionFile(sessionFile: string): Promise<void> {
++		await this._closePersistWriter();
++		this.persistError = undefined;
++		this.persistErrorReported = false;
+ 		this.sessionFile = resolve(sessionFile);
+ 		if (existsSync(this.sessionFile)) {
+ 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
+@@ -984,18 +949,27 @@ export class SessionManager {
+ 			this.sessionTitle = header?.title;
+ 
+ 			if (migrateToCurrentVersion(this.fileEntries)) {
+-				this._rewriteFile();
++				await this._rewriteFile();
+ 			}
+ 
+ 			this._buildIndex();
+ 			this.flushed = true;
+ 		} else {
+-			this.newSession();
++			this._newSessionSync();
+ 		}
+ 	}
+ 
+-	newSession(options?: NewSessionOptions): string | undefined {
+-		this._closePersistWriterSync();
++	/** Start a new session. Closes any existing writer first. */
++	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
++		await this._closePersistWriter();
++		return this._newSessionSync(options);
++	}
++
++	/** Sync version for initial creation (no existing writer to close) */
++	private _newSessionSync(options?: NewSessionOptions): string | undefined {
++		this.persistChain = Promise.resolve();
++		this.persistError = undefined;
++		this.persistErrorReported = false;
+ 		this.sessionId = nanoid();
+ 		const timestamp = new Date().toISOString();
+ 		const header: SessionHeader = {
+@@ -1044,28 +1018,56 @@ export class SessionManager {
+ 				this.usageStatistics.cacheWrite += usage.cacheWrite;
+ 				this.usageStatistics.cost += usage.cost.total;
+ 			}
++
++			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
++				const usage = getTaskToolUsage(entry.message.details);
++				if (usage) {
++					this.usageStatistics.input += usage.input;
++					this.usageStatistics.output += usage.output;
++					this.usageStatistics.cacheRead += usage.cacheRead;
++					this.usageStatistics.cacheWrite += usage.cacheWrite;
++					this.usageStatistics.cost += usage.cost.total;
++				}
++			}
+ 		}
+ 	}
+ 
++	private _recordPersistError(err: unknown): Error {
++		const normalized = toError(err);
++		if (!this.persistError) this.persistError = normalized;
++		if (!this.persistErrorReported) {
++			this.persistErrorReported = true;
++			console.error("Session persistence error:", normalized);
++		}
++		return normalized;
++	}
++
++	private _queuePersistTask(task: () => Promise<void>, options?: { ignoreError?: boolean }): Promise<void> {
++		const next = this.persistChain.then(async () => {
++			if (this.persistError && !options?.ignoreError) throw this.persistError;
++			await task();
++		});
++		this.persistChain = next.catch((err) => {
++			this._recordPersistError(err);
++		});
++		return next;
++	}
++
+ 	private _ensurePersistWriter(): NdjsonFileWriter | undefined {
+ 		if (!this.persist || !this.sessionFile) return undefined;
++		if (this.persistError) throw this.persistError;
+ 		if (this.persistWriter && this.persistWriterPath === this.sessionFile) return this.persistWriter;
+-		this._closePersistWriterSync();
+-		this.persistWriter = new NdjsonFileWriter(this.sessionFile);
++		// Note: caller must await _closePersistWriter() before calling this if switching files
++		this.persistWriter = new NdjsonFileWriter(this.sessionFile, {
++			onError: (err) => {
++				this._recordPersistError(err);
++			},
++		});
+ 		this.persistWriterPath = this.sessionFile;
+ 		return this.persistWriter;
+ 	}
+ 
+-	private _closePersistWriterSync(): void {
+-		if (this.persistWriter) {
+-			// Fire-and-forget close - use flush() for guaranteed completion
+-			this.persistWriter.close();
+-			this.persistWriter = undefined;
+-		}
+-		this.persistWriterPath = undefined;
+-	}
+-
+-	private async _closePersistWriter(): Promise<void> {
++	private async _closePersistWriterInternal(): Promise<void> {
+ 		if (this.persistWriter) {
+ 			await this.persistWriter.close();
+ 			this.persistWriter = undefined;
+@@ -1073,16 +1075,46 @@ export class SessionManager {
+ 		this.persistWriterPath = undefined;
+ 	}
+ 
+-	private _rewriteFile(): void {
+-		if (!this.persist || !this.sessionFile) return;
+-		this._closePersistWriterSync();
+-		writeFileSync(this.sessionFile, "");
+-		const writer = this._ensurePersistWriter();
+-		if (!writer) return;
+-		for (const entry of this.fileEntries) {
+-			const persistedEntry = prepareEntryForPersistence(entry);
+-			writer.write(persistedEntry);
++	private async _closePersistWriter(): Promise<void> {
++		await this._queuePersistTask(
++			async () => {
++				await this._closePersistWriterInternal();
++			},
++			{ ignoreError: true },
++		);
++	}
++
++	private async _writeEntriesAtomically(entries: FileEntry[]): Promise<void> {
++		if (!this.sessionFile) return;
++		const dir = resolve(this.sessionFile, "..");
++		const tempPath = join(dir, `.${basename(this.sessionFile)}.${nanoid(6)}.tmp`);
++		const writer = new NdjsonFileWriter(tempPath, { flags: "w" });
++		for (const entry of entries) {
++			await writer.write(entry);
+ 		}
++		await writer.flush();
++		await writer.close();
++		try {
++			renameSync(tempPath, this.sessionFile);
++			fsyncDirSync(dir);
++		} catch (err) {
++			try {
++				unlinkSync(tempPath);
++			} catch {
++				// Ignore cleanup errors
++			}
++			throw toError(err);
++		}
++	}
++
++	private async _rewriteFile(): Promise<void> {
++		if (!this.persist || !this.sessionFile) return;
++		await this._queuePersistTask(async () => {
++			await this._closePersistWriterInternal();
++			const entries = await Promise.all(this.fileEntries.map((entry) => prepareEntryForPersistence(entry)));
++			await this._writeEntriesAtomically(entries);
++			this.flushed = true;
++		});
+ 	}
+ 
+ 	isPersisted(): boolean {
+@@ -1091,9 +1123,11 @@ export class SessionManager {
+ 
+ 	/** Flush pending writes to disk. Call before switching sessions or on shutdown. */
+ 	async flush(): Promise<void> {
+-		if (this.persistWriter) {
+-			await this.persistWriter.flush();
+-		}
++		if (!this.persistWriter) return;
++		await this._queuePersistTask(async () => {
++			if (this.persistWriter) await this.persistWriter.flush();
++		});
++		if (this.persistError) throw this.persistError;
+ 	}
+ 
+ 	getCwd(): string {
+@@ -1121,7 +1155,7 @@ export class SessionManager {
+ 		return this.sessionTitle;
+ 	}
+ 
+-	setSessionTitle(title: string): void {
++	async setSessionTitle(title: string): Promise<void> {
+ 		this.sessionTitle = title;
+ 
+ 		// Update the in-memory header (so first flush includes title)
+@@ -1131,44 +1165,71 @@ export class SessionManager {
+ 		}
+ 
+ 		// Update the session file header with the title (if already flushed)
+-		if (this.persist && this.sessionFile && existsSync(this.sessionFile)) {
+-			// Close writer to flush pending writes before modifying file
+-			this._closePersistWriterSync();
+-			try {
+-				const content = readFileSync(this.sessionFile, "utf-8");
+-				const lines = content.split("\n");
+-				if (lines.length > 0) {
+-					const fileHeader = JSON.parse(lines[0]) as SessionHeader;
+-					if (fileHeader.type === "session") {
+-						fileHeader.title = title;
+-						lines[0] = JSON.stringify(fileHeader);
+-						writeFileSync(this.sessionFile, lines.join("\n"));
++		const sessionFile = this.sessionFile;
++		if (this.persist && sessionFile && existsSync(sessionFile)) {
++			await this._queuePersistTask(async () => {
++				await this._closePersistWriterInternal();
++				try {
++					const content = readFileSync(sessionFile, "utf-8");
++					const lines = content.split("\n");
++					if (lines.length > 0) {
++						const fileHeader = JSON.parse(lines[0]) as SessionHeader;
++						if (fileHeader.type === "session") {
++							fileHeader.title = title;
++							lines[0] = JSON.stringify(fileHeader);
++							const tempPath = join(resolve(sessionFile, ".."), `.${basename(sessionFile)}.${nanoid(6)}.tmp`);
++							writeFileSync(tempPath, lines.join("\n"));
++							const fd = openSync(tempPath, "r");
++							try {
++								fsyncSync(fd);
++							} finally {
++								closeSync(fd);
++							}
++							try {
++								renameSync(tempPath, sessionFile);
++								fsyncDirSync(resolve(sessionFile, ".."));
++							} catch (err) {
++								try {
++									unlinkSync(tempPath);
++								} catch {
++									// Ignore cleanup errors
++								}
++								throw err;
++							}
++						}
+ 					}
++				} catch (err) {
++					this._recordPersistError(err);
++					throw err;
+ 				}
+-			} catch {
+-				// Ignore errors updating title
+-			}
++			});
+ 		}
+ 	}
+ 
+ 	_persist(entry: SessionEntry): void {
+ 		if (!this.persist || !this.sessionFile) return;
++		if (this.persistError) throw this.persistError;
+ 
+ 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+ 		if (!hasAssistant) return;
+ 
+-		const writer = this._ensurePersistWriter();
+-		if (!writer) return;
+-
+ 		if (!this.flushed) {
+-			for (const e of this.fileEntries) {
+-				const persistedEntry = prepareEntryForPersistence(e);
+-				writer.write(persistedEntry);
+-			}
+ 			this.flushed = true;
++			void this._queuePersistTask(async () => {
++				const writer = this._ensurePersistWriter();
++				if (!writer) return;
++				const entries = await Promise.all(this.fileEntries.map((e) => prepareEntryForPersistence(e)));
++				for (const persistedEntry of entries) {
++					await writer.write(persistedEntry);
++				}
++			});
+ 		} else {
+-			const persistedEntry = prepareEntryForPersistence(entry);
+-			writer.write(persistedEntry);
++			void this._queuePersistTask(async () => {
++				const writer = this._ensurePersistWriter();
++				if (!writer) return;
++				const persistedEntry = await prepareEntryForPersistence(entry);
++				await writer.write(persistedEntry);
++			});
+ 		}
+ 	}
+ 
+@@ -1185,6 +1246,17 @@ export class SessionManager {
+ 			this.usageStatistics.cacheWrite += usage.cacheWrite;
+ 			this.usageStatistics.cost += usage.cost.total;
+ 		}
++
++		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
++			const usage = getTaskToolUsage(entry.message.details);
++			if (usage) {
++				this.usageStatistics.input += usage.input;
++				this.usageStatistics.output += usage.output;
++				this.usageStatistics.cacheRead += usage.cacheRead;
++				this.usageStatistics.cacheWrite += usage.cacheWrite;
++				this.usageStatistics.cost += usage.cost.total;
++			}
++		}
+ 	}
+ 
+ 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
+@@ -1630,7 +1702,9 @@ export class SessionManager {
+ 	 */
+ 	static create(cwd: string, sessionDir?: string): SessionManager {
+ 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
+-		return new SessionManager(cwd, dir, undefined, true);
++		const manager = new SessionManager(cwd, dir, true);
++		manager._initNewSession();
++		return manager;
+ 	}
+ 
+ 	/**
+@@ -1638,14 +1712,16 @@ export class SessionManager {
+ 	 * @param path Path to session file
+ 	 * @param sessionDir Optional session directory for /new or /branch. If omitted, derives from file's parent.
+ 	 */
+-	static open(path: string, sessionDir?: string): SessionManager {
++	static async open(path: string, sessionDir?: string): Promise<SessionManager> {
+ 		// Extract cwd from session header if possible, otherwise use process.cwd()
+ 		const entries = loadEntriesFromFile(path);
+ 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
+ 		const cwd = header?.cwd ?? process.cwd();
+ 		// If no sessionDir provided, derive from file's parent directory
+ 		const dir = sessionDir ?? resolve(path, "..");
+-		return new SessionManager(cwd, dir, path, true);
++		const manager = new SessionManager(cwd, dir, true);
++		await manager._initSessionFile(path);
++		return manager;
+ 	}
+ 
+ 	/**
+@@ -1653,18 +1729,23 @@ export class SessionManager {
+ 	 * @param cwd Working directory
+ 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.omp/agent/sessions/<encoded-cwd>/).
+ 	 */
+-	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
++	static async continueRecent(cwd: string, sessionDir?: string): Promise<SessionManager> {
+ 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
+ 		const mostRecent = findMostRecentSession(dir);
++		const manager = new SessionManager(cwd, dir, true);
+ 		if (mostRecent) {
+-			return new SessionManager(cwd, dir, mostRecent, true);
++			await manager._initSessionFile(mostRecent);
++		} else {
++			manager._initNewSession();
+ 		}
+-		return new SessionManager(cwd, dir, undefined, true);
++		return manager;
+ 	}
+ 
+ 	/** Create an in-memory session (no file persistence) */
+ 	static inMemory(cwd: string = process.cwd()): SessionManager {
+-		return new SessionManager(cwd, "", undefined, false);
++		const manager = new SessionManager(cwd, "", false);
++		manager._initNewSession();
++		return manager;
+ 	}
+ 
+ 	/**
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 8c980a045..e67cfe7f7 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -176,15 +176,15 @@ function getChangelogForDisplay(parsed: Args, settingsManager: SettingsManager):
+ 	return undefined;
+ }
+ 
+-function createSessionManager(parsed: Args, cwd: string): SessionManager | undefined {
++async function createSessionManager(parsed: Args, cwd: string): Promise<SessionManager | undefined> {
+ 	if (parsed.noSession) {
+ 		return SessionManager.inMemory();
+ 	}
+ 	if (parsed.session) {
+-		return SessionManager.open(parsed.session, parsed.sessionDir);
++		return await SessionManager.open(parsed.session, parsed.sessionDir);
+ 	}
+ 	if (parsed.continue) {
+-		return SessionManager.continueRecent(cwd, parsed.sessionDir);
++		return await SessionManager.continueRecent(cwd, parsed.sessionDir);
+ 	}
+ 	// --resume is handled separately (needs picker UI)
+ 	// If --session-dir provided without --continue/--resume, create new session there
+@@ -400,7 +400,7 @@ export async function main(args: string[]) {
+ 	}
+ 
+ 	// Create session manager based on CLI flags
+-	let sessionManager = createSessionManager(parsed, cwd);
++	let sessionManager = await createSessionManager(parsed, cwd);
+ 	time("createSessionManager");
+ 
+ 	// Handle --resume: show session picker
+@@ -417,7 +417,7 @@ export async function main(args: string[]) {
+ 			console.log(chalk.dim("No session selected"));
+ 			return;
+ 		}
+-		sessionManager = SessionManager.open(selectedPath);
++		sessionManager = await SessionManager.open(selectedPath);
+ 	}
+ 
+ 	const sessionOptions = await buildSessionOptions(parsed, scopedModels, sessionManager, modelRegistry);

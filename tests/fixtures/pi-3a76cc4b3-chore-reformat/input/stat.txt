@@ -1,0 +1,5 @@
+ packages/coding-agent/src/modes/controllers/input-controller.ts | 1 -
+ packages/coding-agent/src/slash-commands/acp-builtins.ts        | 2 +-
+ packages/coding-agent/src/slash-commands/builtin-registry.ts    | 4 ++--
+ packages/coding-agent/src/slash-commands/types.ts               | 2 +-
+ 4 files changed, 4 insertions(+), 5 deletions(-)

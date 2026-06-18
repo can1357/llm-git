@@ -1,0 +1,3 @@
+ .../src/modes/components/session-observer-overlay.ts  | 14 +++++++-------
+ .../src/modes/controllers/selector-controller.ts      | 19 +++++--------------
+ 2 files changed, 12 insertions(+), 21 deletions(-)

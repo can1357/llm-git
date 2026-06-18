@@ -1,0 +1,398 @@
+diff --git a/packages/coding-agent/src/modes/components/custom-editor.ts b/packages/coding-agent/src/modes/components/custom-editor.ts
+index 76e1e04bb..dd2652548 100644
+--- a/packages/coding-agent/src/modes/components/custom-editor.ts
++++ b/packages/coding-agent/src/modes/components/custom-editor.ts
+@@ -1,5 +1,6 @@
+ import { Editor, type KeyId, matchesKey, parseKittySequence } from "@oh-my-pi/pi-tui";
+ import type { AppKeybinding } from "../../config/keybindings";
++import { highlightOrchestrate } from "../orchestrate";
+ import { highlightUltrathink } from "../ultrathink";
+ 
+ type ConfigurableEditorAction = Extract<
+@@ -45,8 +46,8 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
+  * Custom editor that handles configurable app-level shortcuts for coding-agent.
+  */
+ export class CustomEditor extends Editor {
+-	/** Rainbow-highlight the "ultrathink" keyword as the user types it. */
+-	decorateText = highlightUltrathink;
++	/** Gradient-highlight the "ultrathink" / "orchestrate" keywords as the user types them. */
++	decorateText = (text: string): string => highlightOrchestrate(highlightUltrathink(text));
+ 	onEscape?: () => void;
+ 	shouldBypassAutocompleteOnEscape?: () => boolean;
+ 	onClear?: () => void;
+diff --git a/packages/coding-agent/src/modes/components/tips.txt b/packages/coding-agent/src/modes/components/tips.txt
+index 2208fdc91..4378a4b70 100644
+--- a/packages/coding-agent/src/modes/components/tips.txt
++++ b/packages/coding-agent/src/modes/components/tips.txt
+@@ -4,4 +4,8 @@ Ctrl+D can be used to exit, but with your draft saved!
+ Find which model you emotionally abuse more with `omp stats`
+ Try task isolation to create CoW worktrees
+ Your LLM can call an LLM using `llm(x...)`. Have a big batch of tasks? Ask clanker to use it!
+-Next time you see spaghet try: "omp, create a TTSR rule that will prevent this pattern, use omp://"
+\ No newline at end of file
++Next time you see spaghet try: "omp, create a TTSR rule that will prevent this pattern, use omp://"
++Did you know? Each kitty/tmux split keeps its own session — `omp -c` resumes the right one
++Drop the word `ultrathink` in your message for harder multi-step reasoning — watch it glow rainbow as you type
++Say `orchestrate` in your message to drive a multi-phase task with parallel subagents — watch it glow as you type
++Log in to several accounts of the same provider — `/login` again — and omp load-balances across them automatically
+\ No newline at end of file
+diff --git a/packages/coding-agent/src/modes/gradient-highlight.ts b/packages/coding-agent/src/modes/gradient-highlight.ts
+new file mode 100644
+index 000000000..75bb580b7
+--- /dev/null
++++ b/packages/coding-agent/src/modes/gradient-highlight.ts
+@@ -0,0 +1,70 @@
++import { theme } from "./theme/theme";
++
++const FG_RESET = "\x1b[39m";
++
++/** Declarative spec for {@link createGradientHighlighter}. */
++export interface GradientHighlightSpec {
++	/** Cheap, stateless presence probe used to skip the boundary regex on most lines. Must be non-global. */
++	probe: RegExp;
++	/** Global, word-bounded match regex walked by `.replace`. */
++	highlight: RegExp;
++	/** Number of color stops swept across the gradient. */
++	stops: number;
++	/** Maps a normalized position `t` in [0, 1) to an HSL hue in degrees. */
++	hue: (t: number) => number;
++	/** HSL saturation percentage. Default 90. */
++	saturation?: number;
++	/** HSL lightness percentage. Default 62. */
++	lightness?: number;
++}
++
++/**
++ * Build a stateless highlighter that paints each standalone match of `highlight`
++ * with a smooth HSL gradient for editor display. The returned function adds only
++ * zero-width SGR escapes — the visible width is unchanged — and returns the input
++ * untouched when `probe` does not match. The palette is compiled lazily and
++ * memoized per active color mode.
++ */
++export function createGradientHighlighter(spec: GradientHighlightSpec): (text: string) => string {
++	const { probe, highlight, stops, hue, saturation = 90, lightness = 62 } = spec;
++
++	let cachedMode: string | undefined;
++	let cachedPalette: readonly string[] | undefined;
++
++	/** Gradient foreground escapes for the active color mode, compiled once per mode. */
++	const palette = (): readonly string[] => {
++		const mode = theme.getColorMode();
++		if (cachedPalette && cachedMode === mode) return cachedPalette;
++		const format = mode === "truecolor" ? "ansi-16m" : "ansi-256";
++		const next: string[] = [];
++		for (let i = 0; i < stops; i++) {
++			next.push(Bun.color(`hsl(${Math.round(hue(i / stops))}, ${saturation}%, ${lightness}%)`, format) ?? "");
++		}
++		cachedMode = mode;
++		cachedPalette = next;
++		return next;
++	};
++
++	/** Paint each character of `word` with the next gradient stop, resetting fg after. */
++	const paint = (word: string): string => {
++		const stopsArr = palette();
++		const n = word.length;
++		let out = "";
++		let prev = "";
++		for (let i = 0; i < n; i++) {
++			const color = stopsArr[Math.floor((i / n) * stopsArr.length)] ?? stopsArr[0] ?? "";
++			// Coalesce consecutive characters that resolve to the same stop.
++			if (color !== prev) {
++				out += color;
++				prev = color;
++			}
++			out += word[i];
++		}
++		return `${out}${FG_RESET}`;
++	};
++
++	return (text: string): string => {
++		if (!probe.test(text)) return text;
++		return text.replace(highlight, paint);
++	};
++}
+diff --git a/packages/coding-agent/src/modes/orchestrate.ts b/packages/coding-agent/src/modes/orchestrate.ts
+new file mode 100644
+index 000000000..e9a560f8e
+--- /dev/null
++++ b/packages/coding-agent/src/modes/orchestrate.ts
+@@ -0,0 +1,36 @@
++import orchestrateNotice from "../prompts/system/orchestrate-notice.md" with { type: "text" };
++import { createGradientHighlighter } from "./gradient-highlight";
++
++/**
++ * "orchestrate" keyword support.
++ *
++ * Typing the standalone word in the input editor paints it with a cool
++ * teal→violet gradient ({@link highlightOrchestrate}); submitting a message that
++ * mentions it appends a hidden {@link ORCHESTRATE_NOTICE} that switches the model
++ * into multi-agent orchestration mode. Matching is word-bounded and
++ * case-insensitive, so "orchestrated"/"orchestrating" never trigger either
++ * behavior. Replaces the former `/orchestrate` slash command.
++ */
++
++// Detection: standalone keyword, any case. Non-global so `.test` stays stateless.
++const ORCHESTRATE_WORD = /\borchestrate\b/i;
++
++/** Hidden system notice appended after a user message that mentions "orchestrate". */
++export const ORCHESTRATE_NOTICE: string = orchestrateNotice.trim();
++
++/** Whether `text` contains the standalone keyword "orchestrate" (any case). */
++export function containsOrchestrate(text: string): boolean {
++	return ORCHESTRATE_WORD.test(text);
++}
++
++/**
++ * Highlight every standalone "orchestrate" in `text` for editor display with a
++ * cool teal→violet gradient (hue 150..280), visually distinct from ultrathink's
++ * full-spectrum rainbow.
++ */
++export const highlightOrchestrate: (text: string) => string = createGradientHighlighter({
++	probe: /orchestrate/i,
++	highlight: /\borchestrate\b/gi,
++	stops: 14,
++	hue: t => 150 + t * 130,
++});
+diff --git a/packages/coding-agent/src/modes/ultrathink.ts b/packages/coding-agent/src/modes/ultrathink.ts
+index 154331658..4b3462e07 100644
+--- a/packages/coding-agent/src/modes/ultrathink.ts
++++ b/packages/coding-agent/src/modes/ultrathink.ts
+@@ -1,5 +1,5 @@
+ import ultrathinkNotice from "../prompts/system/ultrathink-notice.md" with { type: "text" };
+-import { theme } from "./theme/theme";
++import { createGradientHighlighter } from "./gradient-highlight";
+ 
+ /**
+  * "ultrathink" keyword support, mirroring Claude Code's affordance.
+@@ -11,12 +11,8 @@ import { theme } from "./theme/theme";
+  * "ultrathinking"/"ultrathinks" never trigger either behavior.
+  */
+ 
+-// Cheap, stateless presence probe used to skip the boundary regex on most lines.
+-const ULTRATHINK_PROBE = /ultrathink/i;
+ // Detection: standalone keyword, any case. Non-global so `.test` stays stateless.
+ const ULTRATHINK_WORD = /\bultrathink\b/i;
+-// Highlight: global so `.replace` walks every occurrence.
+-const ULTRATHINK_HIGHLIGHT = /\bultrathink\b/gi;
+ 
+ /** Hidden system notice appended after a user message that mentions "ultrathink". */
+ export const ULTRATHINK_NOTICE: string = ultrathinkNotice.trim();
+@@ -26,54 +22,14 @@ export function containsUltrathink(text: string): boolean {
+ 	return ULTRATHINK_WORD.test(text);
+ }
+ 
+-const FG_RESET = "\x1b[39m";
+-// Hue stops swept across the visible spectrum. More stops than the keyword has
+-// letters so the gradient resolves smoothly regardless of casing/match length.
+-const RAINBOW_STOPS = 14;
+-
+-let cachedMode: string | undefined;
+-let cachedPalette: readonly string[] | undefined;
+-
+-/** Rainbow foreground escapes for the active color mode, compiled once per mode. */
+-function rainbowPalette(): readonly string[] {
+-	const mode = theme.getColorMode();
+-	if (cachedPalette && cachedMode === mode) return cachedPalette;
+-	const format = mode === "truecolor" ? "ansi-16m" : "ansi-256";
+-	const palette: string[] = [];
+-	for (let i = 0; i < RAINBOW_STOPS; i++) {
+-		// Sweep red→violet (0..330°), stopping short of the wrap back to red.
+-		const hue = Math.round((i / RAINBOW_STOPS) * 330);
+-		palette.push(Bun.color(`hsl(${hue}, 90%, 62%)`, format) ?? "");
+-	}
+-	cachedMode = mode;
+-	cachedPalette = palette;
+-	return palette;
+-}
+-
+-/** Paint each character of `word` with the next rainbow stop, resetting fg after. */
+-function rainbow(word: string): string {
+-	const palette = rainbowPalette();
+-	const n = word.length;
+-	let out = "";
+-	let prev = "";
+-	for (let i = 0; i < n; i++) {
+-		const color = palette[Math.floor((i / n) * palette.length)] ?? palette[0] ?? "";
+-		// Coalesce consecutive characters that resolve to the same stop.
+-		if (color !== prev) {
+-			out += color;
+-			prev = color;
+-		}
+-		out += word[i];
+-	}
+-	return `${out}${FG_RESET}`;
+-}
+-
+ /**
+  * Rainbow-highlight every standalone "ultrathink" in `text` for editor display.
+- * Adds only zero-width SGR escapes — the visible width is unchanged — and returns
+- * the input untouched when the keyword is absent.
++ * Sweeps red→violet (hue 0..330), stopping short of the wrap back to red so the
++ * gradient resolves smoothly regardless of casing or match length.
+  */
+-export function highlightUltrathink(text: string): string {
+-	if (!ULTRATHINK_PROBE.test(text)) return text;
+-	return text.replace(ULTRATHINK_HIGHLIGHT, rainbow);
+-}
++export const highlightUltrathink: (text: string) => string = createGradientHighlighter({
++	probe: /ultrathink/i,
++	highlight: /\bultrathink\b/gi,
++	stops: 14,
++	hue: t => t * 330,
++});
+diff --git a/packages/coding-agent/src/prompts/commands/orchestrate.md b/packages/coding-agent/src/prompts/system/orchestrate-notice.md
+similarity index 80%
+rename from packages/coding-agent/src/prompts/commands/orchestrate.md
+rename to packages/coding-agent/src/prompts/system/orchestrate-notice.md
+index 286ee480f..b627e610f 100644
+--- a/packages/coding-agent/src/prompts/commands/orchestrate.md
++++ b/packages/coding-agent/src/prompts/system/orchestrate-notice.md
+@@ -1,17 +1,5 @@
+----
+-name: orchestrate
+-description: Drive a multi-phase task to completion via parallel subagents
+----
+-
+-# Task
+-
+-$@
+-
+----
+-
+-# Orchestration Contract
+-
+-You are the **orchestrator** for the task above. Read it once, then execute under the rules below. The contract overrides any default tendency to yield early, narrate, or do work yourself.
++<system-notice>
++The user's message above is an **orchestration request**. Execute it as the orchestrator under the contract below. This contract overrides any default tendency to yield early, narrate, or do the work yourself.
+ 
+ <role>
+ You decompose, dispatch, verify, and iterate. You do **not** edit code. Every file mutation goes through a `task` subagent. Your tool budget is: reading for planning, `task` for dispatch, verification (`bun check`, `bun test`, `recipe`, `lsp diagnostics`), git via `bash`, and `todo_write` for tracking.
+@@ -19,11 +7,11 @@ You decompose, dispatch, verify, and iterate. You do **not** edit code. Every fi
+ 
+ <rules>
+ 1. **Do not yield until everything is closed.** A phase finishing is *not* a yield point — launch the next phase in the same turn. Stop only when every requested item is verifiably done, or you hit a concrete [blocked] state that genuinely requires the user.
+-2. **Enumerate the full surface before dispatching.** If the task references audits, plans, checklists, phase lists, or file lists, expand them into a flat set of items in `todo_write`. "Most of them" or "the important ones" is failure. Re-read the source documents — do not work from memory.
++2. **Enumerate the full surface before dispatching.** If the request references audits, plans, checklists, phase lists, or file lists, expand them into a flat set of items in `todo_write`. "Most of them" or "the important ones" is failure. Re-read the source documents — do not work from memory.
+ 3. **Parallelize maximally.** Every set of edits with disjoint file scope MUST ship as one `task` batch. Serialize only when one subagent produces a contract (types, schema, shared module) the next consumes — and state the dependency when you do.
+ 4. **Each `task` assignment is self-contained.** Subagents have no shared context. Spell out: target files (≤3–5 explicit paths, no globs), the change with APIs and patterns, edge cases, and observable acceptance criteria. Do not assume they read the same plan you did.
+ 5. **Verify after every phase before launching the next.** Run the appropriate gate: `bun check` for types, package-scoped `bun test` for behavior, `lsp diagnostics` for changed files. If a phase introduced breakage, dispatch fix-up subagents *before* moving on. Never declare a phase done on a red tree.
+-6. **Commit policy.** If the task asks for commits or the repo workflow expects them, commit after each green phase with a focused message. Never commit a red tree. Never commit work the user did not ask to commit.
++6. **Commit policy.** If the request asks for commits or the repo workflow expects them, commit after each green phase with a focused message. Never commit a red tree. Never commit work the user did not ask to commit.
+ 7. **Respawn, do not absorb.** If a subagent returns incomplete or wrong work, spawn a corrective subagent with the specific gap — do not silently fix it yourself.
+ 8. **No scope creep, no scope shrink.** Do not add work the user did not ask for. Do not relabel unfinished items as "follow-up", "v1", or "MVP" to imply completion.
+ 9. **Subagents do not verify, lint, or format.** Every `task` assignment MUST instruct the subagent to skip all gates and formatters. Their job is the edit only. You — the orchestrator — run verification and formatting **once** at the end of the phase across the union of changed files. Avoids redundant runs and racing formatter passes.
+@@ -47,3 +35,4 @@ You decompose, dispatch, verify, and iterate. You do **not** edit code. Every fi
+ - Marking todos done based on subagent self-reports without verifying the gate.
+ - Summarizing progress in chat instead of advancing to the next phase.
+ </anti-patterns>
++</system-notice>
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index cef8a43e2..40eb07214 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -148,6 +148,7 @@ import type { HindsightSessionState } from "../hindsight/state";
+ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+ import { resolveMemoryBackend } from "../memory-backend";
+ import { getMnemosyneSessionState, type MnemosyneSessionState, setMnemosyneSessionState } from "../mnemosyne/state";
++import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
+ import { getCurrentThemeName, theme } from "../modes/theme/theme";
+ import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
+ import type { PlanModeState } from "../plan-mode/state";
+@@ -165,7 +166,7 @@ import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+ import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
+ import { invalidateHostMetadata } from "../ssh/connection-manager";
+ import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
+-import { shutdownTinyTitleClient } from "../title/tiny-title-client";
++import { shutdownTinyTitleClient } from "../tiny/title-client";
+ import {
+ 	buildDiscoverableToolSearchIndex,
+ 	collectDiscoverableTools,
+@@ -4035,20 +4036,33 @@ export class AgentSession {
+ 		// Expand file-based prompt templates if requested
+ 		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+ 
+-		// "ultrathink" keyword: nudge the model toward careful multi-step reasoning by
+-		// appending a hidden notice after the user's message. User-authored prompts only —
+-		// synthetic/agent-initiated turns never trigger it.
+-		const ultrathinkNotice: CustomMessage | undefined =
+-			!options?.synthetic && containsUltrathink(expandedText)
+-				? {
+-						role: "custom",
+-						customType: "ultrathink-notice",
+-						content: ULTRATHINK_NOTICE,
+-						display: false,
+-						attribution: "user",
+-						timestamp: Date.now(),
+-					}
+-				: undefined;
++		// Magic keywords ("ultrathink", "orchestrate"): append hidden system notices after the
++		// user's message that steer this turn. User-authored prompts only — synthetic /
++		// agent-initiated turns never trigger them.
++		const keywordNotices: CustomMessage[] = [];
++		if (!options?.synthetic) {
++			const timestamp = Date.now();
++			if (containsUltrathink(expandedText)) {
++				keywordNotices.push({
++					role: "custom",
++					customType: "ultrathink-notice",
++					content: ULTRATHINK_NOTICE,
++					display: false,
++					attribution: "user",
++					timestamp,
++				});
++			}
++			if (containsOrchestrate(expandedText)) {
++				keywordNotices.push({
++					role: "custom",
++					customType: "orchestrate-notice",
++					content: ORCHESTRATE_NOTICE,
++					display: false,
++					attribution: "user",
++					timestamp,
++				});
++			}
++		}
+ 
+ 		// If streaming, queue via steer() or followUp() based on option
+ 		if (this.isStreaming) {
+@@ -4060,9 +4074,9 @@ export class AgentSession {
+ 			} else {
+ 				await this.#queueSteer(expandedText, options?.images);
+ 			}
+-			// Steer/follow-up the ultrathink notice alongside the queued user message.
+-			if (ultrathinkNotice) {
+-				await this.sendCustomMessage(ultrathinkNotice, { deliverAs: options.streamingBehavior });
++			// Steer/follow-up the keyword notices alongside the queued user message.
++			for (const notice of keywordNotices) {
++				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
+ 			}
+ 			return;
+ 		}
+@@ -4092,7 +4106,7 @@ export class AgentSession {
+ 			await this.#promptWithMessage(message, expandedText, {
+ 				...options,
+ 				prependMessages: eagerTodoPrelude ? [eagerTodoPrelude.message] : undefined,
+-				appendMessages: ultrathinkNotice ? [ultrathinkNotice] : undefined,
++				appendMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
+ 			});
+ 		} finally {
+ 			// Clean up residual eager-todo directive if the prompt never consumed it
+diff --git a/packages/coding-agent/src/task/commands.ts b/packages/coding-agent/src/task/commands.ts
+index afd09bee2..3d61ece2c 100644
+--- a/packages/coding-agent/src/task/commands.ts
++++ b/packages/coding-agent/src/task/commands.ts
+@@ -9,12 +9,8 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
+ import { loadCapability } from "../discovery";
+ // Embed command markdown files at build time
+ import initMd from "../prompts/agents/init.md" with { type: "text" };
+-import orchestrateMd from "../prompts/commands/orchestrate.md" with { type: "text" };
+ 
+-const EMBEDDED_COMMANDS: { name: string; content: string }[] = [
+-	{ name: "init.md", content: prompt.render(initMd) },
+-	{ name: "orchestrate.md", content: prompt.render(orchestrateMd) },
+-];
++const EMBEDDED_COMMANDS: { name: string; content: string }[] = [{ name: "init.md", content: prompt.render(initMd) }];
+ 
+ export const EMBEDDED_COMMAND_TEMPLATES: ReadonlyArray<{ name: string; content: string }> = EMBEDDED_COMMANDS;
+ 

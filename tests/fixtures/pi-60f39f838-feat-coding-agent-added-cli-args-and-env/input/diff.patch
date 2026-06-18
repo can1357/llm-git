@@ -1,0 +1,68 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 0e740886c..aed24a98b 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -18,6 +18,8 @@
+ - `pi/<role>` model aliases in Task tool agent definitions (e.g., `model: pi/smol, haiku, flash, mini`)
+ - Small model auto-discovery using priority chain: haiku > flash > mini
+ - Slow model auto-discovery using priority chain: gpt-5.2-codex > codex > gpt > opus > pro
++- CLI args for model roles: `--smol <model>` and `--slow <model>` (ephemeral, not persisted)
++- Env var overrides: `PI_SMOL_MODEL` and `PI_SLOW_MODEL`
+ - Title generation now uses configured small model from settings
+ 
+ - LSP diagnostics on edit: Edit tool can now return LSP diagnostics after editing code files. Disabled by default to avoid noise during multi-edit sequences. Enable via `lsp.diagnosticsOnEdit` setting.
+diff --git a/packages/coding-agent/src/cli/args.ts b/packages/coding-agent/src/cli/args.ts
+index d291d7148..96fa4ec8f 100644
+--- a/packages/coding-agent/src/cli/args.ts
++++ b/packages/coding-agent/src/cli/args.ts
+@@ -12,6 +12,8 @@ export type Mode = "text" | "json" | "rpc";
+ export interface Args {
+ 	provider?: string;
+ 	model?: string;
++	smol?: string;
++	slow?: string;
+ 	apiKey?: string;
+ 	systemPrompt?: string;
+ 	appendSystemPrompt?: string;
+@@ -69,6 +71,10 @@ export function parseArgs(args: string[]): Args {
+ 			result.provider = args[++i];
+ 		} else if (arg === "--model" && i + 1 < args.length) {
+ 			result.model = args[++i];
++		} else if (arg === "--smol" && i + 1 < args.length) {
++			result.smol = args[++i];
++		} else if (arg === "--slow" && i + 1 < args.length) {
++			result.slow = args[++i];
+ 		} else if (arg === "--api-key" && i + 1 < args.length) {
+ 			result.apiKey = args[++i];
+ 		} else if (arg === "--system-prompt" && i + 1 < args.length) {
+@@ -148,6 +154,8 @@ ${chalk.bold("Usage:")}
+ ${chalk.bold("Options:")}
+   --provider <name>              Provider name (default: google)
+   --model <id>                   Model ID (default: gemini-2.5-flash)
++  --smol <id>                    Small/fast model for lightweight tasks (or PI_SMOL_MODEL env)
++  --slow <id>                    Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)
+   --api-key <key>                API key (defaults to env vars)
+   --system-prompt <text>         System prompt (default: coding assistant prompt)
+   --append-system-prompt <text>  Append text or file contents to the system prompt
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 2848f3a75..beb0e08ac 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -356,6 +356,17 @@ export async function main(args: string[]) {
+ 
+ 	const settingsManager = SettingsManager.create(cwd);
+ 	time("SettingsManager.create");
++
++	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
++	const smolModel = parsed.smol ?? process.env.PI_SMOL_MODEL;
++	const slowModel = parsed.slow ?? process.env.PI_SLOW_MODEL;
++	if (smolModel || slowModel) {
++		const roleOverrides: Record<string, string> = {};
++		if (smolModel) roleOverrides.small = smolModel;
++		if (slowModel) roleOverrides.slow = slowModel;
++		settingsManager.applyOverrides({ modelRoles: roleOverrides });
++	}
++
+ 	initTheme(settingsManager.getTheme(), isInteractive);
+ 	time("initTheme");
+ 

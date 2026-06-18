@@ -1,0 +1,2279 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 06e1ef179..d5fcdf1e6 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -23,6 +23,8 @@ jobs:
+     runs-on: ubuntu-22.04
+     steps:
+       - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
+       - uses: oven-sh/setup-bun@v2
+         with:
+           bun-version: "1.3"
+@@ -31,8 +33,20 @@ jobs:
+         with:
+           path: ~/.bun/install/cache
+           key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
++      - name: Cache Turbo artifacts
++        uses: actions/cache@v4
++        with:
++          path: .turbo
++          key: ${{ runner.os }}-turbo-${{ github.sha }}
++          restore-keys: |
++            ${{ runner.os }}-turbo-
+       - run: bun install --frozen-lockfile
+-      - run: bun run check:ts
++      - name: Type check changed packages
++        if: github.event_name == 'pull_request'
++        run: bun run ci:check:affected
++      - name: Type check full workspace
++        if: github.event_name != 'pull_request'
++        run: bun run ci:check:full
+ 
+   native:
+     strategy:
+@@ -78,9 +92,7 @@ jobs:
+           sudo apt-get install -y gcc-aarch64-linux-gnu
+       - name: Rust checks
+         if: matrix.rust_checks
+-        run: |
+-          cargo fmt --all -- --check
+-          cargo clippy --workspace -- -D warnings
++        run: bun run check:rs
+       - name: Build native addon(s)
+         env:
+           CROSS_TARGET: ${{ matrix.target }}
+@@ -89,19 +101,7 @@ jobs:
+           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+         shell: bash
+         run: |
+-          VARIANTS="${{ matrix.variants }}"
+-          if [ -z "$VARIANTS" ]; then
+-            bun --cwd=packages/natives run build:native
+-          else
+-            for variant in $VARIANTS; do
+-              case "$variant" in
+-                baseline) export RUSTFLAGS="-C target-cpu=x86-64-v2" ;;
+-                modern)   export RUSTFLAGS="-C target-cpu=x86-64-v3" ;;
+-              esac
+-              export TARGET_VARIANT="$variant"
+-              bun --cwd=packages/natives run build:native
+-            done
+-          fi
++          bun run ci:build:native
+       - name: Upload native addon(s)
+         uses: actions/upload-artifact@v4
+         with:
+@@ -115,6 +115,7 @@ jobs:
+     steps:
+       - uses: actions/checkout@v4
+         with:
++          fetch-depth: 0
+           lfs: true
+       - uses: oven-sh/setup-bun@v2
+         with:
+@@ -133,6 +134,13 @@ jobs:
+         with:
+           path: ~/.bun/install/cache
+           key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
++      - name: Cache Turbo artifacts
++        uses: actions/cache@v4
++        with:
++          path: .turbo
++          key: ${{ runner.os }}-turbo-${{ github.sha }}
++          restore-keys: |
++            ${{ runner.os }}-turbo-
+       - name: Install system deps
+         run: |
+           sudo apt-get update
+@@ -140,13 +148,15 @@ jobs:
+           sudo ln -s $(which fdfind) /usr/local/bin/fd
+           sudo ln -sf /usr/bin/convert /usr/local/bin/magick
+       - run: bun install --frozen-lockfile
+-      - run: bun --cwd=packages/natives run build:native
+-      - run: bun run test
++      - run: bun run build:native
++      - name: Test changed packages
++        if: github.event_name == 'pull_request'
++        run: bun run ci:test:affected
++      - name: Test full workspace
++        if: github.event_name != 'pull_request'
++        run: bun run ci:test:full
+       - name: CLI smoke test
+-        run: |
+-          bun packages/coding-agent/src/cli.ts --version
+-          bun packages/coding-agent/src/cli.ts --help
+-          bun packages/coding-agent/src/cli.ts stats --help
++        run: bun run ci:test:smoke
+ 
+   install_methods:
+     runs-on: ubuntu-22.04
+@@ -179,7 +189,7 @@ jobs:
+           sudo ln -sf /usr/bin/convert /usr/local/bin/magick
+       - run: bun install --frozen-lockfile
+       - name: Install method smoke tests
+-        run: bash scripts/install-tests/run-ci.sh
++        run: bun run ci:test:install-methods
+ 
+   release:
+     if: startsWith(github.ref, 'refs/tags/v')
+@@ -212,41 +222,10 @@ jobs:
+           path: packages/natives/native
+           merge-multiple: true
+       - name: Verify native addons
+-        run: |
+-          echo "Native addons downloaded:"
+-          ls -la packages/natives/native/
+-          echo ""
+-          echo "Expected addons: linux-x64-modern, linux-x64-baseline, linux-arm64, darwin-x64-modern, darwin-x64-baseline, darwin-arm64, win32-x64-modern, win32-x64-baseline"
+-          for plat in linux-x64-modern linux-x64-baseline linux-arm64 darwin-x64-modern darwin-x64-baseline darwin-arm64 win32-x64-modern win32-x64-baseline; do
+-            if [ -f "packages/natives/native/pi_natives.${plat}.node" ]; then
+-              echo "✓ pi_natives.${plat}.node"
+-            else
+-              echo "✗ pi_natives.${plat}.node MISSING"
+-              exit 1
+-            fi
+-          done
++        run: bun run ci:release:verify-natives
+ 
+       - name: Build binaries
+-        run: |
+-          bun --cwd=packages/stats scripts/generate-client-bundle.ts
+-          mkdir -p packages/coding-agent/binaries
+-          ENTRYPOINT="./packages/coding-agent/src/cli.ts"
+-          DEFINES="--define PI_COMPILED=true --root ."
+-          build_binary() {
+-            PLATFORM="$1"
+-            ARCH="$2"
+-            TARGET="$3"
+-            OUTFILE="$4"
+-            TARGET_PLATFORM="$PLATFORM" TARGET_ARCH="$ARCH" bun --cwd=packages/natives run embed:native
+-            bun build --compile $DEFINES --external mupdf --target="$TARGET" "$ENTRYPOINT" --outfile "$OUTFILE"
+-          }
+-          build_binary darwin arm64 bun-darwin-arm64 packages/coding-agent/binaries/omp-darwin-arm64
+-          build_binary darwin x64 bun-darwin-x64 packages/coding-agent/binaries/omp-darwin-x64
+-          build_binary linux x64 bun-linux-x64-modern packages/coding-agent/binaries/omp-linux-x64
+-          build_binary linux arm64 bun-linux-arm64 packages/coding-agent/binaries/omp-linux-arm64
+-          build_binary win32 x64 bun-windows-x64-modern packages/coding-agent/binaries/omp-windows-x64.exe
+-          bun --cwd=packages/natives run embed:native --reset
+-          bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset
++        run: bun run ci:release:build-binaries
+       - name: Stage native addons for release
+         run: cp packages/natives/native/*.node packages/coding-agent/binaries/
+       - name: Create GitHub Release
+@@ -258,21 +237,4 @@ jobs:
+         if: ${{ !inputs.skip_npm }}
+         env:
+           NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+-        run: |
+-          for pkg in packages/utils packages/ai packages/natives packages/tui packages/stats packages/agent packages/coding-agent; do
+-            pkg_name=$(basename "$pkg")
+-            # Skip private packages
+-            if jq -e '.private == true' "$pkg/package.json" > /dev/null 2>&1; then
+-              echo "Skipping $pkg_name (private)"
+-              continue
+-            fi
+-            echo "Publishing $pkg_name..."
+-            output=$(cd "$pkg" && bun publish --access public 2>&1) && echo "$output" && continue
+-            echo "$output"
+-            if echo "$output" | grep -q "previously published\|cannot publish over\|You cannot publish over"; then
+-              echo "Already published, skipping"
+-            else
+-              echo "Failed to publish $pkg_name"
+-              exit 1
+-            fi
+-          done
+\ No newline at end of file
++        run: bun run ci:release:publish
+diff --git a/.gitignore b/.gitignore
+index d37de396b..5bf50f2bb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,6 +1,7 @@
+ # Dependencies
+ node_modules/
+ .npm/
++.turbo/
+ 
+ # Build output
+ dist/
+diff --git a/bun.lock b/bun.lock
+index 99480070b..b1b292b4f 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -11,6 +11,7 @@
+         "@typescript/native-preview": "^7.0.0-dev.20260302.1",
+         "lint-staged": "^16.3",
+         "prettier": "^3.8",
++        "turbo": "^2.5.8",
+       },
+     },
+     "packages/agent": {
+@@ -120,6 +121,9 @@
+       "bin": {
+         "omp-swarm": "src/cli.ts",
+       },
++      "dependencies": {
++        "@oh-my-pi/pi-utils": "workspace:*",
++      },
+       "devDependencies": {
+         "@types/bun": "^1.3",
+       },
+@@ -152,7 +156,9 @@
+         "@babel/traverse": "^7.29",
+         "@babel/types": "^7.29",
+         "@oh-my-pi/pi-agent-core": "workspace:*",
++        "@oh-my-pi/pi-ai": "workspace:*",
+         "@oh-my-pi/pi-coding-agent": "workspace:*",
++        "@oh-my-pi/pi-tui": "workspace:*",
+         "@oh-my-pi/pi-utils": "workspace:*",
+         "diff": "^8.0",
+         "prettier": "^3.8",
+@@ -174,6 +180,7 @@
+         "winston-daily-rotate-file": "^5.0",
+       },
+       "devDependencies": {
++        "@oh-my-pi/pi-natives": "workspace:*",
+         "@types/bun": "^1.3",
+       },
+     },
+@@ -623,6 +630,18 @@
+ 
+     "@tootallnate/quickjs-emscripten": ["@tootallnate/quickjs-emscripten@0.23.0", "", {}, "sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA=="],
+ 
++    "@turbo/darwin-64": ["@turbo/darwin-64@2.9.5", "", { "os": "darwin", "cpu": "x64" }, "sha512-qPxhKsLMQP+9+dsmPgAGidi5uNifD4AoAOnEnljab3Qgn0QZRR31Hp+/CgW3Ia5AanWj6JuLLTBYvuQj4mqTWg=="],
++
++    "@turbo/darwin-arm64": ["@turbo/darwin-arm64@2.9.5", "", { "os": "darwin", "cpu": "arm64" }, "sha512-vkF/9F/l3aWd4bHxTui5Hh0F5xrTZ4e3rbBsc57zA6O8gNbmHN3B6eZ5psAIP2CnJRZ8ZxRjV3WZHeNXMXkPBw=="],
++
++    "@turbo/linux-64": ["@turbo/linux-64@2.9.5", "", { "os": "linux", "cpu": "x64" }, "sha512-z/Get5NUaUxm5HSGFqVMICDRjFNsCUhSc4wnFa/PP1QD0NXCjr7bu9a2EM6md/KMCBW0Qe393Ac+UM7/ryDDTw=="],
++
++    "@turbo/linux-arm64": ["@turbo/linux-arm64@2.9.5", "", { "os": "linux", "cpu": "arm64" }, "sha512-jyBifaNoI5/NheyswomiZXJvjdAdvT7hDRYzQ4meP0DKGvpXUjnqsD+4/J2YSDQ34OHxFkL30FnSCUIVOh2PHw=="],
++
++    "@turbo/windows-64": ["@turbo/windows-64@2.9.5", "", { "os": "win32", "cpu": "x64" }, "sha512-ph24K5uPtvo7UfuyDXnBiB/8XvrO+RQWbbw5zkA/bVNoy9HDiNoIJJj3s62MxT9tjEb6DnPje5PXSz1UR7QAyg=="],
++
++    "@turbo/windows-arm64": ["@turbo/windows-arm64@2.9.5", "", { "os": "win32", "cpu": "arm64" }, "sha512-6c5RccT/+iR39SdT1G5HyZaD2n57W77o+l0TTfxG/cVlhV94Acyg2gTQW7zUOhW1BeQpBjHzu9x8yVBZwrHh7g=="],
++
+     "@tybys/wasm-util": ["@tybys/wasm-util@0.10.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg=="],
+ 
+     "@types/babel__generator": ["@types/babel__generator@7.27.0", "", { "dependencies": { "@babel/types": "^7.0.0" } }, "sha512-ufFd2Xi92OAVPYsy+P4n7/U7e68fex0+Ee8gSG9KX7eo084CWiQ4sdxktvdl0bOPupXtVJPY19zk6EwWqUQ8lg=="],
+@@ -1179,6 +1198,8 @@
+ 
+     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
+ 
++    "turbo": ["turbo@2.9.5", "", { "optionalDependencies": { "@turbo/darwin-64": "2.9.5", "@turbo/darwin-arm64": "2.9.5", "@turbo/linux-64": "2.9.5", "@turbo/linux-arm64": "2.9.5", "@turbo/windows-64": "2.9.5", "@turbo/windows-arm64": "2.9.5" }, "bin": { "turbo": "bin/turbo" } }, "sha512-JXNkRe6H6MjSlk5UQRTjyoKX5YN2zlc2632xcSlSFBao5yvbMWTpv9SNolOZlZmUlcDOHuszPLItbKrvcXnnZA=="],
++
+     "turndown": ["turndown@7.2.4", "", { "dependencies": { "@mixmark-io/domino": "^2.2.0" } }, "sha512-I8yFsfRzmzK0WV1pNNOA4A7y4RDfFxPRxb3t+e3ui14qSGOxGtiSP6GjeX+Y6CHb7HYaFj7ECUD7VE5kQMZWGQ=="],
+ 
+     "turndown-plugin-gfm": ["turndown-plugin-gfm@1.0.2", "", {}, "sha512-vwz9tfvF7XN/jE0dGoBei3FXWuvll78ohzCZQuOb+ZjWrs3a0XhQVomJEb2Qh4VHTPNRO4GPZh0V7VRbiWwkRg=="],
+diff --git a/docs/natives-addon-loader-runtime.md b/docs/natives-addon-loader-runtime.md
+index 2a38fb4f0..5333a33a0 100644
+--- a/docs/natives-addon-loader-runtime.md
++++ b/docs/natives-addon-loader-runtime.md
+@@ -241,7 +241,7 @@ In compiled mode final diagnostics include:
+ In normal package/runtime mode final diagnostics include:
+ 
+ - reinstall hint (`bun install @oh-my-pi/pi-natives`),
+-- local rebuild command (`bun --cwd=packages/natives run build:native`),
++- local rebuild command (`bun --cwd=packages/natives run build`),
+ - optional x64 variant build hint (`TARGET_VARIANT=baseline|modern ...`).
+ 
+ ## Runtime behavior
+diff --git a/docs/natives-build-release-debugging.md b/docs/natives-build-release-debugging.md
+index 60e164371..aae62184d 100644
+--- a/docs/natives-build-release-debugging.md
++++ b/docs/natives-build-release-debugging.md
+@@ -21,7 +21,7 @@ It follows the architecture terms from `docs/natives-architecture.md`:
+ 
+ `packages/natives/package.json` scripts:
+ 
+-- `bun scripts/build-native.ts` (`build:native`) → release build
++- `bun scripts/build-native.ts` (`build`) → release build
+ - `bun scripts/build-native.ts --dev` (`dev:native`) → debug/dev profile build (same output naming)
+ - `bun scripts/embed-native.ts` (`embed:native`) → generate `src/embedded-addon.ts` from built files
+ 
+@@ -143,7 +143,7 @@ Failure exits happen at any stage with explicit error text (invalid variant, fai
+ Typical local loop:
+ 
+ 1. Build addon:
+-   - release: `bun --cwd=packages/natives run build:native`
++   - release: `bun --cwd=packages/natives run build`
+    - debug profile: `bun --cwd=packages/natives run dev:native`
+ 2. Set `PI_DEV=1` when testing loader diagnostics
+ 3. Loader in `native.ts` resolves package-local `native/` (and executable-dir fallback) candidates
+@@ -208,8 +208,8 @@ If any required symbol is missing, loader fails fast with a rebuild hint.
+ 
+ | Symptom | Likely cause | Verify | Fix |
+ | --- | --- | --- | --- |
+-| `Native addon missing exports ... Missing: <name>` | Stale `.node` binary, Rust export name mismatch, or wrong binary loaded | Run with `PI_DEV=1` to see loaded path; inspect export list for that file | Rebuild `build:native`; ensure Rust `#[napi]` export name (or explicit alias when needed) matches JS key; remove stale cached/versioned files |
+-| x64 machine loads baseline when modern expected | `PI_NATIVE_VARIANT=baseline`, no AVX2 detected, or only baseline file present | Check `PI_NATIVE_VARIANT`; inspect `native/` for `-modern` file | Build modern variant (`TARGET_VARIANT=modern ... build:native`) and ensure file is shipped |
++| `Native addon missing exports ... Missing: <name>` | Stale `.node` binary, Rust export name mismatch, or wrong binary loaded | Run with `PI_DEV=1` to see loaded path; inspect export list for that file | Rebuild `build`; ensure Rust `#[napi]` export name (or explicit alias when needed) matches JS key; remove stale cached/versioned files |
++| x64 machine loads baseline when modern expected | `PI_NATIVE_VARIANT=baseline`, no AVX2 detected, or only baseline file present | Check `PI_NATIVE_VARIANT`; inspect `native/` for `-modern` file | Build modern variant (`TARGET_VARIANT=modern ... build`) and ensure file is shipped |
+ | Cross-build produces unusable/wrong-labeled binary | Mismatch between `CROSS_TARGET` and `TARGET_PLATFORM`/`TARGET_ARCH`, or missing `TARGET_VARIANT` for x64 | Confirm env tuple and output filename | Re-run with consistent env values and explicit x64 `TARGET_VARIANT` |
+ | Compiled binary fails after upgrade | Stale extracted cache (`~/.omp/natives/<old-or-mismatched-version>`) or embedded manifest mismatch | Inspect versioned natives dir and loader error list | Delete versioned natives cache for the package version and rerun; regenerate embedded manifest during packaging |
+ | Loader probes many paths and none work | Platform mismatch or missing release artifact in package `native/` | Check `platformTag` vs actual filename(s) | Ensure built filename exactly matches `pi_natives.<platform>-<arch>(-variant).node` convention and package includes `native/` |
+@@ -219,14 +219,14 @@ If any required symbol is missing, loader fails fast with a rebuild hint.
+ 
+ ```bash
+ # Release artifact for current host
+-bun --cwd=packages/natives run build:native
++bun --cwd=packages/natives run build
+ 
+ # Debug profile artifact build
+ bun --cwd=packages/natives run dev:native
+ 
+ # Build explicit x64 variants
+-TARGET_VARIANT=modern bun --cwd=packages/natives run build:native
+-TARGET_VARIANT=baseline bun --cwd=packages/natives run build:native
++TARGET_VARIANT=modern bun --cwd=packages/natives run build
++TARGET_VARIANT=baseline bun --cwd=packages/natives run build
+ 
+ # Generate embedded addon manifest from built native files
+ bun --cwd=packages/natives run embed:native
+diff --git a/docs/porting-to-natives.md b/docs/porting-to-natives.md
+index e2d27ec0a..783e5a431 100644
+--- a/docs/porting-to-natives.md
++++ b/docs/porting-to-natives.md
+@@ -61,8 +61,8 @@ Avoid ports that depend on JS-only state or dynamic imports. N-API exports shoul
+ 
+ 5. **Build the native binary**
+ 
+-- `bun --cwd=packages/natives run build:native`
+-- Use `bun --cwd=packages/natives run build:native` and set `PI_DEV=1` if you want loader diagnostics while testing.
++- `bun --cwd=packages/natives run build`
++- Use `bun --cwd=packages/natives run build` and set `PI_DEV=1` if you want loader diagnostics while testing.
+ 
+ 6. **Run the benchmark**
+ 
+@@ -84,7 +84,7 @@ The loader prefers the platform-tagged binary in `packages/natives/native` (`pi_
+ ```bash
+ rm packages/natives/native/pi_natives.linux-x64.node
+ rm packages/natives/native/pi_natives.node
+-bun --cwd=packages/natives run build:native
++bun --cwd=packages/natives run build
+ ```
+ 
+ If you’re running a compiled binary, delete the cached addon directory:
+diff --git a/package.json b/package.json
+index 577f5cc86..79e20e42b 100644
+--- a/package.json
++++ b/package.json
+@@ -2,27 +2,55 @@
+ 	"name": "omp-monorepo",
+ 	"private": true,
+ 	"type": "module",
++	"packageManager": "bun@1.3.12",
+ 	"workspaces": [
+ 		"packages/*"
+ 	],
+ 	"scripts": {
++		"turbo": "turbo",
+ 		"install:dev": "bun install && bun --cwd=packages/coding-agent link && bun --cwd=packages/ai link",
+ 		"dev": "bun --cwd=packages/coding-agent src/cli.ts",
+ 		"stats": "bun --cwd=packages/coding-agent src/cli.ts stats",
+-		"test": "bun run --workspaces --if-present --parallel test",
++		"build": "bun run build:ws",
++		"build:ws": "turbo run build",
++		"build:native": "bun --cwd=packages/natives run build",
++		"build:affected": "turbo run build --affected",
++		"test": "bun run test:ts",
++		"test:ts": "turbo run test",
++		"test:affected": "turbo run test --affected",
+ 		"check": "bun run --parallel check:ts check:rs",
+-		"check:ts": "biome check . && tsgo -p tsconfig.json",
++		"check:ts": "bun run --parallel check:tools check:ws",
++		"check:tools": "biome check . --no-errors-on-unmatched && bun run check:types",
++		"check:types": "tsgo -p tsconfig.tools.json --noEmit",
++		"check:ws": "turbo run check",
++		"check:types:ws": "turbo run check:types",
++		"check:affected": "bun run check:tools && turbo run check --affected",
+ 		"check:rs": "cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings",
+ 		"lint": "bun run --parallel lint:ts lint:rs",
+-		"lint:ts": "biome lint .",
++		"lint:ts": "bun run --parallel lint:tools lint:ws",
++		"lint:tools": "biome lint . --no-errors-on-unmatched",
++		"lint:ws": "turbo run lint",
+ 		"lint:rs": "cargo clippy --workspace -- -D warnings",
+ 		"fmt": "bun run --parallel fmt:ts fmt:rs",
+-		"fmt:ts": "biome format --write .",
++		"fmt:ts": "bun run --parallel fmt:tools fmt:ws",
++		"fmt:tools": "biome format --write . --no-errors-on-unmatched",
++		"fmt:ws": "turbo run fmt",
+ 		"fmt:rs": "cargo fmt --all",
+ 		"fix": "bun run --parallel fix:ts fix:rs",
+-		"fix:ts": "biome check --write --unsafe . && bun --cwd=packages/coding-agent run format-prompts && bun --cwd=packages/coding-agent run generate-docs-index",
++		"fix:ts": "bun run --parallel fix:tools fix:ws",
++		"fix:tools": "biome check --write --unsafe . --no-errors-on-unmatched",
++		"fix:ws": "turbo run fix",
+ 		"fix:rs": "cargo fmt --all && cargo clippy --fix --allow-dirty --all-targets --no-deps --allow-staged --broken-code --allow-no-vcs",
+-		"build:native": "bun --cwd=packages/natives run build:native",
++		"ci:check:affected": "bun run check:affected",
++		"ci:check:full": "bun run check:ts",
++		"ci:build:native": "bun scripts/ci-build-native.ts",
++		"ci:test:affected": "bun run test:affected",
++		"ci:test:full": "bun run test",
++		"ci:test:smoke": "bun packages/coding-agent/src/cli.ts --version && bun packages/coding-agent/src/cli.ts --help && bun packages/coding-agent/src/cli.ts stats --help",
++		"ci:test:install-methods": "bash scripts/install-tests/run-ci.sh",
++		"ci:release:verify-natives": "bun scripts/ci-release-verify-natives.ts",
++		"ci:release:build-binaries": "bun scripts/ci-release-build-binaries.ts",
++		"ci:release:publish": "bun scripts/ci-release-publish.ts",
+ 		"bench:gen-fixtures": "bun --cwd=packages/typescript-edit-benchmark run src/generate.ts --typescript-dir /tmp/typescript-source --count-per-type 8",
+ 		"bench:edit": "bun --cwd=packages/typescript-edit-benchmark run start",
+ 		"prepublishOnly": "bun run check",
+@@ -30,10 +58,9 @@
+ 		"publish": "bun run prepublishOnly && npm publish -ws --access public",
+ 		"publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
+ 		"release": "bun scripts/release.ts",
+-		"generate-models": "bun --cwd=packages/ai scripts/generate-models.ts",
++		"generate-models": "bun --cwd=packages/ai run generate-models",
+ 		"generate-docs-index": "bun --cwd=packages/coding-agent run generate-docs-index",
+ 		"generate-template": "bun --cwd=packages/coding-agent run generate-template",
+-		"sync-exports": "bun scripts/sync-exports.ts",
+ 		"check-spoofed-versions": "bun scripts/check-spoofed-versions.ts"
+ 	},
+ 	"devDependencies": {
+@@ -42,7 +69,8 @@
+ 		"@types/bun": "^1.3",
+ 		"@typescript/native-preview": "^7.0.0-dev.20260302.1",
+ 		"lint-staged": "^16.3",
+-		"prettier": "^3.8"
++		"prettier": "^3.8",
++		"turbo": "^2.5.8"
+ 	},
+ 	"lint-staged": {
+ 		"*.{js,ts,jsx,tsx,json,jsonc,css}": "biome check --write --no-errors-on-unmatched"
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index e2faee6b6..a3bed6b93 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -27,8 +27,12 @@
+ 	"main": "./src/index.ts",
+ 	"types": "./src/index.ts",
+ 	"scripts": {
+-		"check": "tsgo -p tsconfig.json",
+-		"test": "bun test"
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun test",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write ."
+ 	},
+ 	"dependencies": {
+ 		"@oh-my-pi/pi-ai": "workspace:*",
+diff --git a/packages/agent/tsconfig.json b/packages/agent/tsconfig.json
+index 41b5f2b67..08130e07c 100644
+--- a/packages/agent/tsconfig.json
++++ b/packages/agent/tsconfig.json
+@@ -1,8 +1,7 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "test/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"test"
++	]
+ }
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index bdfdb16ef..a1923caa7 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -32,9 +32,13 @@
+ 		"pi-ai": "./src/cli.ts"
+ 	},
+ 	"scripts": {
+-		"check": "tsgo -p tsconfig.json",
+-		"generate-models": "bun scripts/generate-models.ts",
+-		"test": "bun test"
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun test",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write .",
++		"generate-models": "bun scripts/generate-models.ts"
+ 	},
+ 	"dependencies": {
+ 		"@anthropic-ai/sdk": "^0.78",
+@@ -125,6 +129,7 @@
+ 		"./utils/schema/*": {
+ 			"types": "./src/utils/schema/*.ts",
+ 			"import": "./src/utils/schema/*.ts"
+-		}
++		},
++		"./*.js": "./src/*.ts"
+ 	}
+ }
+diff --git a/packages/ai/test/zen.test.ts b/packages/ai/test/zen.test.ts
+index 2221714ab..616ef3fe9 100644
+--- a/packages/ai/test/zen.test.ts
++++ b/packages/ai/test/zen.test.ts
+@@ -14,7 +14,7 @@ describe.skipIf(!e2eApiKey("OPENCODE_API_KEY"))("OpenCode Models Smoke Test", ()
+ 		const providerModels = Object.values(MODELS[key]);
+ 		providerModels.forEach(model => {
+ 			it(`${label}: ${model.id}`, async () => {
+-				const response = await complete(model as Model, {
++				const response = await complete(model as unknown as Model, {
+ 					messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+ 				});
+ 
+diff --git a/packages/ai/tsconfig.json b/packages/ai/tsconfig.json
+index 41b5f2b67..74de4209a 100644
+--- a/packages/ai/tsconfig.json
++++ b/packages/ai/tsconfig.json
+@@ -1,8 +1,8 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "test/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"test",
++		"scripts"
++	]
+ }
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index f37a77df8..731a64e72 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,6 +1,17 @@
+ # Changelog
+ 
+ ## [Unreleased]
++### Added
++
++- Exported `hooks` subpath for extensibility API access
++- Added `build` script for compiling binary artifacts
++
++### Changed
++
++- Renamed `build:binary` script to `build`
++- Refactored `check` script to include linting via Biome and type checking
++- Added `check:types`, `lint`, `fmt`, and `fix` scripts for improved developer workflow
++- Simplified TypeScript configuration by extending workspace-level config
+ 
+ ## [14.0.1] - 2026-04-08
+ 
+diff --git a/packages/coding-agent/DEVELOPMENT.md b/packages/coding-agent/DEVELOPMENT.md
+index 76286c2dc..2746bdee3 100644
+--- a/packages/coding-agent/DEVELOPMENT.md
++++ b/packages/coding-agent/DEVELOPMENT.md
+@@ -1116,7 +1116,7 @@ Use only script names that exist in `packages/coding-agent/package.json`:
+ - Regenerate template artifacts:
+   - `bun --cwd=packages/coding-agent run generate-template`
+ - Build compiled binary artifact (`dist/omp`):
+-  - `bun --cwd=packages/coding-agent run build:binary`
++  - `bun --cwd=packages/coding-agent run build`
+ 
+ `packages/coding-agent/README.md` intentionally delegates install/config/CLI docs to the monorepo root README (`../../README.md`) and keeps package-specific references to `CHANGELOG.md`, `docs/`, and `DEVELOPMENT.md`.
+ 
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 4ff6a317e..d4e23af04 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -31,13 +31,17 @@
+ 		"omp": "src/cli.ts"
+ 	},
+ 	"scripts": {
+-		"check": "tsgo -p tsconfig.json",
++		"build": "bun --cwd=../stats scripts/generate-client-bundle.ts --generate && bun --cwd=../natives run embed:native && bun build --compile --define PI_COMPILED=true --external mupdf --root ../.. ./src/cli.ts --outfile dist/omp && bun --cwd=../natives run embed:native --reset && bun --cwd=../stats scripts/generate-client-bundle.ts --reset",
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun test",
++		"fix": "biome check --write --unsafe . && bun run format-prompts && bun run generate-docs-index",
++		"fmt": "biome format --write . && bun run format-prompts",
+ 		"format-prompts": "bun scripts/format-prompts.ts",
+ 		"generate-docs-index": "bun scripts/generate-docs-index.ts",
+ 		"prepack": "bun scripts/generate-docs-index.ts",
+-		"build:binary": "cd ../.. && bun --cwd=packages/stats scripts/generate-client-bundle.ts && bun --cwd=packages/natives run embed:native && bun build --compile --define PI_COMPILED=true --external mupdf --root . ./packages/coding-agent/src/cli.ts --outfile packages/coding-agent/dist/omp && bun --cwd=packages/natives run embed:native --reset && bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset",
+-		"generate-template": "bun scripts/generate-template.ts",
+-		"test": "bun test"
++		"generate-template": "bun scripts/generate-template.ts"
+ 	},
+ 	"dependencies": {
+ 		"@agentclientprotocol/sdk": "0.16.1",
+@@ -507,6 +511,15 @@
+ 		"./web/search/providers/*": {
+ 			"types": "./src/web/search/providers/*.ts",
+ 			"import": "./src/web/search/providers/*.ts"
+-		}
++		},
++		"./hooks": {
++			"types": "./src/extensibility/hooks/index.ts",
++			"import": "./src/extensibility/hooks/index.ts"
++		},
++		"./hooks/*": {
++			"types": "./src/extensibility/hooks/*.ts",
++			"import": "./src/extensibility/hooks/*.ts"
++		},
++		"./*.js": "./src/*.ts"
+ 	}
+ }
+diff --git a/packages/coding-agent/src/prompts/agents/oracle.md b/packages/coding-agent/src/prompts/agents/oracle.md
+deleted file mode 100644
+index 26e45d9d1..000000000
+--- a/packages/coding-agent/src/prompts/agents/oracle.md
++++ /dev/null
+@@ -1,77 +0,0 @@
+----
+-name: oracle
+-description: Deep reasoning advisor for debugging dead ends, architecture decisions, and second opinions. Read-only.
+-tools: read, grep, find, bash, lsp, web_search, ast_grep
+-spawns: explore
+-model: pi/slow
+-thinking-level: high
+-blocking: true
+----
+-
+-You are a senior diagnostician and strategic technical advisor. You receive problems other agents are stuck on — doom loops, mysterious failures, architectural tradeoffs, subtle bugs — and return clear, actionable analysis.
+-
+-You diagnose, explain, and recommend. You do not implement. Others act on your findings.
+-
+-<critical>
+-You **MUST** operate as read-only. You **MUST NOT** write, edit, or modify files, nor execute any state-changing commands.
+-</critical>
+-
+-<directives>
+-- You **MUST** reason from first principles. The caller already tried the obvious.
+-- You **MUST** use tools to verify claims. You **MUST NOT** speculate about code behavior — read it.
+-- You **MUST** identify root causes, not symptoms. If the caller says "X is broken", determine *why* X is broken.
+-- You **MUST** surface hidden assumptions — in the code, in the caller's framing, in the environment.
+-- You **SHOULD** consider at least two hypotheses before converging on one.
+-- You **SHOULD** invoke tools in parallel when investigating multiple hypotheses.
+-- When the problem is architectural, you **MUST** weigh tradeoffs explicitly: what does each option cost, what does it buy, what does it foreclose.
+-</directives>
+-
+-<decision-framework>
+-Apply pragmatic minimalism:
+-- **Bias toward simplicity**: The right solution is the least complex one that fulfills actual requirements. Resist hypothetical future needs.
+-- **Leverage what exists**: Favor modifications to current code and established patterns over introducing new components. New dependencies or infrastructure require explicit justification.
+-- **One clear path**: Present a single primary recommendation. Mention alternatives only when they offer substantially different tradeoffs worth considering.
+-- **Match depth to complexity**: Quick questions get quick answers. Reserve thorough analysis for genuinely complex problems.
+-- **Signal the investment**: Tag recommendations with estimated effort — Quick (<1h), Short (1-4h), Medium (1-2d), Large (3d+).
+-</decision-framework>
+-
+-<procedure>
+-1. Read the problem statement carefully. Identify what was already tried and why it failed.
+-2. Form 2-3 hypotheses for the root cause.
+-3. Use tools to gather evidence — read relevant code, trace data flow, check types, grep for related patterns. Parallelize independent reads.
+-4. Eliminate hypotheses based on evidence. Narrow to the most likely cause.
+-5. If the problem is a decision (not a bug), lay out options with concrete tradeoffs.
+-6. Deliver a clear verdict with supporting evidence.
+-</procedure>
+-
+-<output>
+-Structure your response in tiers:
+-
+-**Always include:**
+-- **Diagnosis**: What is actually wrong, or what the real tradeoff is. 2-3 sentences.
+-- **Evidence**: Specific file paths, line numbers, code excerpts that support your conclusion.
+-- **Recommendation**: What to do about it — concrete, actionable, with enough detail that an implementing agent can act without re-investigating. Numbered steps, each 1-2 sentences.
+-
+-**Include when relevant:**
+-- **Caveats**: Anything you are not confident about. Uncertainty **MUST** be stated, not hidden.
+-- **Risks**: Edge cases, failure modes, or mitigation strategies.
+-
+-**Only when genuinely applicable:**
+-- **Escalation triggers**: Conditions that would justify a more complex solution.
+-- **Alternative sketch**: High-level outline of an alternative path (not a full design).
+-
+-You **MUST NOT** pad with meta-commentary. Dense and useful beats long and thorough.
+-</output>
+-
+-<scope-discipline>
+-- Recommend ONLY what was asked. No unsolicited improvements.
+-- If you notice other issues, list at most 2 as "Optional future considerations" at the end.
+-- You **MUST NOT** expand the problem surface beyond the original request.
+-- Exhaust provided context before reaching for tools. External lookups fill genuine gaps, not curiosity.
+-</scope-discipline>
+-
+-<critical>
+-You **MUST** keep going until you have a clear answer or have exhausted available evidence.
+-Before finalizing: re-scan for unstated assumptions, verify claims are grounded in code not invented, check for overly strong language not justified by evidence.
+-This matters. The caller is stuck. Get it right.
+-</critical>
+diff --git a/packages/coding-agent/src/task/agents.ts b/packages/coding-agent/src/task/agents.ts
+index 8925e10b3..9118dd385 100644
+--- a/packages/coding-agent/src/task/agents.ts
++++ b/packages/coding-agent/src/task/agents.ts
+@@ -11,7 +11,7 @@ import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
+ // Embed agent markdown files at build time
+ import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
+ import librarianMd from "../prompts/agents/librarian.md" with { type: "text" };
+-import oracleMd from "../prompts/agents/oracle.md" with { type: "text" };
++
+ import planMd from "../prompts/agents/plan.md" with { type: "text" };
+ import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
+ import taskMd from "../prompts/agents/task.md" with { type: "text" };
+@@ -45,7 +45,6 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
+ 	{ fileName: "plan.md", template: planMd },
+ 	{ fileName: "designer.md", template: designerMd },
+ 	{ fileName: "reviewer.md", template: reviewerMd },
+-	{ fileName: "oracle.md", template: oracleMd },
+ 	{ fileName: "librarian.md", template: librarianMd },
+ 	{
+ 		fileName: "task.md",
+diff --git a/packages/coding-agent/test/plan-mode/plan-mode-approved-prompt.test.ts b/packages/coding-agent/test/plan-mode/plan-mode-approved-prompt.test.ts
+index e4a5d8778..fe654ab8f 100644
+--- a/packages/coding-agent/test/plan-mode/plan-mode-approved-prompt.test.ts
++++ b/packages/coding-agent/test/plan-mode/plan-mode-approved-prompt.test.ts
+@@ -1,8 +1,6 @@
+ import { describe, expect, it } from "bun:test";
+-import planModeApprovedPrompt from "@oh-my-pi/pi-coding-agent/prompts/system/plan-mode-approved.md" with {
+-	type: "text",
+-};
+ import { prompt } from "@oh-my-pi/pi-utils";
++import planModeApprovedPrompt from "../../src/prompts/system/plan-mode-approved.md" with { type: "text" };
+ 
+ describe("plan-mode-approved prompt", () => {
+ 	it("includes final plan artifact path in injected execution prompt", () => {
+diff --git a/packages/coding-agent/tsconfig.examples.json b/packages/coding-agent/tsconfig.examples.json
+index dadf7400a..57151b61d 100644
+--- a/packages/coding-agent/tsconfig.examples.json
++++ b/packages/coding-agent/tsconfig.examples.json
+@@ -1,16 +1,6 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true,
+-		"paths": {
+-			"@oh-my-pi/pi-coding-agent": ["./src/index.ts"],
+-			"@oh-my-pi/pi-coding-agent/hooks": ["./src/extensibility/hooks/index.ts"],
+-			"@oh-my-pi/pi-tui": ["../tui/src/index.ts"],
+-			"@oh-my-pi/pi-ai": ["../ai/src/index.ts"],
+-			"@sinclair/typebox": ["../../node_modules/@sinclair/typebox"]
+-		},
+-		"skipLibCheck": true
+-	},
+-	"include": ["examples/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"examples"
++	]
+ }
+diff --git a/packages/coding-agent/tsconfig.json b/packages/coding-agent/tsconfig.json
+index 76e289af3..74de4209a 100644
+--- a/packages/coding-agent/tsconfig.json
++++ b/packages/coding-agent/tsconfig.json
+@@ -1,8 +1,8 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "src/bun-imports.d.ts", "test/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"test",
++		"scripts"
++	]
+ }
+diff --git a/packages/natives/CHANGELOG.md b/packages/natives/CHANGELOG.md
+index 511cf662f..1232acc91 100644
+--- a/packages/natives/CHANGELOG.md
++++ b/packages/natives/CHANGELOG.md
+@@ -1,6 +1,19 @@
+ # Changelog
+ 
+ ## [Unreleased]
++### Added
++
++- Added `check:types` script for explicit TypeScript type checking
++- Added `lint` script for running Biome linter
++- Added `fmt` script for code formatting with Biome
++- Added package exports field with typed entry point configuration
++- Added turbo.json configuration for build task caching and optimization
++
++### Changed
++
++- Renamed `build:native` script to `build` for simpler invocation
++- Updated `check` script to separately call `check:types` for type checking
++- Modified tsconfig.json to extend `tsconfig.workspace.json` instead of `tsconfig.base.json`
+ 
+ ## [14.0.0] - 2026-04-08
+ 
+diff --git a/packages/natives/README.md b/packages/natives/README.md
+index 0132bbb98..f76dd1be6 100644
+--- a/packages/natives/README.md
++++ b/packages/natives/README.md
+@@ -38,7 +38,7 @@ const pngBytes = await resized.encode(ImageFormat.PNG, 100);
+ 
+ ```bash
+ # Build native addon from workspace root (requires Rust)
+-bun run build:native
++bun run build
+ 
+ # Type check
+ bun run check
+diff --git a/packages/natives/native/index.js b/packages/natives/native/index.js
+index 95fe22211..c3da8a2a7 100644
+--- a/packages/natives/native/index.js
++++ b/packages/natives/native/index.js
+@@ -213,8 +213,8 @@ function loadNative() {
+ 	} else {
+ 		helpMessage =
+ 			"If installed via npm/bun, try reinstalling: bun install @oh-my-pi/pi-natives\n" +
+-			"If developing locally, build with: bun --cwd=packages/natives run build:native\n" +
+-			"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build:native";
++			"If developing locally, build with: bun --cwd=packages/natives run build\n" +
++			"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build";
+ 	}
+ 
+ 	throw new Error(`Failed to load pi_natives native addon for ${addonLabel}.\n\nTried:\n${details}\n\n${helpMessage}`);
+diff --git a/packages/natives/package.json b/packages/natives/package.json
+index c081d1bcf..4b05e3fc6 100644
+--- a/packages/natives/package.json
++++ b/packages/natives/package.json
+@@ -29,11 +29,14 @@
+ 	"main": "./native/index.js",
+ 	"types": "./native/index.d.ts",
+ 	"scripts": {
+-		"build:native": "bun scripts/build-native.ts",
+-		"embed:native": "bun scripts/embed-native.ts",
+-		"check": "biome check . && tsgo -p tsconfig.json",
++		"build": "bun scripts/build-native.ts",
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun run build && bun test",
+ 		"fix": "biome check --write --unsafe .",
+-		"test": "bun run build:native && bun test",
++		"fmt": "biome format --write .",
++		"embed:native": "bun scripts/embed-native.ts",
+ 		"bench": "bun bench/grep.ts"
+ 	},
+ 	"devDependencies": {
+@@ -51,5 +54,11 @@
+ 		"src",
+ 		"native",
+ 		"README.md"
+-	]
++	],
++	"exports": {
++		".": {
++			"types": "./native/index.d.ts",
++			"import": "./native/index.js"
++		}
++	}
+ }
+diff --git a/packages/natives/tsconfig.json b/packages/natives/tsconfig.json
+index 2dce4fdad..9c8bdc392 100644
+--- a/packages/natives/tsconfig.json
++++ b/packages/natives/tsconfig.json
+@@ -1,8 +1,8 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["native/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"native",
++		"scripts",
++		"test"
++	]
+ }
+diff --git a/packages/natives/turbo.json b/packages/natives/turbo.json
+new file mode 100644
+index 000000000..18837fb9d
+--- /dev/null
++++ b/packages/natives/turbo.json
+@@ -0,0 +1,20 @@
++{
++	"extends": [
++		"//"
++	],
++	"tasks": {
++		"build": {
++			"inputs": [
++				"$TURBO_DEFAULT$",
++				"$TURBO_ROOT$/Cargo.toml",
++				"$TURBO_ROOT$/Cargo.lock",
++				"$TURBO_ROOT$/crates/pi-natives/**"
++			],
++			"outputs": [
++				"native/*.node",
++				"native/index.js",
++				"native/index.d.ts"
++			]
++		}
++	}
++}
+diff --git a/packages/stats/package.json b/packages/stats/package.json
+index bcc7031a2..e11b21f91 100644
+--- a/packages/stats/package.json
++++ b/packages/stats/package.json
+@@ -28,9 +28,13 @@
+ 		"omp-stats": "./src/index.ts"
+ 	},
+ 	"scripts": {
++		"build": "bun run build.ts",
+ 		"dev": "bun run src/index.ts",
+-		"check": "tsgo -p tsconfig.json && tsgo -p tsconfig.client.json",
+-		"build": "bun run build.ts"
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p tsconfig.client.json --noEmit",
++		"lint": "biome lint .",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write ."
+ 	},
+ 	"dependencies": {
+ 		"@oh-my-pi/pi-ai": "workspace:*",
+@@ -79,6 +83,7 @@
+ 		"./client/components/*": {
+ 			"types": "./src/client/components/*.ts",
+ 			"import": "./src/client/components/*.ts"
+-		}
++		},
++		"./*.js": "./src/*.ts"
+ 	}
+ }
+diff --git a/packages/stats/scripts/generate-client-bundle.ts b/packages/stats/scripts/generate-client-bundle.ts
+index f23c4b6c6..ef0b9eebb 100644
+--- a/packages/stats/scripts/generate-client-bundle.ts
++++ b/packages/stats/scripts/generate-client-bundle.ts
+@@ -8,11 +8,14 @@ import { $ } from "bun";
+ const GENERATED_FILE = path.join("src", "embedded-client.generated.txt");
+ const DIST_CLIENT_DIR = path.join("dist", "client");
+ 
++const GENERATE_FLAG = "--generate";
++const RESET_FLAG = "--reset";
++
+ function placeholderContent(): string {
+ 	return `/**
+  * Embedded stats dashboard bundle for compiled binaries.
+  *
+- * This file is generated by \`bun --cwd=packages/stats scripts/generate-client-bundle.ts\` during
++ * This file is generated by \`bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate\` during
+  * binary builds. The checked-in value is intentionally empty.
+  */
+ export const EMBEDDED_CLIENT_ARCHIVE_TAR_GZ_BASE64 = "";
+@@ -56,12 +59,17 @@ async function buildArchiveBase64(dir: string): Promise<string> {
+ }
+ 
+ async function main(): Promise<void> {
+-	if (process.argv.includes("--reset")) {
++	if (process.argv.includes(RESET_FLAG)) {
+ 		await Bun.write(GENERATED_FILE, placeholderContent());
+ 		console.log(`Reset ${GENERATED_FILE}`);
+ 		return;
+ 	}
+ 
++	if (!process.argv.includes(GENERATE_FLAG)) {
++		console.log(`Skipping ${GENERATED_FILE}; pass ${GENERATE_FLAG} to build the embedded bundle`);
++		return;
++	}
++
+ 	await $`bun run build`;
+ 	const archiveBase64 = await buildArchiveBase64(DIST_CLIENT_DIR);
+ 	await Bun.write(GENERATED_FILE, archiveBase64);
+diff --git a/packages/stats/src/embedded-client.generated.txt b/packages/stats/src/embedded-client.generated.txt
+index 1b560f034..962b4d37c 100644
+--- a/packages/stats/src/embedded-client.generated.txt
++++ b/packages/stats/src/embedded-client.generated.txt
+@@ -1,7 +1,7 @@
+ /**
+  * Embedded stats dashboard bundle for compiled binaries.
+  *
+- * This file is generated by `bun --cwd=packages/stats scripts/generate-client-bundle.ts` during
++ * This file is generated by `bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate` during
+  * binary builds. The checked-in value is intentionally empty.
+  */
+ export const EMBEDDED_CLIENT_ARCHIVE_TAR_GZ_BASE64 = "";
+diff --git a/packages/stats/tsconfig.client.json b/packages/stats/tsconfig.client.json
+index 92b5f8808..8446d2f02 100644
+--- a/packages/stats/tsconfig.client.json
++++ b/packages/stats/tsconfig.client.json
+@@ -1,10 +1,21 @@
+ {
+-	"extends": "../../tsconfig.base.json",
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src/client"
++	],
+ 	"compilerOptions": {
+-		"noEmit": true,
+ 		"jsx": "react-jsx",
+-		"lib": ["ES2024", "DOM", "DOM.Iterable"],
+-		"types": []
+-	},
+-	"include": ["src/client/**/*"]
++		"lib": [
++			"ES2024",
++			"DOM",
++			"DOM.Iterable"
++		],
++		"noEmit": true,
++		"types": [
++			"bun",
++			"assets",
++			"react",
++			"react-dom"
++		]
++	}
+ }
+diff --git a/packages/stats/tsconfig.json b/packages/stats/tsconfig.json
+index cf79120b5..39856b9a4 100644
+--- a/packages/stats/tsconfig.json
++++ b/packages/stats/tsconfig.json
+@@ -1,8 +1,12 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "test/**/*.ts"],
+-	"exclude": ["src/client/**/*", "node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"scripts"
++	],
++	"exclude": [
++		"src/client",
++		"dist",
++		"node_modules"
++	]
+ }
+diff --git a/packages/swarm-extension/package.json b/packages/swarm-extension/package.json
+index 78dc713e6..de4dd9647 100644
+--- a/packages/swarm-extension/package.json
++++ b/packages/swarm-extension/package.json
+@@ -24,9 +24,15 @@
+ 		"omp-swarm": "src/cli.ts"
+ 	},
+ 	"scripts": {
+-		"check": "tsgo -p tsconfig.json"
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write ."
++	},
++	"dependencies": {
++		"@oh-my-pi/pi-utils": "workspace:*"
+ 	},
+-	"dependencies": {},
+ 	"devDependencies": {
+ 		"@types/bun": "^1.3"
+ 	},
+diff --git a/packages/swarm-extension/tsconfig.json b/packages/swarm-extension/tsconfig.json
+index d18cfff3c..d9a6e62ad 100644
+--- a/packages/swarm-extension/tsconfig.json
++++ b/packages/swarm-extension/tsconfig.json
+@@ -1,8 +1,6 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src"
++	]
+ }
+diff --git a/packages/tsconfig.workspace.json b/packages/tsconfig.workspace.json
+new file mode 100644
+index 000000000..a3fafbbf8
+--- /dev/null
++++ b/packages/tsconfig.workspace.json
+@@ -0,0 +1,16 @@
++{
++	"extends": "../tsconfig.base.json",
++	"include": [
++		"*/src",
++		"*/test",
++		"*/tests",
++		"*/scripts",
++		"*/bench",
++		"*/bin",
++		"*/native"
++	],
++	"exclude": [
++		"*/node_modules",
++		"*/dist"
++	]
++}
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 0fe128211..2f0c4a8f5 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -29,8 +29,12 @@
+ 	"main": "./src/index.ts",
+ 	"types": "./src/index.ts",
+ 	"scripts": {
+-		"check": "tsgo -p tsconfig.json",
+-		"test": "bun test test/*.test.ts"
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun test test/*.test.ts",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write ."
+ 	},
+ 	"dependencies": {
+ 		"@oh-my-pi/pi-natives": "workspace:*",
+@@ -61,6 +65,7 @@
+ 		"./components/*": {
+ 			"types": "./src/components/*.ts",
+ 			"import": "./src/components/*.ts"
+-		}
++		},
++		"./*.js": "./src/*.ts"
+ 	}
+ }
+diff --git a/packages/tui/tsconfig.json b/packages/tui/tsconfig.json
+index 41b5f2b67..08130e07c 100644
+--- a/packages/tui/tsconfig.json
++++ b/packages/tui/tsconfig.json
+@@ -1,8 +1,7 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "test/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"test"
++	]
+ }
+diff --git a/packages/typescript-edit-benchmark/package.json b/packages/typescript-edit-benchmark/package.json
+index bdb2498b8..0b7a3fd96 100644
+--- a/packages/typescript-edit-benchmark/package.json
++++ b/packages/typescript-edit-benchmark/package.json
+@@ -16,9 +16,14 @@
+ 		"typescript-edit-benchmark": "src/index.ts"
+ 	},
+ 	"scripts": {
+-		"start": "bun run src/index.ts",
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun test",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write .",
+ 		"generate": "bun run src/generate.ts --typescript-dir /tmp/pi-mono-source --count-per-type 4",
+-		"check": "tsgo -p tsconfig.json --noEmit"
++		"start": "bun run src/index.ts"
+ 	},
+ 	"dependencies": {
+ 		"@babel/generator": "^7.29",
+@@ -30,7 +35,9 @@
+ 		"@oh-my-pi/pi-utils": "workspace:*",
+ 		"diff": "^8.0",
+ 		"prettier": "^3.8",
+-		"regexp-tree": "^0.1"
++		"regexp-tree": "^0.1",
++		"@oh-my-pi/pi-ai": "workspace:*",
++		"@oh-my-pi/pi-tui": "workspace:*"
+ 	},
+ 	"devDependencies": {
+ 		"@types/babel__generator": "^7.27",
+diff --git a/packages/typescript-edit-benchmark/tsconfig.json b/packages/typescript-edit-benchmark/tsconfig.json
+index 9063b3e1c..08130e07c 100644
+--- a/packages/typescript-edit-benchmark/tsconfig.json
++++ b/packages/typescript-edit-benchmark/tsconfig.json
+@@ -1,8 +1,7 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "test/**/*.ts"],
+-	"exclude": ["dist", "node_modules"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"test"
++	]
+ }
+diff --git a/packages/utils/package.json b/packages/utils/package.json
+index e6cf03fcb..00f70b9ea 100644
+--- a/packages/utils/package.json
++++ b/packages/utils/package.json
+@@ -23,8 +23,12 @@
+ 	"main": "./src/index.ts",
+ 	"types": "./src/index.ts",
+ 	"scripts": {
+-		"check": "tsgo -p tsconfig.json",
+-		"test": "bun test"
++		"check": "biome check . && bun run check:types",
++		"check:types": "tsgo -p tsconfig.json --noEmit",
++		"lint": "biome lint .",
++		"test": "bun test",
++		"fix": "biome check --write --unsafe .",
++		"fmt": "biome format --write ."
+ 	},
+ 	"dependencies": {
+ 		"beautiful-mermaid": "^1.1",
+@@ -33,7 +37,8 @@
+ 		"winston-daily-rotate-file": "^5.0"
+ 	},
+ 	"devDependencies": {
+-		"@types/bun": "^1.3"
++		"@types/bun": "^1.3",
++		"@oh-my-pi/pi-natives": "workspace:*"
+ 	},
+ 	"engines": {
+ 		"bun": ">=1.3.7"
+@@ -49,6 +54,7 @@
+ 		"./*": {
+ 			"types": "./src/*.ts",
+ 			"import": "./src/*.ts"
+-		}
++		},
++		"./*.js": "./src/*.ts"
+ 	}
+ }
+diff --git a/packages/utils/tsconfig.json b/packages/utils/tsconfig.json
+index 41b5f2b67..08130e07c 100644
+--- a/packages/utils/tsconfig.json
++++ b/packages/utils/tsconfig.json
+@@ -1,8 +1,7 @@
+ {
+-	"extends": "../../tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["src/**/*.ts", "test/**/*.ts"],
+-	"exclude": ["node_modules", "dist"]
++	"extends": "../tsconfig.workspace.json",
++	"include": [
++		"src",
++		"test"
++	]
+ }
+diff --git a/scripts/ci-build-native.ts b/scripts/ci-build-native.ts
+new file mode 100644
+index 000000000..b732e26ab
+--- /dev/null
++++ b/scripts/ci-build-native.ts
+@@ -0,0 +1,68 @@
++#!/usr/bin/env bun
++
++import * as path from "node:path";
++import { $ } from "bun";
++
++interface NativeBuildVariant {
++	name: "baseline" | "modern";
++	rustflags: string;
++}
++
++const repoRoot = path.join(import.meta.dir, "..");
++const isDryRun = process.argv.includes("--dry-run");
++const variantConfigs: Record<NativeBuildVariant["name"], NativeBuildVariant> = {
++	baseline: {
++		name: "baseline",
++		rustflags: "-C target-cpu=x86-64-v2",
++	},
++	modern: {
++		name: "modern",
++		rustflags: "-C target-cpu=x86-64-v3",
++	},
++};
++
++function parseTargetVariants(): NativeBuildVariant[] {
++	const rawVariants = (Bun.env.TARGET_VARIANTS ?? "").trim();
++	if (!rawVariants) return [];
++
++	return rawVariants.split(/\s+/).map((rawVariant) => {
++		const variant = variantConfigs[rawVariant as keyof typeof variantConfigs];
++		if (!variant) {
++			throw new Error(`Unsupported TARGET_VARIANTS entry: ${rawVariant}. Expected baseline or modern.`);
++		}
++		return variant;
++	});
++}
++
++async function runNativeBuild(env: Record<string, string | undefined>, label: string): Promise<void> {
++	if (isDryRun) {
++		const variant = env.TARGET_VARIANT ? ` TARGET_VARIANT=${env.TARGET_VARIANT}` : "";
++		const rustflags = env.RUSTFLAGS ? ` RUSTFLAGS=${JSON.stringify(env.RUSTFLAGS)}` : "";
++		console.log(`DRY RUN bun --cwd=packages/natives run build [${label}]${variant}${rustflags}`);
++		return;
++	}
++
++	console.log(`Building natives [${label}]...`);
++	await $`bun --cwd=packages/natives run build`.cwd(repoRoot).env(env);
++}
++
++async function main(): Promise<void> {
++	const variants = parseTargetVariants();
++	if (variants.length === 0) {
++		await runNativeBuild(Bun.env, "default");
++		return;
++	}
++
++	for (const variant of variants) {
++		await runNativeBuild(
++			{
++				...Bun.env,
++				RUSTFLAGS: variant.rustflags,
++				TARGET_VARIANT: variant.name,
++			},
++			variant.name,
++		);
++	}
++}
++
++await main();
+diff --git a/scripts/ci-release-build-binaries.ts b/scripts/ci-release-build-binaries.ts
+new file mode 100644
+index 000000000..8eb2d961b
+--- /dev/null
++++ b/scripts/ci-release-build-binaries.ts
+@@ -0,0 +1,109 @@
++#!/usr/bin/env bun
++
++import * as fs from "node:fs/promises";
++import * as path from "node:path";
++import { $ } from "bun";
++
++interface BinaryTarget {
++	platform: string;
++	arch: string;
++	target: string;
++	outfile: string;
++}
++
++const repoRoot = path.join(import.meta.dir, "..");
++const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
++const entrypoint = "./packages/coding-agent/src/cli.ts";
++const isDryRun = process.argv.includes("--dry-run");
++const targets: BinaryTarget[] = [
++	{
++		platform: "darwin",
++		arch: "arm64",
++		target: "bun-darwin-arm64",
++		outfile: "packages/coding-agent/binaries/omp-darwin-arm64",
++	},
++	{
++		platform: "darwin",
++		arch: "x64",
++		target: "bun-darwin-x64",
++		outfile: "packages/coding-agent/binaries/omp-darwin-x64",
++	},
++	{
++		platform: "linux",
++		arch: "x64",
++		target: "bun-linux-x64-modern",
++		outfile: "packages/coding-agent/binaries/omp-linux-x64",
++	},
++	{
++		platform: "linux",
++		arch: "arm64",
++		target: "bun-linux-arm64",
++		outfile: "packages/coding-agent/binaries/omp-linux-arm64",
++	},
++	{
++		platform: "win32",
++		arch: "x64",
++		target: "bun-windows-x64-modern",
++		outfile: "packages/coding-agent/binaries/omp-windows-x64.exe",
++	},
++];
++
++async function embedNative(target: BinaryTarget): Promise<void> {
++	if (isDryRun) {
++		console.log(`DRY RUN bun --cwd=packages/natives run embed:native [${target.platform}/${target.arch}]`);
++		return;
++	}
++
++	await $`bun --cwd=packages/natives run embed:native`
++		.cwd(repoRoot)
++		.env({
++			...Bun.env,
++			TARGET_PLATFORM: target.platform,
++			TARGET_ARCH: target.arch,
++		});
++}
++
++async function buildBinary(target: BinaryTarget): Promise<void> {
++	console.log(`Building ${target.outfile}...`);
++	await embedNative(target);
++	if (isDryRun) {
++		console.log(`DRY RUN bun build --compile --define PI_COMPILED=true --root . --external mupdf --target=${target.target} ${entrypoint} --outfile ${target.outfile}`);
++		return;
++	}
++
++	await $`bun build --compile --define PI_COMPILED=true --root . --external mupdf --target=${target.target} ${entrypoint} --outfile ${target.outfile}`.cwd(
++		repoRoot,
++	);
++}
++
++async function generateBundle(): Promise<void> {
++	if (isDryRun) {
++		console.log("DRY RUN bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate");
++		return;
++	}
++	await $`bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate`.cwd(repoRoot);
++}
++
++async function resetArtifacts(): Promise<void> {
++	if (isDryRun) {
++		console.log("DRY RUN bun --cwd=packages/natives run embed:native --reset");
++		console.log("DRY RUN bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset");
++		return;
++	}
++	await $`bun --cwd=packages/natives run embed:native --reset`.cwd(repoRoot);
++	await $`bun --cwd=packages/stats scripts/generate-client-bundle.ts --reset`.cwd(repoRoot);
++}
++
++async function main(): Promise<void> {
++	await fs.mkdir(binariesDir, { recursive: true });
++	await generateBundle();
++	try {
++		for (const target of targets) {
++			await buildBinary(target);
++		}
++	} finally {
++		await resetArtifacts();
++	}
++}
++
++await main();
+diff --git a/scripts/ci-release-publish.ts b/scripts/ci-release-publish.ts
+new file mode 100644
+index 000000000..7a884d7ed
+--- /dev/null
++++ b/scripts/ci-release-publish.ts
+@@ -0,0 +1,73 @@
++#!/usr/bin/env bun
++
++import * as path from "node:path";
++import { $ } from "bun";
++
++interface PublishPackage {
++	dir: string;
++}
++
++interface PackageJson {
++	private?: boolean;
++}
++
++const repoRoot = path.join(import.meta.dir, "..");
++const isDryRun = process.argv.includes("--dry-run");
++const packageDirs: PublishPackage[] = [
++	{ dir: "packages/utils" },
++	{ dir: "packages/ai" },
++	{ dir: "packages/natives" },
++	{ dir: "packages/tui" },
++	{ dir: "packages/stats" },
++	{ dir: "packages/agent" },
++	{ dir: "packages/coding-agent" },
++];
++const alreadyPublishedPatterns = [
++	"previously published",
++	"cannot publish over",
++	"You cannot publish over",
++];
++
++function isAlreadyPublished(output: string): boolean {
++	return alreadyPublishedPatterns.some((pattern) => output.includes(pattern));
++}
++
++async function readPackageJson(packageDir: string): Promise<PackageJson> {
++	return (await Bun.file(path.join(repoRoot, packageDir, "package.json")).json()) as PackageJson;
++}
++
++async function publishPackage(pkg: PublishPackage): Promise<void> {
++	const packageJson = await readPackageJson(pkg.dir);
++	const packageName = path.basename(pkg.dir);
++	if (packageJson.private) {
++		console.log(`Skipping ${packageName} (private)`);
++		return;
++	}
++
++	if (isDryRun) {
++		console.log(`DRY RUN bun publish --access public (${pkg.dir})`);
++		return;
++	}
++
++	console.log(`Publishing ${packageName}...`);
++	const result = await $`bun publish --access public`.cwd(path.join(repoRoot, pkg.dir)).quiet().nothrow();
++	const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
++	if (result.exitCode === 0) {
++		if (output) console.log(output);
++		return;
++	}
++	if (output) console.log(output);
++	if (isAlreadyPublished(output)) {
++		console.log("Already published, skipping");
++		return;
++	}
++	process.exit(result.exitCode ?? 1);
++}
++
++async function main(): Promise<void> {
++	for (const pkg of packageDirs) {
++		await publishPackage(pkg);
++	}
++}
++
++await main();
+diff --git a/scripts/ci-release-verify-natives.ts b/scripts/ci-release-verify-natives.ts
+new file mode 100644
+index 000000000..50a8ccdaa
+--- /dev/null
++++ b/scripts/ci-release-verify-natives.ts
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bun
++
++import * as fs from "node:fs/promises";
++import * as path from "node:path";
++
++const repoRoot = path.join(import.meta.dir, "..");
++const nativeDir = path.join(repoRoot, "packages", "natives", "native");
++const expectedAddons = [
++	"linux-x64-modern",
++	"linux-x64-baseline",
++	"linux-arm64",
++	"darwin-x64-modern",
++	"darwin-x64-baseline",
++	"darwin-arm64",
++	"win32-x64-modern",
++	"win32-x64-baseline",
++] as const;
++
++async function main(): Promise<void> {
++	const entries = await fs.readdir(nativeDir);
++
++	console.log("Native addons downloaded:");
++	for (const entry of entries.sort((a, b) => a.localeCompare(b))) {
++		console.log(`  ${entry}`);
++	}
++	console.log();
++	console.log(`Expected addons: ${expectedAddons.join(", ")}`);
++
++	const missingAddons = expectedAddons.filter((platform) => !entries.includes(`pi_natives.${platform}.node`));
++	if (missingAddons.length > 0) {
++		for (const platform of missingAddons) {
++			console.error(`MISSING pi_natives.${platform}.node`);
++		}
++		process.exit(1);
++	}
++
++	for (const platform of expectedAddons) {
++		console.log(`OK pi_natives.${platform}.node`);
++	}
++}
++
++await main();
+diff --git a/scripts/install-tests/binary.dockerfile b/scripts/install-tests/binary.dockerfile
+index eed9a7dab..27965a53e 100644
+--- a/scripts/install-tests/binary.dockerfile
++++ b/scripts/install-tests/binary.dockerfile
+@@ -17,8 +17,8 @@ COPY . .
+ 
+ # Build native addon and binary
+ RUN bun install --frozen-lockfile
+-RUN bun --cwd=packages/natives run build:native
+-RUN cd packages/coding-agent && bun run build:binary
++RUN bun --cwd=packages/natives run build
++RUN cd packages/coding-agent && bun run build
+ 
+ # Install binary and native addon to PATH
+ RUN mkdir -p /root/.local/bin && \
+diff --git a/scripts/install-tests/run-ci.sh b/scripts/install-tests/run-ci.sh
+index f1d85777c..86c0bdfdb 100755
+--- a/scripts/install-tests/run-ci.sh
++++ b/scripts/install-tests/run-ci.sh
+@@ -34,8 +34,8 @@ find_tarball() {
+ }
+ 
+ section "Binary install smoke"
+-bun --cwd=packages/natives run build:native
+-bun --cwd=packages/coding-agent run build:binary
++bun --cwd=packages/natives run build
++bun --cwd=packages/coding-agent run build
+ 
+ BINARY_DIR="$WORK_DIR/binary-bin"
+ mkdir -p "$BINARY_DIR"
+diff --git a/scripts/install-tests/source.dockerfile b/scripts/install-tests/source.dockerfile
+index cfa6ee55a..f4c3c0000 100644
+--- a/scripts/install-tests/source.dockerfile
++++ b/scripts/install-tests/source.dockerfile
+@@ -17,7 +17,7 @@ COPY . .
+ 
+ # Install dependencies, build native addon, and link globally
+ RUN bun install --frozen-lockfile
+-RUN bun --cwd=packages/natives run build:native
++RUN bun --cwd=packages/natives run build
+ RUN cd packages/coding-agent && bun link
+ 
+ # Verify
+diff --git a/scripts/install-tests/tarball.dockerfile b/scripts/install-tests/tarball.dockerfile
+index a2bae49d4..a68df0196 100644
+--- a/scripts/install-tests/tarball.dockerfile
++++ b/scripts/install-tests/tarball.dockerfile
+@@ -26,7 +26,7 @@ COPY . .
+ 
+ # Build the project
+ RUN bun install --frozen-lockfile
+-RUN bun --cwd=packages/natives run build:native
++RUN bun --cwd=packages/natives run build
+ 
+ # Create verdaccio config (allow anonymous publish)
+ RUN mkdir -p /root/.config/verdaccio && cat > /root/.config/verdaccio/config.yaml <<'EOF'
+diff --git a/scripts/repro-stuck.ts b/scripts/repro-stuck.ts
+deleted file mode 100755
+index 5872e0b8c..000000000
+--- a/scripts/repro-stuck.ts
++++ /dev/null
+@@ -1,190 +0,0 @@
+-#!/usr/bin/env bun
+-/**
+- * Spawns many instances of the CLI to reproduce rare stuck/hang issues.
+- * Healthy instances (that produce TUI output) are killed.
+- * Stuck instances (no output after timeout) are kept alive for debugging.
+- *
+- * Usage: bun scripts/repro-stuck.ts [options]
+- *
+- * Options:
+- *   --count=N     Instances per batch (default: 50)
+- *   --timeout=N   Ms to wait for output (default: 15000)
+- *   --rounds=N    Max rounds to try (default: 1000)
+- */
+-
+-import { Subprocess } from "bun";
+-import * as path from "node:path";
+-
+-const CLI_PATH = Bun.fileURLToPath(import.meta.resolve("@oh-my-pi/pi-coding-agent/cli"));
+-const TRACE_LOADER = path.resolve(import.meta.dir, "trace-loader.ts");
+-const POLL_INTERVAL = 200;
+-
+-interface Args {
+-	count: number;
+-	timeout: number;
+-	rounds: number;
+-}
+-
+-function parseArgs(): Args {
+-	const args: Args = { count: 50, timeout: 15000, rounds: 1000 };
+-	for (const arg of process.argv.slice(2)) {
+-		const [key, val] = arg.replace(/^--/, "").split("=");
+-		if (key === "count") args.count = parseInt(val, 10);
+-		if (key === "timeout") args.timeout = parseInt(val, 10);
+-		if (key === "rounds") args.rounds = parseInt(val, 10);
+-	}
+-	return args;
+-}
+-
+-interface Instance {
+-	proc: Subprocess;
+-	port: number;
+-	stdout: string;
+-	stderr: string;
+-	status: "pending" | "launched" | "exited" | "stuck";
+-}
+-
+-/** Check if stdout contains the TUI (success indicator) */
+-function hasLaunched(stdout: string): boolean {
+-	return stdout.includes("omp v") || stdout.includes("▀█") || stdout.includes("Welcome back");
+-}
+-
+-/** Non-blocking drain of a stream */
+-async function drainStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+-	const reader = stream.getReader();
+-	const decoder = new TextDecoder();
+-	let result = "";
+-	try {
+-		while (true) {
+-			const read = reader.read();
+-			const timeout = Bun.sleep(10).then(() => ({ done: true, value: undefined, timedOut: true }));
+-			const chunk = (await Promise.race([read, timeout])) as { done: boolean; value?: Uint8Array; timedOut?: boolean };
+-			if (chunk.timedOut || chunk.done) break;
+-			if (chunk.value) result += decoder.decode(chunk.value);
+-		}
+-	} finally {
+-		reader.releaseLock();
+-	}
+-	return result;
+-}
+-
+-async function spawnBatch(count: number, basePort: number, timeout: number): Promise<Instance | null> {
+-	const instances: Instance[] = [];
+-
+-	// Spawn all
+-	for (let i = 0; i < count; i++) {
+-		const port = basePort + i;
+-		const proc = Bun.spawn(["bun", "--preload", TRACE_LOADER, `--inspect=127.0.0.1:${port}`, CLI_PATH], {
+-			stdout: "pipe",
+-			stderr: "pipe",
+-			stdin: "pipe",
+-			env: { ...Bun.env, NO_COLOR: "1", PI_DEBUG_STARTUP: "1" },
+-		});
+-		instances.push({ proc, port, stdout: "", stderr: "", status: "pending" });
+-	}
+-
+-	const start = Date.now();
+-
+-	// Poll until all resolved or timeout
+-	while (Date.now() - start < timeout) {
+-		let allResolved = true;
+-
+-		for (const inst of instances) {
+-			if (inst.status !== "pending") continue;
+-
+-			// Check if exited
+-			if (inst.proc.exitCode !== null) {
+-				inst.status = "exited";
+-				continue;
+-			}
+-
+-			// Drain available output
+-			try {
+-				inst.stdout += await drainStream(inst.proc.stdout as ReadableStream<Uint8Array>);
+-				inst.stderr += await drainStream(inst.proc.stderr as ReadableStream<Uint8Array>);
+-			} catch {}
+-
+-			// Check if launched
+-			if (hasLaunched(inst.stdout)) {
+-				inst.status = "launched";
+-				inst.proc.kill();
+-				continue;
+-			}
+-
+-			allResolved = false;
+-		}
+-
+-		if (allResolved) break;
+-		await Bun.sleep(POLL_INTERVAL);
+-	}
+-
+-	// Mark remaining pending as stuck
+-	for (const inst of instances) {
+-		if (inst.status === "pending") {
+-			// Final drain
+-			try {
+-				inst.stdout += await drainStream(inst.proc.stdout as ReadableStream<Uint8Array>);
+-				inst.stderr += await drainStream(inst.proc.stderr as ReadableStream<Uint8Array>);
+-			} catch {}
+-			inst.status = inst.proc.exitCode !== null ? "exited" : "stuck";
+-		}
+-	}
+-
+-	// Find and report stuck instances
+-	let stuck: Instance | null = null;
+-	for (const inst of instances) {
+-		if (inst.status === "stuck") {
+-			stuck = inst;
+-			console.log(`\n\n🎯 STUCK INSTANCE FOUND!`);
+-			console.log(`   PID: ${inst.proc.pid}`);
+-			console.log(`   Inspector: ws://127.0.0.1:${inst.port}`);
+-			console.log(`   Stdout: ${inst.stdout.slice(0, 200) || "(none)"}`);
+-
+-			const traceLines = inst.stderr.split("\n").filter(l => l.startsWith("[") && !l.includes("Bun Inspector"));
+-			if (traceLines.length > 0) {
+-				console.log(`   Last traces (${traceLines.length} total):`);
+-				for (const line of traceLines.slice(-15)) {
+-					console.log(`     ${line}`);
+-				}
+-			}
+-		} else if (inst.status !== "launched") {
+-			inst.proc.kill();
+-		}
+-	}
+-
+-	return stuck;
+-}
+-
+-async function main() {
+-	const args = parseArgs();
+-
+-	console.log(`🔍 Hunting for stuck process...`);
+-	console.log(`   Batch size: ${args.count}`);
+-	console.log(`   Timeout: ${args.timeout}ms`);
+-	console.log();
+-
+-	let basePort = 9230;
+-	let totalSpawned = 0;
+-
+-	for (let round = 1; round <= args.rounds; round++) {
+-		process.stdout.write(`\rRound ${round}/${args.rounds} (${totalSpawned} spawned)...`);
+-
+-		const stuck = await spawnBatch(args.count, basePort, args.timeout);
+-		totalSpawned += args.count;
+-
+-		if (stuck) {
+-			console.log(`\n✅ Found after ${round} rounds, ${totalSpawned} total spawns`);
+-			console.log(`\nTo debug: chrome://inspect → Configure → 127.0.0.1:${stuck.port}`);
+-			console.log(`Press Ctrl+C to exit`);
+-			await new Promise(() => {});
+-		}
+-
+-		basePort += args.count;
+-		if (basePort > 60000) basePort = 9230;
+-	}
+-
+-	console.log(`\n\n❌ No stuck process found after ${totalSpawned} spawns`);
+-	process.exit(1);
+-}
+-
+-main().catch(console.error);
+diff --git a/scripts/sync-exports.ts b/scripts/sync-exports.ts
+deleted file mode 100755
+index 895cb4c6c..000000000
+--- a/scripts/sync-exports.ts
++++ /dev/null
+@@ -1,223 +0,0 @@
+-#!/usr/bin/env bun
+-/**
+- * Sync package.json files across the monorepo:
+- *   1. Enforce consistent field ordering
+- *   2. Regenerate `exports` from filesystem structure
+- *
+- * Export rules:
+- *   - Every .ts/.tsx file under src/ gets an export without extension
+- *   - Directories with index.ts/index.tsx get a directory-level export (without /index)
+- *   - src/index.ts maps to "."
+- *   - Non-TS assets with companion .d.ts get typed exports
+- *   - Non-TS glob exports are preserved (e.g. ./prompts/* -> *.md)
+- *   - Packages without existing exports are skipped for export generation
+- *
+- * Usage:
+- *   bun scripts/sync-exports.ts          # update all packages
+- *   bun scripts/sync-exports.ts --check  # dry-run, exit 1 if anything changed
+- */
+-
+-import * as fs from "node:fs";
+-import * as path from "node:path";
+-
+-const ROOT = path.resolve(import.meta.dir, "..");
+-const PACKAGES_DIR = path.join(ROOT, "packages");
+-const CHECK_MODE = process.argv.includes("--check");
+-
+-// Canonical field order for package.json. Fields not listed here are placed
+-// between the last "known" field before them and the next one, preserving
+-// relative order of unknown fields. `files` and `exports` are always last.
+-const FIELD_ORDER = [
+-	"type",
+-	"private",
+-	"name",
+-	"version",
+-	"description",
+-	"homepage",
+-	"author",
+-	"contributors",
+-	"license",
+-	"repository",
+-	"bugs",
+-	"keywords",
+-	"main",
+-	"types",
+-	"bin",
+-	"scripts",
+-	"dependencies",
+-	"devDependencies",
+-	"peerDependencies",
+-	"optionalDependencies",
+-	"engines",
+-	// --- everything else goes here ---
+-	"files",
+-	"exports",
+-];
+-
+-function orderFields(pkg: Record<string, unknown>): Record<string, unknown> {
+-	const ordered: Record<string, unknown> = {};
+-	const knownSet = new Set(FIELD_ORDER);
+-	const unknownKeys = Object.keys(pkg).filter((k) => !knownSet.has(k));
+-
+-	// Place known fields in order, then unknown fields, then files/exports
+-	const tailFields = ["files", "exports"];
+-	for (const key of FIELD_ORDER) {
+-		if (tailFields.includes(key)) continue; // handled below
+-		if (key in pkg) ordered[key] = pkg[key];
+-	}
+-	for (const key of unknownKeys) {
+-		ordered[key] = pkg[key];
+-	}
+-	for (const key of tailFields) {
+-		if (key in pkg) ordered[key] = pkg[key];
+-	}
+-	return ordered;
+-}
+-type ExportEntry = string | { types: string; import: string };
+-type ExportsMap = Record<string, ExportEntry>;
+-
+-function tsExportEntry(srcRelative: string): { types: string; import: string } {
+-	return { types: `./${srcRelative}`, import: `./${srcRelative}` };
+-}
+-
+-function collectExports(srcDir: string): ExportsMap {
+-	const exports: ExportsMap = {};
+-	const dtsFiles = new Set<string>();
+-	const nonTsAssets: string[] = [];
+-	// Track which directories contain loose .ts/.tsx files (non-index)
+-	const dirsWithFiles = new Set<string>();
+-
+-	function walk(dir: string) {
+-		let entries: fs.Dirent[];
+-		try {
+-			entries = fs.readdirSync(dir, { withFileTypes: true });
+-		} catch {
+-			return;
+-		}
+-
+-		for (const entry of entries) {
+-			const fullPath = path.join(dir, entry.name);
+-			if (entry.isDirectory()) {
+-				const indexTs = path.join(fullPath, "index.ts");
+-				const indexTsx = path.join(fullPath, "index.tsx");
+-				const indexFile = fs.existsSync(indexTs) ? indexTs : fs.existsSync(indexTsx) ? indexTsx : null;
+-
+-				if (indexFile) {
+-					const exportKey = `./${path.relative(srcDir, fullPath)}`;
+-					const srcRel = path.relative(path.dirname(srcDir), indexFile);
+-					exports[exportKey] = tsExportEntry(srcRel);
+-				}
+-
+-				walk(fullPath);
+-			} else if (entry.isFile()) {
+-				if (entry.name.endsWith(".d.ts")) {
+-					dtsFiles.add(fullPath);
+-				} else if (!/\.tsx?$/.test(entry.name)) {
+-					nonTsAssets.push(fullPath);
+-				} else if (entry.name === "index.ts" || entry.name === "index.tsx") {
+-					if (dir === srcDir) {
+-						const srcRel = path.relative(path.dirname(srcDir), fullPath);
+-						exports["."] = tsExportEntry(srcRel);
+-					}
+-				} else {
+-					dirsWithFiles.add(dir);
+-				}
+-			}
+-		}
+-	}
+-
+-	walk(srcDir);
+-
+-	// Emit a glob export per directory that has loose .ts/.tsx files
+-	for (const dir of dirsWithFiles) {
+-		const rel = path.relative(srcDir, dir);
+-		const exportKey = rel ? `./${rel}/*` : "./*";
+-		const srcGlob = rel ? `./src/${rel}/*.ts` : "./src/*.ts";
+-		exports[exportKey] = { types: srcGlob, import: srcGlob };
+-	}
+-
+-	// Export non-TS assets that have a companion .d.ts
+-	for (const asset of nonTsAssets) {
+-		const dts = `${asset}.d.ts`;
+-		if (!dtsFiles.has(dts)) continue;
+-		const exportKey = `./${path.relative(srcDir, asset)}`;
+-		const importPath = `./${path.relative(path.dirname(srcDir), asset)}`;
+-		const typesPath = `./${path.relative(path.dirname(srcDir), dts)}`;
+-		exports[exportKey] = { types: typesPath, import: importPath };
+-	}
+-
+-	return exports;
+-}
+-
+-function getNonTsExports(existing: ExportsMap): ExportsMap {
+-	const preserved: ExportsMap = {};
+-	for (const [key, value] of Object.entries(existing)) {
+-		// Preserve entries whose targets are non-TS and non-generated (e.g. glob patterns for .md)
+-		const target = typeof value === "string" ? value : value?.import || value?.types || "";
+-		if (target.includes("*") && !/\*\.tsx?$/.test(target)) {
+-			preserved[key] = value;
+-		}
+-	}
+-	return preserved;
+-}
+-
+-function sortExports(exports: ExportsMap): ExportsMap {
+-	const entries = Object.entries(exports);
+-	entries.sort(([a], [b]) => {
+-		// "." always first
+-		if (a === ".") return -1;
+-		if (b === ".") return 1;
+-		return a.localeCompare(b);
+-	});
+-	return Object.fromEntries(entries);
+-}
+-
+-let dirty = false;
+-
+-const pkgDirs = fs.readdirSync(PACKAGES_DIR, { withFileTypes: true })
+-	.filter((d) => d.isDirectory())
+-	.map((d) => path.join(PACKAGES_DIR, d.name));
+-
+-for (const pkgDir of pkgDirs) {
+-	const pkgJsonPath = path.join(pkgDir, "package.json");
+-	if (!fs.existsSync(pkgJsonPath)) continue;
+-
+-	const raw = fs.readFileSync(pkgJsonPath, "utf-8");
+-	const pkgJson = JSON.parse(raw);
+-	const pkgName = pkgJson.name || path.basename(pkgDir);
+-	const changes: string[] = [];
+-
+-	// --- 1. Regenerate exports ---
+-	const srcDir = path.join(pkgDir, "src");
+-	if (pkgJson.exports && fs.existsSync(srcDir)) {
+-		const preserved = getNonTsExports(pkgJson.exports);
+-		const generated = collectExports(srcDir);
+-		const merged = sortExports({ ...generated, ...preserved });
+-
+-		if (JSON.stringify(pkgJson.exports) !== JSON.stringify(merged)) {
+-			pkgJson.exports = merged;
+-			changes.push("exports");
+-		}
+-	}
+-
+-	// --- 2. Enforce field order ---
+-	const ordered = orderFields(pkgJson);
+-	if (JSON.stringify(Object.keys(pkgJson)) !== JSON.stringify(Object.keys(ordered))) {
+-		changes.push("field order");
+-	}
+-
+-	if (changes.length > 0) {
+-		if (CHECK_MODE) {
+-			console.log(`${pkgName}: out of sync (${changes.join(", ")})`);
+-			dirty = true;
+-		} else {
+-			fs.writeFileSync(pkgJsonPath, JSON.stringify(ordered, null, "\t") + "\n");
+-			console.log(`${pkgName}: updated (${changes.join(", ")})`);
+-		}
+-	}
+-}
+-
+-if (CHECK_MODE && dirty) {
+-	console.error("\nRun `bun scripts/sync-exports.ts` to fix.");
+-	process.exit(1);
+-}
+diff --git a/scripts/sync-versions.ts b/scripts/sync-versions.ts
+index 8bd8ad06a..25df41c57 100755
+--- a/scripts/sync-versions.ts
++++ b/scripts/sync-versions.ts
+@@ -32,7 +32,7 @@ const versionMap: Record<string, string> = {};
+ for (const dir of packageDirs) {
+ 	const pkgPath = join(packagesDir, dir, "package.json");
+ 	try {
+-		const pkg = await Bun.file(pkgPath).json<PackageJson>();
++		const pkg = (await Bun.file(pkgPath).json()) as PackageJson;
+ 		packages[dir] = { path: pkgPath, data: pkg };
+ 		versionMap[pkg.name] = pkg.version;
+ 	} catch (e) {
+diff --git a/tsconfig.base.json b/tsconfig.base.json
+index cf8affebd..03a6e7ac1 100644
+--- a/tsconfig.base.json
++++ b/tsconfig.base.json
+@@ -2,45 +2,36 @@
+ 	"compilerOptions": {
+ 		"target": "ES2024",
+ 		"module": "ESNext",
+-		"lib": ["ES2024", "DOM.AsyncIterable"],
++		"lib": [
++			"ES2024",
++			"DOM.AsyncIterable"
++		],
++		"moduleResolution": "Bundler",
++		"moduleDetection": "force",
+ 		"strict": true,
+-		"esModuleInterop": true,
+ 		"skipLibCheck": true,
+-		"forceConsistentCasingInFileNames": true,
++		"allowArbitraryExtensions": true,
++		"verbatimModuleSyntax": true,
++		"noEmit": true,
+ 		"declaration": true,
+ 		"declarationMap": true,
+ 		"sourceMap": true,
+ 		"inlineSources": true,
+ 		"inlineSourceMap": false,
+-		"moduleResolution": "Bundler",
+ 		"resolveJsonModule": true,
+-		"allowArbitraryExtensions": true,
+-		"allowImportingTsExtensions": false,
++		"esModuleInterop": true,
++		"forceConsistentCasingInFileNames": true,
+ 		"experimentalDecorators": true,
+ 		"emitDecoratorMetadata": true,
+ 		"useDefineForClassFields": false,
+-		"types": ["bun", "assets"],
+-		"typeRoots": ["./types", "./node_modules/@types"],
+-		"paths": {
+-			"@oh-my-pi/pi-ai": ["./packages/ai/src/index.ts"],
+-			"@oh-my-pi/pi-ai/*": ["./packages/ai/src/*"],
+-			"@oh-my-pi/pi-agent-core": ["./packages/agent/src/index.ts"],
+-			"@oh-my-pi/pi-agent-core/*": ["./packages/agent/src/*"],
+-			"@oh-my-pi/pi-utils": ["./packages/utils/src/index.ts"],
+-			"@oh-my-pi/pi-utils/*": ["./packages/utils/src/*"],
+-			"@oh-my-pi/pi-coding-agent": ["./packages/coding-agent/src/index.ts"],
+-			"@oh-my-pi/pi-coding-agent/hooks": ["./packages/coding-agent/src/extensibility/hooks/index.ts"],
+-			"@oh-my-pi/pi-coding-agent/*": ["./packages/coding-agent/src/*"],
+-			"@oh-my-pi/pi-natives": ["./packages/natives/native"],
+-			"@oh-my-pi/omp-stats": ["./packages/stats/src/index.ts"],
+-			"@oh-my-pi/omp-stats/*": ["./packages/stats/src/*"],
+-			"@oh-my-pi/pi-tui": ["./packages/tui/src/index.ts"],
+-			"@oh-my-pi/pi-tui/*": ["./packages/tui/src/*"],
+-			"@oh-my-pi/typescript-edit-benchmark": ["./packages/typescript-edit-benchmark/src/index.ts"],
+-			"@oh-my-pi/typescript-edit-benchmark/*": ["./packages/typescript-edit-benchmark/src/*"],
+-			"@sinclair/typebox": ["./node_modules/@sinclair/typebox/build/esm/index.d.mts"],
+-			"@sinclair/typebox/*": ["./node_modules/@sinclair/typebox/build/esm/*"]
+-		}
+-	},
+-	"files": ["./types/assets/index.d.ts"]
++		"types": [
++			"bun",
++			"assets"
++		],
++		"typeRoots": [
++			"./types",
++			"./node_modules/@types"
++		],
++		"assumeChangesOnlyAffectDirectDependencies": true
++	}
+ }
+diff --git a/tsconfig.json b/tsconfig.json
+index c378d5a3f..fe353ca67 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -1,8 +1,10 @@
+ {
+-	"extends": "./tsconfig.base.json",
+-	"compilerOptions": {
+-		"noEmit": true
+-	},
+-	"include": ["packages/*/src/**/*", "packages/*/test/**/*"],
+-	"exclude": ["packages/coding-agent/examples/**/*", "packages/stats/src/client/**/*", "packages/web-ui/**/*", "**/dist/**"]
++	"references": [
++		{
++			"path": "./packages/tsconfig.workspace.json"
++		},
++		{
++			"path": "./tsconfig.tools.json"
++		}
++	]
+ }
+diff --git a/tsconfig.tools.json b/tsconfig.tools.json
+new file mode 100644
+index 000000000..c1a8494ea
+--- /dev/null
++++ b/tsconfig.tools.json
+@@ -0,0 +1,9 @@
++{
++	"extends": "./tsconfig.base.json",
++	"include": [
++		"scripts"
++	],
++	"exclude": [
++		"node_modules"
++	]
++}
+diff --git a/turbo.json b/turbo.json
+new file mode 100644
+index 000000000..b48d89b6d
+--- /dev/null
++++ b/turbo.json
+@@ -0,0 +1,91 @@
++{
++	"$schema": "https://turborepo.dev/schema.json",
++	"ui": "stream",
++	"envMode": "loose",
++	"globalDependencies": [
++		"package.json",
++		"bun.lock",
++		"bunfig.toml",
++		"biome.json",
++		"tsconfig.json",
++		"tsconfig.base.json",
++		"tsconfig.tools.json",
++		"packages/tsconfig.workspace.json"
++	],
++	"tasks": {
++		"build": {
++			"dependsOn": [
++				"^build"
++			],
++			"inputs": [
++				"$TURBO_DEFAULT$",
++				"!dist/**",
++				"!.turbo/**",
++				"!coverage/**",
++				"!*.tsbuildinfo"
++			],
++			"outputs": [
++				"dist/**",
++				".next/**",
++				"!.next/cache/**"
++			]
++		},
++		"check": {
++			"dependsOn": [
++				"^check"
++			],
++			"inputs": [
++				"$TURBO_DEFAULT$",
++				"!dist/**",
++				"!.turbo/**",
++				"!coverage/**",
++				"!*.tsbuildinfo"
++			]
++		},
++		"check:types": {
++			"dependsOn": [
++				"^check:types"
++			],
++			"inputs": [
++				"$TURBO_DEFAULT$",
++				"!dist/**",
++				"!.turbo/**",
++				"!coverage/**",
++				"!*.tsbuildinfo"
++			]
++		},
++		"lint": {
++			"inputs": [
++				"$TURBO_DEFAULT$",
++				"!dist/**",
++				"!.turbo/**",
++				"!coverage/**",
++				"!*.tsbuildinfo"
++			]
++		},
++		"test": {
++			"dependsOn": [
++				"check",
++				"^check",
++				"^build"
++			],
++			"inputs": [
++				"$TURBO_DEFAULT$",
++				"!dist/**",
++				"!.turbo/**",
++				"!coverage/**",
++				"!*.tsbuildinfo"
++			]
++		},
++		"fmt": {
++			"cache": false
++		},
++		"fix": {
++			"cache": false
++		},
++		"dev": {
++			"cache": false,
++			"persistent": true
++		}
++	}
++}

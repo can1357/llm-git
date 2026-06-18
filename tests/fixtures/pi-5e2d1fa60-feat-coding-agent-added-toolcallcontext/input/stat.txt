@@ -1,0 +1,12 @@
+ packages/agent/CHANGELOG.md                        |   3 +
+ packages/agent/src/agent-loop.ts                   |  11 +-
+ packages/agent/src/agent.ts                        |   5 +-
+ packages/agent/src/types.ts                        |   9 +-
+ packages/agent/test/agent-loop.test.ts             |  83 +++++-
+ packages/coding-agent/CHANGELOG.md                 |   8 +
+ packages/coding-agent/src/core/tools/context.ts    |   8 +-
+ packages/coding-agent/src/core/tools/edit.ts       |  23 +-
+ packages/coding-agent/src/core/tools/lsp/index.ts  | 297 ++++++++++++++++-----
+ packages/coding-agent/src/core/tools/write.ts      |  23 +-
+ .../coding-agent/test/tools/lsp-batching.test.ts   |  68 +++++
+ 11 files changed, 457 insertions(+), 81 deletions(-)

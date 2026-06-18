@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md    |  2 ++
+ packages/coding-agent/src/cli/args.ts |  8 ++++++++
+ packages/coding-agent/src/main.ts     | 11 +++++++++++
+ 3 files changed, 21 insertions(+)

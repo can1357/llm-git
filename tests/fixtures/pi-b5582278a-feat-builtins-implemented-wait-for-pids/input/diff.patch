@@ -1,0 +1,499 @@
+diff --git a/crates/brush-builtins-vendored/src/wait.rs b/crates/brush-builtins-vendored/src/wait.rs
+index 608be5d97..a9acb7e79 100644
+--- a/crates/brush-builtins-vendored/src/wait.rs
++++ b/crates/brush-builtins-vendored/src/wait.rs
+@@ -1,6 +1,12 @@
+ use std::io::Write;
+ 
+-use brush_core::{ExecutionExitCode, ExecutionResult, builtins, error};
++use brush_core::{
++	ExecutionExitCode, ExecutionResult, builtins,
++	env::{EnvironmentLookup, EnvironmentScope},
++	int_utils,
++	jobs::{Job, JobSelector},
++	variables::ShellValueLiteral,
++};
+ use clap::Parser;
+ 
+ /// Wait for jobs to terminate.
+@@ -31,37 +37,74 @@ impl builtins::Command for WaitCommand {
+ 		&self,
+ 		context: brush_core::ExecutionContext<'_, SE>,
+ 	) -> Result<ExecutionResult, Self::Error> {
+-		if self.wait_for_terminate {
+-			return error::unimp("wait -f");
+-		}
+-		if self.wait_for_first_or_next {
+-			return error::unimp("wait -n");
+-		}
+-		if self.variable_to_receive_id.is_some() {
+-			return error::unimp("wait -p");
++		if let Some(variable) = &self.variable_to_receive_id {
++			context.shell.env_mut().unset(variable)?;
+ 		}
+ 
+ 		let mut result = ExecutionResult::success();
+ 
++		if self.wait_for_first_or_next {
++			let selectors = match resolve_wait_selectors(&context, &self.ids)? {
++				WaitSelectorResolution::Selectors(selectors) => selectors,
++				WaitSelectorResolution::Failure(result) => return Ok(result),
++			};
++			let Some(waited) = context.shell.jobs_mut().wait_next(&selectors).await? else {
++				return Ok(ExecutionExitCode::NotFound.into());
++			};
++			if let Some(variable) = &self.variable_to_receive_id {
++				assign_wait_variable(context.shell, variable, waited.identifier)?;
++			}
++			return Ok(waited.result);
++		}
++
++		let mut waited_identifier = None;
+ 		if !self.ids.is_empty() {
+ 			for id in &self.ids {
+ 				if id.starts_with('%') {
+ 					// It's a job spec.
+ 					if let Some(job) = context.shell.jobs_mut().resolve_job_spec(id) {
+-						job.wait().await?;
++						waited_identifier = Some(job_identifier(job));
++						result = if self.wait_for_terminate {
++							job.wait_for_termination().await?
++						} else {
++							job.wait().await?
++						};
+ 					} else {
+ 						writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
+ 
+ 						result = ExecutionExitCode::GeneralError.into();
+ 					}
++				} else if let Ok(pid) = int_utils::parse::<i32>(id, 10) {
++					if let Some(job) = context.shell.jobs_mut().resolve_process_id(pid) {
++						waited_identifier = Some(pid.to_string());
++						result = if self.wait_for_terminate {
++							job.wait_for_termination().await?
++						} else {
++							job.wait().await?
++						};
++					} else {
++						writeln!(
++							context.stderr(),
++							"{}: pid {pid} is not a child of this shell",
++							context.command_name
++						)?;
++
++						result = ExecutionExitCode::NotFound.into();
++					}
+ 				} else {
+-					// It's a process ID.
+-					return error::unimp("wait with process IDs");
++					writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
++
++					result = ExecutionExitCode::GeneralError.into();
+ 				}
+ 			}
+ 		} else {
+ 			// Wait for all jobs.
+-			let jobs = context.shell.jobs_mut().wait_all().await?;
++			let jobs = if self.wait_for_terminate {
++				context.shell.jobs_mut().wait_all_for_termination().await?
++			} else {
++				context.shell.jobs_mut().wait_all().await?
++			};
++			waited_identifier = jobs.last().map(job_identifier);
+ 
+ 			if context.shell.options().enable_job_control {
+ 				for job in jobs {
+@@ -70,6 +113,71 @@ impl builtins::Command for WaitCommand {
+ 			}
+ 		}
+ 
++		if let (Some(variable), Some(identifier)) = (&self.variable_to_receive_id, waited_identifier) {
++			assign_wait_variable(context.shell, variable, identifier)?;
++		}
++
+ 		Ok(result)
+ 	}
+ }
++
++enum WaitSelectorResolution {
++	Selectors(Vec<JobSelector>),
++	Failure(ExecutionResult),
++}
++
++fn resolve_wait_selectors<SE: brush_core::ShellExtensions>(
++	context: &brush_core::ExecutionContext<'_, SE>,
++	ids: &[String],
++) -> Result<WaitSelectorResolution, brush_core::Error> {
++	let mut selectors = Vec::new();
++	for id in ids {
++		if id.starts_with('%') {
++			if let Some(selector) = context.shell.jobs().resolve_job_spec_selector(id) {
++				selectors.push(selector);
++			} else {
++				writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
++				return Ok(WaitSelectorResolution::Failure(
++					ExecutionExitCode::GeneralError.into(),
++				));
++			}
++		} else if let Ok(pid) = int_utils::parse::<i32>(id, 10) {
++			if context.shell.jobs().contains_process_id(pid) {
++				selectors.push(JobSelector::ProcessId(pid));
++			} else {
++				writeln!(
++					context.stderr(),
++					"{}: pid {pid} is not a child of this shell",
++					context.command_name
++				)?;
++				return Ok(WaitSelectorResolution::Failure(ExecutionExitCode::NotFound.into()));
++			}
++		} else {
++			writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
++			return Ok(WaitSelectorResolution::Failure(
++				ExecutionExitCode::GeneralError.into(),
++			));
++		}
++	}
++	Ok(WaitSelectorResolution::Selectors(selectors))
++}
++
++fn assign_wait_variable(
++	shell: &mut brush_core::Shell<impl brush_core::ShellExtensions>,
++	name: &str,
++	value: String,
++) -> Result<(), brush_core::Error> {
++	shell.env_mut().update_or_add(
++		name,
++		ShellValueLiteral::Scalar(value),
++		|_| Ok(()),
++		EnvironmentLookup::Anywhere,
++		EnvironmentScope::Global,
++	)
++}
++
++fn job_identifier(job: &Job) -> String {
++	job
++		.representative_pid()
++		.map_or_else(|| job.id.to_string(), |pid| pid.to_string())
++}
+diff --git a/crates/brush-core-vendored/Cargo.toml b/crates/brush-core-vendored/Cargo.toml
+index e6d064bdd..14a497b40 100644
+--- a/crates/brush-core-vendored/Cargo.toml
++++ b/crates/brush-core-vendored/Cargo.toml
+@@ -148,6 +148,7 @@ features = [
+     "rt-multi-thread",
+     "signal",
+     "sync",
++    "time",
+ ]
+ 
+ [target.'cfg(target_family = "wasm")'.dependencies.tokio]
+@@ -156,6 +157,7 @@ features = [
+     "io-util",
+     "macros",
+     "rt",
++    "time",
+     "sync",
+ ]
+ 
+diff --git a/crates/brush-core-vendored/src/jobs.rs b/crates/brush-core-vendored/src/jobs.rs
+index 0a575b23c..226650542 100644
+--- a/crates/brush-core-vendored/src/jobs.rs
++++ b/crates/brush-core-vendored/src/jobs.rs
+@@ -1,6 +1,6 @@
+ //! Job management
+ 
+-use std::{collections::VecDeque, fmt::Display};
++use std::{collections::VecDeque, fmt::Display, time::Duration};
+ 
+ #[cfg(windows)]
+ use std::os::windows::io::OwnedHandle;
+@@ -12,6 +12,35 @@ use crate::{ExecutionResult, error, processes, sys, trace_categories, traps};
+ pub(crate) type JobJoinHandle = tokio::task::JoinHandle<Result<ExecutionResult, error::Error>>;
+ pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
+ 
++const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
++
++/// Selects a managed job by shell job ID or child process ID.
++#[derive(Clone, Copy)]
++pub enum JobSelector {
++	/// Shell-internal job ID.
++	JobId(usize),
++	/// Child process ID.
++	ProcessId(i32),
++}
++
++/// Result returned when waiting for a single managed job.
++pub struct WaitedJob {
++	/// Shell-internal job ID.
++	pub id: usize,
++	/// Process ID when known, otherwise the shell-internal job ID.
++	pub identifier: String,
++	/// Command line associated with the job.
++	pub command_line: String,
++	/// Exit status returned by the job.
++	pub result: ExecutionResult,
++}
++
++impl WaitedJob {
++	fn from_job(job: Job, result: ExecutionResult, identifier: String) -> Self {
++		Self { id: job.id, identifier, command_line: job.command_line, result }
++	}
++}
++
+ /// Manages the jobs that are currently managed by the shell.
+ #[derive(Default)]
+ pub struct JobManager {
+@@ -42,17 +71,21 @@ impl JobTask {
+ 	}
+ 
+ 	/// Waits for the task to complete. Returns the result of the wait.
+-	pub async fn wait(&mut self) -> Result<JobTaskWaitResult, error::Error> {
++	pub async fn wait(
++		&mut self,
++		wait_for_terminate: bool,
++	) -> Result<JobTaskWaitResult, error::Error> {
+ 		match self {
+-			Self::External(process) => {
++			Self::External(process) => loop {
+ 				let wait_result = process.wait(None).await?;
+ 				match wait_result {
+ 					processes::ProcessWaitResult::Completed(output) => {
+-						Ok(JobTaskWaitResult::Completed(output.into()))
++						break Ok(JobTaskWaitResult::Completed(output.into()));
+ 					},
+-					processes::ProcessWaitResult::Stopped => Ok(JobTaskWaitResult::Stopped),
++					processes::ProcessWaitResult::Stopped if wait_for_terminate => {},
++					processes::ProcessWaitResult::Stopped => break Ok(JobTaskWaitResult::Stopped),
+ 					processes::ProcessWaitResult::Cancelled => {
+-						Ok(JobTaskWaitResult::Completed(ExecutionResult::new(130)))
++						break Ok(JobTaskWaitResult::Completed(ExecutionResult::new(130)));
+ 					},
+ 				}
+ 			},
+@@ -162,15 +195,111 @@ impl JobManager {
+ 		}
+ 	}
+ 
++	/// Tries to resolve the given job specification to a wait selector.
++	///
++	/// # Arguments
++	///
++	/// * `job_spec` - The job specification to resolve.
++	pub fn resolve_job_spec_selector(&self, job_spec: &str) -> Option<JobSelector> {
++		let remainder = job_spec.strip_prefix('%')?;
++
++		match remainder {
++			"%" | "+" => self.current_job().map(|job| JobSelector::JobId(job.id)),
++			"-" => self.prev_job().map(|job| JobSelector::JobId(job.id)),
++			s if s.chars().all(char::is_numeric) => {
++				let id = s.parse::<usize>().ok()?;
++				self
++					.jobs
++					.iter()
++					.any(|job| job.id == id)
++					.then_some(JobSelector::JobId(id))
++			},
++			_ => {
++				tracing::warn!(target: trace_categories::UNIMPLEMENTED, "unimplemented: job spec naming command: '{job_spec}'");
++				None
++			},
++		}
++	}
++
++	/// Returns whether a managed job contains the given process ID.
++	pub fn contains_process_id(&self, pid: i32) -> bool {
++		self.jobs.iter().any(|job| job.contains_process_id(pid))
++	}
++
++
++	/// Tries to resolve the given process ID to a managed job.
++	///
++	/// # Arguments
++	///
++	/// * `pid` - The process ID to resolve.
++	pub fn resolve_process_id(&mut self, pid: i32) -> Option<&mut Job> {
++		self.jobs.iter_mut().find(|job| job.contains_process_id(pid))
++	}
++
+ 	/// Waits for all managed jobs to complete.
+ 	pub async fn wait_all(&mut self) -> Result<Vec<Job>, error::Error> {
++		self.wait_all_with_policy(false).await
++	}
++
++	/// Waits for all managed jobs to terminate, ignoring stopped-state changes.
++	pub async fn wait_all_for_termination(&mut self) -> Result<Vec<Job>, error::Error> {
++		self.wait_all_with_policy(true).await
++	}
++
++	async fn wait_all_with_policy(
++		&mut self,
++		wait_for_terminate: bool,
++	) -> Result<Vec<Job>, error::Error> {
+ 		for job in &mut self.jobs {
+-			job.wait().await?;
++			job.wait_with_policy(wait_for_terminate).await?;
+ 		}
+ 
+ 		Ok(self.sweep_completed_jobs())
+ 	}
+ 
++	/// Waits for the next matching managed job to complete.
++	pub async fn wait_next(
++		&mut self,
++		selectors: &[JobSelector],
++	) -> Result<Option<WaitedJob>, error::Error> {
++		loop {
++			let mut found_candidate = false;
++			let mut i = 0;
++			while i != self.jobs.len() {
++				if !selectors.is_empty()
++					&& !selectors
++						.iter()
++						.any(|selector| self.jobs[i].matches_selector(*selector))
++				{
++					i += 1;
++					continue;
++				}
++
++				found_candidate = true;
++				let identifier = self.jobs[i].wait_identifier();
++				if let Some(result) = self.jobs[i].poll_done()? {
++					let job = self.jobs.remove(i);
++					return result.map(|result| Some(WaitedJob::from_job(job, result, identifier)));
++				}
++				if matches!(self.jobs[i].state, JobState::Done) {
++					let job = self.jobs.remove(i);
++					return Ok(Some(WaitedJob::from_job(
++						job,
++						ExecutionResult::success(),
++						identifier,
++					)));
++				}
++				i += 1;
++			}
++
++			if !found_candidate {
++				return Ok(None);
++			}
++
++			tokio::time::sleep(WAIT_NEXT_POLL_INTERVAL).await;
++		}
++	}
++
+ 	/// Polls all managed jobs for completion.
+ 	pub fn poll(&mut self) -> Result<Vec<JobResult>, error::Error> {
+ 		let mut results = vec![];
+@@ -371,10 +500,22 @@ impl Job {
+ 
+ 	/// Waits for the job to complete.
+ 	pub async fn wait(&mut self) -> Result<ExecutionResult, error::Error> {
++		self.wait_with_policy(false).await
++	}
++
++	/// Waits for the job to terminate, ignoring stopped-state changes.
++	pub async fn wait_for_termination(&mut self) -> Result<ExecutionResult, error::Error> {
++		self.wait_with_policy(true).await
++	}
++
++	async fn wait_with_policy(
++		&mut self,
++		wait_for_terminate: bool,
++	) -> Result<ExecutionResult, error::Error> {
+ 		let mut result = ExecutionResult::success();
+ 
+ 		while let Some(task) = self.tasks.back_mut() {
+-			match task.wait().await? {
++			match task.wait(wait_for_terminate).await? {
+ 				JobTaskWaitResult::Completed(execution_result) => {
+ 					result = execution_result;
+ 					self.tasks.pop_back();
+@@ -457,6 +598,27 @@ impl Job {
+ 		}
+ 	}
+ 
++	fn matches_selector(&self, selector: JobSelector) -> bool {
++		match selector {
++			JobSelector::JobId(id) => self.id == id,
++			JobSelector::ProcessId(pid) => self.contains_process_id(pid),
++		}
++	}
++
++
++	fn contains_process_id(&self, pid: i32) -> bool {
++		self.tasks.iter().any(|task| match task {
++			JobTask::External(process) => process.pid().is_some_and(|process_pid| process_pid == pid),
++			JobTask::Internal(_) => false,
++		})
++	}
++
++	fn wait_identifier(&self) -> String {
++		self
++			.representative_pid()
++			.map_or_else(|| self.id.to_string(), |pid| pid.to_string())
++	}
++
+ 	/// Tries to retrieve a "representative" pid for the job.
+ 	pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {
+ 		for task in &self.tasks {
+diff --git a/crates/pi-shell/src/shell.rs b/crates/pi-shell/src/shell.rs
+index 4de375c1c..65071ffa4 100644
+--- a/crates/pi-shell/src/shell.rs
++++ b/crates/pi-shell/src/shell.rs
+@@ -1918,6 +1918,57 @@ mod tests {
+ 		);
+ 	}
+ 
++	#[tokio::test(flavor = "multi_thread")]
++	async fn wait_accepts_last_background_process_id() {
++		let options = ShellExecuteOptions {
++			command: "/bin/sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
++			..Default::default()
++		};
++
++		let result = execute_shell(options, None, CancelToken::default())
++			.await
++			.expect("execute should succeed");
++
++		assert_eq!(result.exit_code, Some(7));
++		assert!(!result.cancelled);
++		assert!(!result.timed_out);
++	}
++
++	#[tokio::test(flavor = "multi_thread")]
++	async fn wait_n_p_records_completed_process_id() {
++		let options = ShellExecuteOptions {
++			command: "/bin/sh -c 'sleep 0.2; exit 42' & slow=$!; /bin/sh -c 'exit 13' & fast=$!; \
++			          wait -n -p hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" \
++			          -eq 13 ] && [ \"$hit\" = \"$fast\" ]"
++				.to_string(),
++			..Default::default()
++		};
++
++		let result = execute_shell(options, None, CancelToken::default())
++			.await
++			.expect("execute should succeed");
++
++		assert_eq!(result.exit_code, Some(0));
++		assert!(!result.cancelled);
++		assert!(!result.timed_out);
++	}
++
++	#[tokio::test(flavor = "multi_thread")]
++	async fn wait_f_accepts_process_id() {
++		let options = ShellExecuteOptions {
++			command: "/bin/sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
++			..Default::default()
++		};
++
++		let result = execute_shell(options, None, CancelToken::default())
++			.await
++			.expect("execute should succeed");
++
++		assert_eq!(result.exit_code, Some(5));
++		assert!(!result.cancelled);
++		assert!(!result.timed_out);
++	}
++
+ 	#[tokio::test]
+ 	async fn abort_state_signals_cancel_token() {
+ 		let abort_state = ShellAbortState::default();

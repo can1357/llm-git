@@ -1,0 +1,9 @@
+ .../src/modes/components/custom-editor.ts          |  5 +-
+ .../coding-agent/src/modes/components/tips.txt     |  6 +-
+ .../coding-agent/src/modes/gradient-highlight.ts   | 70 ++++++++++++++++++++++
+ packages/coding-agent/src/modes/orchestrate.ts     | 36 +++++++++++
+ packages/coding-agent/src/modes/ultrathink.ts      | 62 +++----------------
+ .../orchestrate-notice.md}                         | 21 ++-----
+ packages/coding-agent/src/session/agent-session.ts | 52 ++++++++++------
+ packages/coding-agent/src/task/commands.ts         |  6 +-
+ 8 files changed, 162 insertions(+), 96 deletions(-)

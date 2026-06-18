@@ -1,0 +1,5 @@
+source_repo = "/work/pi"
+source_commit = "8e1f53fee6e77fd4b3708d73873dc7820fe0068b"
+description = "Fixture from commit 8e1f53fee6e77fd4b3708d73873dc7820fe0068b"
+captured_at = "2026-06-18T00:43:04.081211+00:00"
+tags = []

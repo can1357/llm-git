@@ -1,0 +1,13 @@
+diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
+index 0def9ccc4..0781f7748 100644
+--- a/packages/coding-agent/src/cli/update-cli.ts
++++ b/packages/coding-agent/src/cli/update-cli.ts
+@@ -237,7 +237,7 @@ async function printVerification(expectedVersion: string): Promise<void> {
+ 	}
+ 	console.log(
+ 		chalk.yellow(
+-			`You may need to reinstall: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash`,
++			`You may need to reinstall: curl -fsSL https://omp.sh/install | sh`,
+ 		),
+ 	);
+ }

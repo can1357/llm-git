@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                 |  1 +
+ packages/coding-agent/src/tools/bash.ts            | 52 +++++++++++++++++++---
+ .../test/tools/bash-sixel-render.test.ts           | 47 +++++++++++++++++++
+ 3 files changed, 95 insertions(+), 5 deletions(-)

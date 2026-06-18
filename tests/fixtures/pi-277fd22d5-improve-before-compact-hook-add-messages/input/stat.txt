@@ -1,0 +1,9 @@
+ packages/coding-agent/CHANGELOG.md                 |  5 ++++-
+ packages/coding-agent/docs/hooks.md                |  6 ++++--
+ .../coding-agent/examples/hooks/full-compaction.ts | 23 ++++++++++++----------
+ packages/coding-agent/src/core/agent-session.ts    |  8 ++++----
+ packages/coding-agent/src/core/compaction.ts       | 16 ++++++++++++++-
+ packages/coding-agent/src/core/hooks/types.ts      |  4 +++-
+ .../test/compaction-hooks-example.test.ts          |  6 ++++--
+ .../coding-agent/test/compaction-hooks.test.ts     |  7 ++++---
+ 8 files changed, 51 insertions(+), 24 deletions(-)

@@ -1,0 +1,3 @@
+ packages/coding-agent/CHANGELOG.md                  | 6 ++++++
+ packages/coding-agent/src/config/settings-schema.ts | 4 ++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)

@@ -1,0 +1,159 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index ebf63e4e7..30d81971c 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -317,6 +317,7 @@
+ - Fixed working-message loader session accents so spinner/message color math is cached per session name, session-accent setting, and theme luminance while still updating immediately on renames, setting toggles, and theme changes.
+ - Fixed subagents looping indefinitely on byte-identical no-op `edit` calls. The hashline executor previously surfaced a soft "your body row(s) are byte-identical to the file" hint that some models ignored; one captured session emitted 182 such repeats in 205 calls over 16 minutes before the user aborted. A new per-`ToolSession` `noopLoopGuard` now tracks consecutive identical no-op payloads per canonical path and escalates to a thrown `ToolError` after `NOOP_HARD_LIMIT` (3) repeats, so the agent loop sees a tool *failure* and breaks the cycle ([#2081](https://github.com/can1357/oh-my-pi/issues/2081)).
+ - Fixed the bash tool's `~/.omp/agent/artifacts/<id>.bash.log` growing unbounded when a command (e.g. `Get-Content | ConvertTo-Json` spraying rich PowerShell `PSObject` metadata) emitted multi-MB output; one capture reached 7.6MB on disk. `OutputSink` now defaults `artifactMaxBytes` to 4 MiB (3 MiB head + 1 MiB rolling tail) and replays the tail behind a single `[ARTIFACT TRUNCATED: kept first … + last … of …; … elided from the middle]` notice on close. Set `artifactMaxBytes: 0` to restore unbounded streaming ([#2081](https://github.com/can1357/oh-my-pi/issues/2081)).
++- Fixed the bash result renderer recomputing styled output (`split` / `replaceTabs` / `truncateToVisualLines`) on every TUI repaint, which scaled with both transcript length and per-row output size. With a long captured session every keystroke walked hundreds of bash rows; the reporter on issue #2081 observed Ctrl+X/Ctrl+C feeling unresponsive because the main thread was pinned re-styling scrollback. The result renderer now caches its produced lines keyed by `(width, previewLines, expanded, rawOutput, isPartial)`, mirroring the existing eval-renderer cache; `invalidate()` clears the cache as before. Hot-path repaints with unchanged inputs are now O(1) ([#2081](https://github.com/can1357/oh-my-pi/issues/2081)).
+ - Fixed startup model fallback selection so sessions now prefer each provider’s configured default model before choosing the first available authenticated model
+ - Fixed implicit model selection path for tools and sessions by honoring persisted model-provider order when no explicit pattern is provided
+ - Fixed the working spinner appearing to ignore Esc for 2-3 seconds when an interrupt lands mid-tool. Esc fires the abort synchronously, but the agent loop only stops the loader at `agent_end`, which it cannot reach until every in-flight tool settles in `executeToolCalls`' `await Promise.allSettled(...)` — and process/subagent/kernel-owning tools tear down gracefully (SIGTERM, 2-3s grace, SIGKILL), so the loader kept showing the unchanged "Working…/<intent>" line and read as a dropped keypress. The loader now switches to "Interrupting…" the instant Esc requests the abort and freezes intent-driven label updates until the turn unwinds (`EventController.notifyInterrupting`), so the interrupt is acknowledged immediately even while teardown completes.
+diff --git a/packages/coding-agent/src/tools/bash.ts b/packages/coding-agent/src/tools/bash.ts
+index dfd39bbcd..3c4d838be 100644
+--- a/packages/coding-agent/src/tools/bash.ts
++++ b/packages/coding-agent/src/tools/bash.ts
+@@ -1212,6 +1212,22 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
+ 			const details = result.details;
+ 			const outputBlock = new CachedOutputBlock();
+ 
++			// Per-instance cache for the expensive inner lines computation. Mirrors
++			// the eval-renderer pattern (`eval-render.ts:709-752`): without this,
++			// every TUI repaint (one per keystroke when a long transcript is on
++			// screen) re-runs `split` / `replaceTabs` / `truncateToVisualLines` over
++			// the whole stored output for every bash row in scrollback. With a
++			// 50KB-tail bash result times hundreds of rows, that re-rendering is
++			// what pinned the main thread in issue #2081 and made keystrokes feel
++			// like the CPU was at 100%. The cache key includes every render input
++			// that materially affects the produced lines.
++			let cachedWidth: number | undefined;
++			let cachedPreviewLines: number | undefined;
++			let cachedExpanded: boolean | undefined;
++			let cachedRawOutput: string | undefined;
++			let cachedIsPartial: boolean | undefined;
++			let cachedLines: string[] | undefined;
++
+ 			return markFramedBlockComponent({
+ 				render: (width: number): readonly string[] => {
+ 					// REACTIVE: read mutable options at render time
+@@ -1223,6 +1239,19 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
+ 					// Strip the LLM-facing notice appended by wrappedExecute so we don't
+ 					// double-print it alongside the styled warning line below.
+ 					const rawOutput = renderContext?.output ?? result.content?.find(c => c.type === "text")?.text ?? "";
++
++					const isPartial = options.isPartial === true;
++
++					if (
++						cachedLines !== undefined &&
++						cachedWidth === width &&
++						cachedPreviewLines === previewLines &&
++						cachedExpanded === expanded &&
++						cachedRawOutput === rawOutput &&
++						cachedIsPartial === isPartial
++					) {
++						return cachedLines;
++					}
+ 					const strippedOutput = stripOutputNotice(rawOutput, details?.meta);
+ 					const withoutExit = stripExitCodeNotice(strippedOutput, details?.exitCode);
+ 					const withoutWall = stripWallTimeNotice(withoutExit, details?.wallTimeMs);
+@@ -1299,25 +1328,38 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
+ 					if (timeoutLine) outputLines.push(timeoutLine);
+ 					if (warningLine) outputLines.push(warningLine);
+ 
+-					return outputBlock.render(
++					const framed = outputBlock.render(
+ 						{
+ 							header,
+-							state: options.isPartial ? "pending" : isError ? "error" : "success",
++							state: isPartial ? "pending" : isError ? "error" : "success",
+ 							sections: [
+ 								{
+-									lines: options.isPartial
+-										? capPreviewLines(cmdLines ?? [], uiTheme, { expanded })
+-										: (cmdLines ?? []),
++									lines: isPartial ? capPreviewLines(cmdLines ?? [], uiTheme, { expanded }) : (cmdLines ?? []),
+ 								},
+ 								{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },
+ 							],
+ 							width,
++
+ 						},
+ 						uiTheme,
+ 					);
++
++					cachedWidth = width;
++					cachedPreviewLines = previewLines;
++					cachedExpanded = expanded;
++					cachedRawOutput = rawOutput;
++					cachedIsPartial = isPartial;
++					cachedLines = framed;
++					return framed;
+ 				},
+ 				invalidate: () => {
+ 					outputBlock.invalidate();
++					cachedLines = undefined;
++					cachedWidth = undefined;
++					cachedPreviewLines = undefined;
++					cachedExpanded = undefined;
++					cachedRawOutput = undefined;
++					cachedIsPartial = undefined;
+ 				},
+ 			});
+ 		},
+diff --git a/packages/coding-agent/test/tools/bash-sixel-render.test.ts b/packages/coding-agent/test/tools/bash-sixel-render.test.ts
+index 16d855c26..48f0ca9c4 100644
+--- a/packages/coding-agent/test/tools/bash-sixel-render.test.ts
++++ b/packages/coding-agent/test/tools/bash-sixel-render.test.ts
+@@ -257,4 +257,51 @@ describe("bashToolRenderer", () => {
+ 			expect(rendered[idx]).toMatch(/\u001b\[38;(?:2|5);/);
+ 		}
+ 	});
++
++	it("caches the framed lines across repeated render() calls with identical inputs (issue #2081)", async () => {
++		// The bash result renderer is called per TUI repaint; with a long
++		// transcript and a 50KB-tail output that's the hot path that pinned the
++		// main thread in #2081. The eval renderer already caches by (width,
++		// previewLines) — this test pins the same contract for bash so future
++		// refactors don't silently drop the cache.
++		const theme = await getThemeByName("dark");
++		expect(theme).toBeDefined();
++		const uiTheme = theme!;
++		// A non-trivial output so a missed cache hit would do real string work.
++		const output = Array.from({ length: 200 }, (_, i) => `line ${i}: payload ${"x".repeat(20)}`).join("\n");
++		const component = bashToolRenderer.renderResult(
++			{
++				content: [{ type: "text", text: output }],
++				details: { timeoutSeconds: 5, wallTimeMs: 12 },
++				isError: false,
++			},
++			{ expanded: false, isPartial: false, renderContext: { output, expanded: false, previewLines: 8 } },
++			uiTheme,
++			{ command: "printf '%s' big" },
++		);
++
++		const first = component.render(120);
++		const second = component.render(120);
++		// Identical inputs → cache hit returns the very same array reference.
++		expect(second).toBe(first);
++
++		// Width change busts the cache; fresh array.
++		const wider = component.render(160);
++		expect(wider).not.toBe(first);
++
++		// Original width hits the cache slot's current binding — proving the
++		// cache key includes width and isn't a stale-single-slot bug.
++		const sameAgain = component.render(120);
++		expect(sameAgain).not.toBe(first); // most-recent slot now holds the 160 result
++		expect(sameAgain).not.toBe(wider);
++
++		// Subsequent identical render reuses the freshly-cached 120 slot.
++		const sameAgainCached = component.render(120);
++		expect(sameAgainCached).toBe(sameAgain);
++
++		// invalidate() clears the cache so the next render produces a brand-new array.
++		(component as { invalidate?: () => void }).invalidate?.();
++		const postInvalidate = component.render(120);
++		expect(postInvalidate).not.toBe(sameAgainCached);
++	});
+ });

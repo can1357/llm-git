@@ -1,0 +1,64 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 4d548f1ce..dc82b7527 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,6 +1,7 @@
+ # Changelog
+ 
+ ## [Unreleased]
++
+ ### Breaking Changes
+ 
+ - Replaced `edit.patchMode` boolean setting with `edit.mode` enum; existing `edit.patchMode: true` configurations should use `edit.mode: patch`
+@@ -30,6 +31,7 @@
+ 
+ ### Changed
+ 
++- Enhanced system prompt to display tool descriptions alongside tool names for improved clarity on available capabilities
+ - Reduced hash length from 4 to 2 hex characters (16-bit hashes) for more concise line references
+ - Updated `HashlineEdit` type to accept `string | string[]` for `old` and `new` fields, allowing single-line edits without array wrapping
+ - Enhanced `parseLineRef` to strip display-format suffix (e.g., `5:ab| content` → `5:ab`), allowing models to copy full read output format
+diff --git a/packages/coding-agent/src/prompts/system/system-prompt.md b/packages/coding-agent/src/prompts/system/system-prompt.md
+index 970ee8020..e499ff469 100644
+--- a/packages/coding-agent/src/prompts/system/system-prompt.md
++++ b/packages/coding-agent/src/prompts/system/system-prompt.md
+@@ -83,7 +83,14 @@ Bad approach? State downside, propose alternative, accept override.
+ 
+ <protocol>
+ ## Right tool exists—use it.
+-**Tools:** {{#each tools}}{{#unless @first}}, {{/unless}}`{{this}}`{{/each}}
++<tools>
++{{#each toolDescriptions}}
++<tool name="{{name}}">
++{{description}}
++</tool>
++{{/each}}
++</tools>
++
+ {{#ifAny (includes tools "python") (includes tools "bash")}}
+ ### Tool precedence
+ **Specialized tools → Python → Bash**
+diff --git a/packages/coding-agent/src/system-prompt.ts b/packages/coding-agent/src/system-prompt.ts
+index 83491c475..e32f6a15e 100644
+--- a/packages/coding-agent/src/system-prompt.ts
++++ b/packages/coding-agent/src/system-prompt.ts
+@@ -508,6 +508,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
+ 		toolNamesArray = defaultToolNames;
+ 	}
+ 
++	// Build tool descriptions for system prompt rendering
++	const toolDescriptions = toolNamesArray.map(name => ({
++		name,
++		description: tools?.get(name)?.description ?? "",
++	}));
+ 	// Resolve skills: use provided or discover
+ 	const skills =
+ 		providedSkills ??
+@@ -541,6 +546,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
+ 
+ 	return renderPromptTemplate(systemPromptTemplate, {
+ 		tools: toolNamesArray,
++		toolDescriptions,
+ 		environment: await getEnvironmentInfo(),
+ 		systemPromptCustomization: systemPromptCustomization ?? "",
+ 		contextFiles,

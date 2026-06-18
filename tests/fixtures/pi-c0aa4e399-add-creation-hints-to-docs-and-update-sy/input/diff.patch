@@ -1,0 +1,63 @@
+diff --git a/packages/coding-agent/docs/custom-tools.md b/packages/coding-agent/docs/custom-tools.md
+index 74b908bda..8f428efb3 100644
+--- a/packages/coding-agent/docs/custom-tools.md
++++ b/packages/coding-agent/docs/custom-tools.md
+@@ -1,3 +1,5 @@
++> pi can create custom tools. Ask it to build one for your use case.
++
+ # Custom Tools
+ 
+ Custom tools are additional tools that the LLM can call directly, just like the built-in `read`, `write`, `edit`, and `bash` tools. They are TypeScript modules that define callable functions with parameters, return values, and optional TUI rendering.
+diff --git a/packages/coding-agent/docs/hooks.md b/packages/coding-agent/docs/hooks.md
+index e8c3c8562..2cde1a0c1 100644
+--- a/packages/coding-agent/docs/hooks.md
++++ b/packages/coding-agent/docs/hooks.md
+@@ -1,3 +1,5 @@
++> pi can create hooks. Ask it to build one for your use case.
++
+ # Hooks
+ 
+ Hooks are TypeScript modules that extend pi's behavior by subscribing to lifecycle events. They can intercept tool calls, prompt the user, modify results, inject messages, and more.
+diff --git a/packages/coding-agent/docs/skills.md b/packages/coding-agent/docs/skills.md
+index a32a2397d..c2685d970 100644
+--- a/packages/coding-agent/docs/skills.md
++++ b/packages/coding-agent/docs/skills.md
+@@ -1,3 +1,5 @@
++> pi can create skills. Ask it to build one for your use case.
++
+ # Skills
+ 
+ Skills are self-contained capability packages that the agent loads on-demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
+diff --git a/packages/coding-agent/docs/theme.md b/packages/coding-agent/docs/theme.md
+index ac3fa2376..bc6064f11 100644
+--- a/packages/coding-agent/docs/theme.md
++++ b/packages/coding-agent/docs/theme.md
+@@ -1,3 +1,5 @@
++> pi can create themes. Ask it to build one for your use case.
++
+ # Pi Coding Agent Themes
+ 
+ Themes allow you to customize the colors used throughout the coding agent TUI.
+diff --git a/packages/coding-agent/docs/tui.md b/packages/coding-agent/docs/tui.md
+index 0e463047d..297f6cf5d 100644
+--- a/packages/coding-agent/docs/tui.md
++++ b/packages/coding-agent/docs/tui.md
+@@ -1,3 +1,5 @@
++> pi can create TUI components. Ask it to build one for your use case.
++
+ # TUI Components
+ 
+ Hooks and custom tools can render custom TUI components for interactive user interfaces. This page covers the component system and available building blocks.
+diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
+index f801cf94b..07e9cbbb9 100644
+--- a/packages/coding-agent/src/core/system-prompt.ts
++++ b/packages/coding-agent/src/core/system-prompt.ts
+@@ -281,7 +281,7 @@ Documentation:
+ - Main documentation: ${readmePath}
+ - Additional docs: ${docsPath}
+ - Examples: ${examplesPath} (hooks, custom tools, SDK)
+-- When asked about: custom models/providers (README sufficient), themes (docs/theme.md), skills (docs/skills.md), hooks (docs/hooks.md), custom tools (docs/custom-tools.md), RPC (docs/rpc.md)`;
++- When asked to create hooks, custom tools, themes, or skills: read the relevant docs AND examples, follow all .md cross-references`;
+ 
+ 	if (appendSection) {
+ 		prompt += appendSection;

@@ -1,0 +1,16 @@
+ packages/ai/CHANGELOG.md                          |  20 +
+ packages/ai/README.md                             |  62 +--
+ packages/ai/src/cli.ts                            | 162 ++++---
+ packages/ai/src/storage.ts                        | 185 ++++++++
+ packages/ai/src/utils/oauth/anthropic.ts          | 165 +++-----
+ packages/ai/src/utils/oauth/callback-server.ts    | 245 +++++++++++
+ packages/ai/src/utils/oauth/google-antigravity.ts | 370 ++++------------
+ packages/ai/src/utils/oauth/google-gemini-cli.ts  | 384 ++++-------------
+ packages/ai/src/utils/oauth/oauth.html            | 199 +++++++++
+ packages/ai/src/utils/oauth/openai-codex.ts       | 493 +++++++---------------
+ packages/ai/src/utils/oauth/types.ts              |   8 +
+ packages/coding-agent/CHANGELOG.md                |   7 +
+ packages/coding-agent/src/cli/update-cli.ts       |   2 +-
+ packages/coding-agent/src/core/auth-storage.ts    |  38 +-
+ packages/coding-agent/src/core/tools/grep.ts      |  47 ++-
+ 15 files changed, 1267 insertions(+), 1120 deletions(-)

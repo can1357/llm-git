@@ -1,0 +1,2 @@
+coding-agent (98%, high confidence), coding-agent/advisor (58%, moderate confidence), coding-agent/session (23%, moderate confidence), coding-agent/config (15%, moderate confidence)
+Prefer 2-segment scopes marked 'high confidence'

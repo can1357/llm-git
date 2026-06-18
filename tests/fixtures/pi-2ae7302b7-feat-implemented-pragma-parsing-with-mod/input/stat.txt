@@ -1,0 +1,24 @@
+ src/robomp/config.py                   |   2 +-
+ src/robomp/dashboard.py                |  12 ++-
+ src/robomp/db.py                       |  52 ++++++++--
+ src/robomp/github_events.py            |  18 +++-
+ src/robomp/host_tools.py               |  13 ++-
+ src/robomp/persona.py                  |  17 ++++
+ src/robomp/pragmas.py                  | 181 +++++++++++++++++++++++++++++++++
+ src/robomp/prompts/directive.md        |  11 +-
+ src/robomp/prompts/followup_comment.md |   6 +-
+ src/robomp/prompts/host_tools.toml     |   4 +-
+ src/robomp/queue.py                    |   4 +
+ src/robomp/server.py                   |   1 +
+ src/robomp/tasks.py                    |  22 +++-
+ src/robomp/worker.py                   |  38 ++++++-
+ tests/conftest.py                      |   2 +-
+ tests/test_db.py                       |  52 ++++++++++
+ tests/test_github_events.py            |  64 ++++++++++++
+ tests/test_host_tools.py               |  63 ++++++++++++
+ tests/test_pragmas.py                  | 147 ++++++++++++++++++++++++++
+ tests/test_server.py                   |   6 +-
+ tests/test_tasks_directive.py          |  51 ++++++++++
+ tests/test_worker_pragmas.py           |  80 +++++++++++++++
+ tests/test_worker_smoke.py             |   1 +
+ 23 files changed, 816 insertions(+), 31 deletions(-)

@@ -1,0 +1,4 @@
+ packages/ai/CHANGELOG.md                        |   2 +-
+ packages/ai/src/providers/transform-messages.ts |  32 ++++++--
+ packages/ai/test/duplicate-tool-results.test.ts | 105 +++++++++++++++++++++++-
+ 3 files changed, 129 insertions(+), 10 deletions(-)

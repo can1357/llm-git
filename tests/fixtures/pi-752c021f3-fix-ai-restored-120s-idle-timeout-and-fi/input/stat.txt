@@ -1,0 +1,5 @@
+ packages/ai/CHANGELOG.md                       | 5 +++++
+ packages/ai/src/providers/register-builtins.ts | 6 ++++++
+ packages/ai/src/utils/idle-iterator.ts         | 9 +++++++--
+ packages/ai/test/register-builtins.test.ts     | 1 +
+ 4 files changed, 19 insertions(+), 2 deletions(-)

@@ -1,0 +1,3 @@
+ packages/agent/src/renderers/tui-renderer.ts | 10 ++++++----
+ packages/tui/src/components/text-editor.ts   |  3 +--
+ 2 files changed, 7 insertions(+), 6 deletions(-)

@@ -1,0 +1,4 @@
+ packages/coding-agent/src/prompts/tools/bash.md | 6 +++++-
+ packages/coding-agent/src/prompts/tools/find.md | 5 +++++
+ packages/coding-agent/src/prompts/tools/read.md | 8 ++++----
+ 3 files changed, 14 insertions(+), 5 deletions(-)

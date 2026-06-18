@@ -1,0 +1,66 @@
+diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
+index 09e694fe7..81ac5945b 100644
+--- a/packages/coding-agent/src/modes/controllers/input-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
+@@ -4,7 +4,6 @@ import { sanitizeText } from "@oh-my-pi/pi-natives";
+ import type { AutocompleteProvider, SlashCommand } from "@oh-my-pi/pi-tui";
+ import { $env } from "@oh-my-pi/pi-utils";
+ import { settings } from "../../config/settings";
+-import { buildSkillPromptMessage } from "../../extensibility/skills";
+ import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
+ import { theme } from "../../modes/theme/theme";
+ import type { InteractiveModeContext } from "../../modes/types";
+diff --git a/packages/coding-agent/src/slash-commands/acp-builtins.ts b/packages/coding-agent/src/slash-commands/acp-builtins.ts
+index 15c7b335d..1a0e32a9e 100644
+--- a/packages/coding-agent/src/slash-commands/acp-builtins.ts
++++ b/packages/coding-agent/src/slash-commands/acp-builtins.ts
+@@ -39,7 +39,7 @@ export async function executeAcpBuiltinSlashCommand(
+ 	const parsed = parseSlashCommand(text);
+ 	if (!parsed) return false;
+ 	const command = lookupBuiltinSlashCommand(parsed.name);
+-	if (!command || !command.handle) return false;
++	if (!command?.handle) return false;
+ 	const result = await command.handle(parsed, runtime);
+ 	if (result === undefined) return { consumed: true };
+ 	return result;
+diff --git a/packages/coding-agent/src/slash-commands/builtin-registry.ts b/packages/coding-agent/src/slash-commands/builtin-registry.ts
+index 3ba387279..f0b62a713 100644
+--- a/packages/coding-agent/src/slash-commands/builtin-registry.ts
++++ b/packages/coding-agent/src/slash-commands/builtin-registry.ts
+@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+ import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
+-import { setProjectDir, Snowflake } from "@oh-my-pi/pi-utils";
++import { Snowflake, setProjectDir } from "@oh-my-pi/pi-utils";
+ import { $ } from "bun";
+ import type { SettingPath, SettingValue } from "../config/settings";
+ import { settings } from "../config/settings";
+@@ -23,13 +23,13 @@ import { resolveMemoryBackend } from "../memory-backend";
+ import type { InteractiveModeContext } from "../modes/types";
+ import { getChangelogPath, parseChangelog } from "../utils/changelog";
+ import { buildContextReportText } from "./helpers/context-report";
++import { formatDuration } from "./helpers/format";
+ import { createMarketplaceManager } from "./helpers/marketplace-manager";
+ import { handleMcpAcp } from "./helpers/mcp";
+ import { commandConsumed, errorMessage, parseSlashCommand, parseSubcommand, usage } from "./helpers/parse";
+ import { handleSshAcp } from "./helpers/ssh";
+ import { handleTodoAcp } from "./helpers/todo";
+ import { buildUsageReportText } from "./helpers/usage-report";
+-import { formatDuration } from "./helpers/format";
+ import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
+ import type {
+ 	BuiltinSlashCommand,
+diff --git a/packages/coding-agent/src/slash-commands/types.ts b/packages/coding-agent/src/slash-commands/types.ts
+index 4d4114cc4..c6cab108b 100644
+--- a/packages/coding-agent/src/slash-commands/types.ts
++++ b/packages/coding-agent/src/slash-commands/types.ts
+@@ -36,7 +36,7 @@ export interface ParsedSlashCommand {
+  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
+  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
+  */
+-export type SlashCommandResult = void | { consumed: true } | { prompt: string };
++export type SlashCommandResult = undefined | { consumed: true } | { prompt: string };
+ 
+ /**
+  * Runtime visible to slash-command handlers that run in text/ACP mode.

@@ -1,0 +1,3 @@
+ packages/coding-agent/CHANGELOG.md                 |  2 +-
+ .../coding-agent/src/session/streaming-output.ts   | 45 ++++++++++------------
+ 2 files changed, 21 insertions(+), 26 deletions(-)

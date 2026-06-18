@@ -1,0 +1,2 @@
+agent/renderers (77%, high confidence), agent (77%, high confidence), tui (23%, high confidence), tui/components (23%, moderate confidence)
+Prefer 2-segment scopes marked 'high confidence'

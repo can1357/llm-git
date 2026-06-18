@@ -1,0 +1,16 @@
+ bun.lock                              | 18 ++++++------------
+ packages/agent/CHANGELOG.md           |  2 ++
+ packages/agent/package.json           |  2 +-
+ packages/ai/CHANGELOG.md              |  2 ++
+ packages/ai/package.json              |  2 +-
+ packages/coding-agent/CHANGELOG.md    |  2 ++
+ packages/coding-agent/package.json    |  2 +-
+ packages/mom/CHANGELOG.md             |  2 ++
+ packages/mom/package.json             |  2 +-
+ packages/tui/CHANGELOG.md             |  2 ++
+ packages/tui/package.json             |  2 +-
+ packages/tui/src/components/editor.ts | 34 ++++++++++++++++------------------
+ packages/tui/test/editor.test.ts      | 21 ++++++++++++++-------
+ packages/web-ui/CHANGELOG.md          |  2 ++
+ packages/web-ui/package.json          |  2 +-
+ 15 files changed, 54 insertions(+), 43 deletions(-)

@@ -1,0 +1,90 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 971db49c0..497ad0b60 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## [Unreleased]
+ 
++### Fixed
++
++- Fixed OpenCode Zen `big-pickle` follow-up requests replaying assistant tool-call turns without DeepSeek-required `reasoning_content`, which caused HTTP 400 errors in thinking mode.
++
+ ## [15.4.1] - 2026-05-26
+ ### Added
+ 
+diff --git a/packages/ai/src/providers/openai-completions-compat.ts b/packages/ai/src/providers/openai-completions-compat.ts
+index 06bc17a07..98795ec24 100644
+--- a/packages/ai/src/providers/openai-completions-compat.ts
++++ b/packages/ai/src/providers/openai-completions-compat.ts
+@@ -74,11 +74,16 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
+ 	// applies when thinking mode is actually engaged.
+ 	const lowerId = model.id.toLowerCase();
+ 	const lowerName = (model.name ?? "").toLowerCase();
++	// OpenCode Zen's `big-pickle` is a DeepSeek reasoning alias; the upstream
++	// 400s come from DeepSeek and require exact reasoning_content replay.
++	const isOpenCodeDeepseekAlias =
++		provider === "opencode-zen" && (lowerId === "big-pickle" || lowerName === "big pickle");
+ 	const isDeepseekFamily =
+ 		provider === "deepseek" ||
+ 		baseUrl.includes("deepseek.com") ||
+ 		lowerId.includes("deepseek") ||
+-		lowerName.includes("deepseek");
++		lowerName.includes("deepseek") ||
++		isOpenCodeDeepseekAlias;
+ 	const isDirectDeepseekApi = provider === "deepseek" || baseUrl.includes("api.deepseek.com");
+ 	const isDirectDeepseekReasoning = isDirectDeepseekApi && isDeepseekFamily && Boolean(model.reasoning);
+ 	const isNonStandard =
+@@ -211,12 +216,14 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
+ 		reasoningContentField: "reasoning_content",
+ 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
+ 		//   - Kimi: documented invariant on its native API.
+-		//   - Any reasoning-capable model reached through OpenRouter: DeepSeek V4 Pro and similar enforce
+-		//     this server-side whenever the request is in thinking mode. We can't translate Anthropic's
+-		//     redacted/encrypted reasoning into DeepSeek's plaintext form, so cross-provider continuations
+-		//     rely on a placeholder — see `convertMessages` for the placeholder injection.
+-		//   - OpenCode-Go and OpenCode-Zen handle reasoning content internally and reject
+-		//     `reasoning_content` in client-sent messages — exclude them even for Kimi models.
++		//   - DeepSeek-family reasoning models, including aliased OpenCode Zen models
++		//     like `big-pickle`, validate exact thinking-mode replay.
++		//   - Any reasoning-capable model reached through OpenRouter can enforce this
++		//     server-side whenever the request is in thinking mode. We can't translate
++		//     Anthropic's redacted/encrypted reasoning into provider-native plaintext,
++		//     so cross-provider continuations rely on a placeholder.
++		// OpenCode Kimi aliases handle reasoning content internally and reject
++		// client-sent `reasoning_content`, so exclude only that Kimi-on-OpenCode path.
+ 		requiresReasoningContentForToolCalls:
+ 			(isKimiModel && !isOpenCodeProvider) ||
+ 			(isDeepseekFamily && Boolean(model.reasoning)) ||
+diff --git a/packages/ai/test/deepseek-reasoning-content.test.ts b/packages/ai/test/deepseek-reasoning-content.test.ts
+index 48b8407b5..d70d69c91 100644
+--- a/packages/ai/test/deepseek-reasoning-content.test.ts
++++ b/packages/ai/test/deepseek-reasoning-content.test.ts
+@@ -369,6 +369,27 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
+ 			expect(rc).toBe("");
+ 		});
+ 
++		it("sets reasoning_content to empty string for OpenCode Zen big-pickle tool-call turns", () => {
++			const model = getBundledModel("opencode-zen", "big-pickle") as Model<"openai-completions">;
++			const compat = detectCompat(model);
++			expect(compat.requiresReasoningContentForToolCalls).toBe(true);
++			expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
++
++			const msg = assistantToolCall(model, [
++				{
++					type: "toolCall",
++					id: "call_big_pickle",
++					name: "bash",
++					arguments: { command: "git status --short" },
++				} as ToolCall,
++			]);
++			const messages = convertMessages(model, { messages: [msg] }, compat);
++			const assistant = messages.find(m => m.role === "assistant");
++			expect(assistant).toBeDefined();
++			expect(Reflect.get(assistant as object, "reasoning_content")).toBe("");
++			expect((assistant as { content: unknown }).content).toBe("");
++		});
++
+ 		it("sets content to empty string (not null) when reasoning_content is present", () => {
+ 			const model = deepseekModel({
+ 				provider: "nvidia",

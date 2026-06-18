@@ -1,0 +1,15 @@
+ Cargo.lock                            |  2 +-
+ Cargo.toml                            |  2 +-
+ bun.lock                              | 16 ++++++++--------
+ packages/agent/package.json           |  2 +-
+ packages/ai/CHANGELOG.md              |  2 ++
+ packages/ai/package.json              |  2 +-
+ packages/coding-agent/CHANGELOG.md    |  2 ++
+ packages/coding-agent/package.json    |  2 +-
+ packages/natives/CHANGELOG.md         |  2 ++
+ packages/natives/package.json         |  2 +-
+ packages/stats/package.json           |  2 +-
+ packages/swarm-extension/package.json |  2 +-
+ packages/tui/package.json             |  2 +-
+ packages/utils/package.json           |  2 +-
+ 14 files changed, 24 insertions(+), 18 deletions(-)

@@ -1,0 +1,276 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 8daef5ebd..ade98768b 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -46,6 +46,7 @@
+ 
+ ### Fixed
+ 
++- Fixed isolated task merge-back to preserve task outputs on merge failure and stash dirty worktrees before cherry-pick.
+ - Fixed `read` output for file-backed internal URLs like `local://...` to include hashline prefixes in hashline edit mode, preserving usable line refs for follow-up edits
+ - Fixed the plan review selector to support the external editor shortcut for opening and updating the current plan from the approval screen
+ 
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index a1f94e549..b749b5e3f 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -978,82 +978,90 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
+ 			let changesApplied: boolean | null = null;
+ 			let mergedBranchesForNestedPatches: Set<string> | null = null;
+ 			if (isIsolated && repoRoot) {
+-				if (mergeMode === "branch") {
+-					// Branch mode: merge task branches sequentially
+-					const branchEntries = results
+-						.filter(r => r.branchName && r.exitCode === 0 && !r.aborted)
+-						.map(r => ({ branchName: r.branchName!, taskId: r.id, description: r.description }));
++				try {
++					if (mergeMode === "branch") {
++						// Branch mode: merge task branches sequentially
++						const branchEntries = results
++							.filter(r => r.branchName && r.exitCode === 0 && !r.aborted)
++							.map(r => ({ branchName: r.branchName!, taskId: r.id, description: r.description }));
+ 
+-					if (branchEntries.length === 0) {
+-						changesApplied = true;
+-					} else {
+-						const mergeResult = await mergeTaskBranches(repoRoot, branchEntries);
+-						mergedBranchesForNestedPatches = new Set(mergeResult.merged);
+-						changesApplied = mergeResult.failed.length === 0;
+-
+-						if (changesApplied) {
+-							mergeSummary = `\n\nMerged ${mergeResult.merged.length} branch${mergeResult.merged.length === 1 ? "" : "es"}: ${mergeResult.merged.join(", ")}`;
+-						} else {
+-							const mergedPart =
+-								mergeResult.merged.length > 0 ? `Merged: ${mergeResult.merged.join(", ")}.\n` : "";
+-							const failedPart = `Failed: ${mergeResult.failed.join(", ")}.`;
+-							const conflictPart = mergeResult.conflict ? `\nConflict: ${mergeResult.conflict}` : "";
+-							mergeSummary = `\n\n<system-notification>Branch merge failed. ${mergedPart}${failedPart}${conflictPart}\nUnmerged branches remain for manual resolution.</system-notification>`;
+-						}
+-					}
+-
+-					// Clean up merged branches (keep failed ones for manual resolution)
+-					const allBranches = branchEntries.map(b => b.branchName);
+-					if (changesApplied) {
+-						await cleanupTaskBranches(repoRoot, allBranches);
+-					}
+-				} else {
+-					// Patch mode: combine and apply patches
+-					const patchesInOrder = results.map(result => result.patchPath).filter(Boolean) as string[];
+-					const missingPatch = results.some(result => !result.patchPath);
+-					if (missingPatch) {
+-						changesApplied = false;
+-					} else {
+-						const patchStats = await Promise.all(
+-							patchesInOrder.map(async patchPath => ({
+-								patchPath,
+-								size: (await fs.stat(patchPath)).size,
+-							})),
+-						);
+-						const nonEmptyPatches = patchStats.filter(patch => patch.size > 0).map(patch => patch.patchPath);
+-						if (nonEmptyPatches.length === 0) {
++						if (branchEntries.length === 0) {
+ 							changesApplied = true;
+ 						} else {
+-							const patchTexts = await Promise.all(
+-								nonEmptyPatches.map(async patchPath => Bun.file(patchPath).text()),
++							const mergeResult = await mergeTaskBranches(repoRoot, branchEntries);
++							mergedBranchesForNestedPatches = new Set(mergeResult.merged);
++							changesApplied = mergeResult.failed.length === 0;
++
++							if (changesApplied) {
++								mergeSummary = `\n\nMerged ${mergeResult.merged.length} branch${mergeResult.merged.length === 1 ? "" : "es"}: ${mergeResult.merged.join(", ")}`;
++							} else {
++								const mergedPart =
++									mergeResult.merged.length > 0 ? `Merged: ${mergeResult.merged.join(", ")}.\n` : "";
++								const failedPart = `Failed: ${mergeResult.failed.join(", ")}.`;
++								const conflictPart = mergeResult.conflict ? `\nConflict: ${mergeResult.conflict}` : "";
++								mergeSummary = `\n\n<system-notification>Branch merge failed. ${mergedPart}${failedPart}${conflictPart}\nUnmerged branches remain for manual resolution.</system-notification>`;
++							}
++						}
++
++						// Clean up merged branches (keep failed ones for manual resolution)
++						const allBranches = branchEntries.map(b => b.branchName);
++						if (changesApplied) {
++							await cleanupTaskBranches(repoRoot, allBranches);
++						}
++					} else {
++						// Patch mode: combine and apply patches
++						const patchesInOrder = results.map(result => result.patchPath).filter(Boolean) as string[];
++						const missingPatch = results.some(result => !result.patchPath);
++						if (missingPatch) {
++							changesApplied = false;
++						} else {
++							const patchStats = await Promise.all(
++								patchesInOrder.map(async patchPath => ({
++									patchPath,
++									size: (await fs.stat(patchPath)).size,
++								})),
+ 							);
+-							const combinedPatch = patchTexts.map(text => (text.endsWith("\n") ? text : `${text}\n`)).join("");
+-							if (!combinedPatch.trim()) {
++							const nonEmptyPatches = patchStats.filter(patch => patch.size > 0).map(patch => patch.patchPath);
++							if (nonEmptyPatches.length === 0) {
+ 								changesApplied = true;
+ 							} else {
+-								changesApplied = await git.patch.canApplyText(repoRoot, combinedPatch);
+-								if (changesApplied) {
+-									try {
+-										await git.patch.applyText(repoRoot, combinedPatch);
+-									} catch {
+-										changesApplied = false;
++								const patchTexts = await Promise.all(
++									nonEmptyPatches.map(async patchPath => Bun.file(patchPath).text()),
++								);
++								const combinedPatch = patchTexts
++									.map(text => (text.endsWith("\n") ? text : `${text}\n`))
++									.join("");
++								if (!combinedPatch.trim()) {
++									changesApplied = true;
++								} else {
++									changesApplied = await git.patch.canApplyText(repoRoot, combinedPatch);
++									if (changesApplied) {
++										try {
++											await git.patch.applyText(repoRoot, combinedPatch);
++										} catch {
++											changesApplied = false;
++										}
+ 									}
+ 								}
+ 							}
+ 						}
+-					}
+ 
+-					if (changesApplied) {
+-						mergeSummary = "\n\nApplied patches: yes";
+-					} else {
+-						const notification =
+-							"<system-notification>Patches were not applied and must be handled manually.</system-notification>";
+-						const patchList =
+-							patchPaths.length > 0
+-								? `\n\nPatch artifacts:\n${patchPaths.map(patch => `- ${patch}`).join("\n")}`
+-								: "";
+-						mergeSummary = `\n\n${notification}${patchList}`;
++						if (changesApplied) {
++							mergeSummary = "\n\nApplied patches: yes";
++						} else {
++							const notification =
++								"<system-notification>Patches were not applied and must be handled manually.</system-notification>";
++							const patchList =
++								patchPaths.length > 0
++									? `\n\nPatch artifacts:\n${patchPaths.map(patch => `- ${patch}`).join("\n")}`
++									: "";
++							mergeSummary = `\n\n${notification}${patchList}`;
++						}
+ 					}
++				} catch (mergeErr) {
++					const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
++					changesApplied = false;
++					mergeSummary = `\n\n<system-notification>Merge phase failed: ${msg}\nTask outputs are preserved but changes were not applied.</system-notification>`;
+ 				}
+ 			}
+ 
+diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
+index 77e9eafd9..92f7087c1 100644
+--- a/packages/coding-agent/src/task/worktree.ts
++++ b/packages/coding-agent/src/task/worktree.ts
+@@ -515,29 +515,49 @@ export async function mergeTaskBranches(
+ 	const merged: string[] = [];
+ 	const failed: string[] = [];
+ 
+-	for (const { branchName } of branches) {
+-		try {
+-			await git.cherryPick(repoRoot, branchName);
+-		} catch (err) {
+-			await git.cherryPick.abort(repoRoot);
+-			const stderr =
+-				err instanceof git.GitCommandError
+-					? err.result.stderr.trim()
+-					: err instanceof Error
+-						? err.message
+-						: String(err);
+-			failed.push(branchName);
+-			return {
+-				merged,
+-				failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
+-				conflict: `${branchName}: ${stderr}`,
+-			};
++	// Stash dirty working tree so cherry-pick can operate on a clean HEAD.
++	// Without this, cherry-pick refuses to run when uncommitted changes exist.
++	const didStash = await git.stash.push(repoRoot, "omp-task-merge");
++
++	try {
++		for (const { branchName } of branches) {
++			try {
++				await git.cherryPick(repoRoot, branchName);
++			} catch (err) {
++				try {
++					await git.cherryPick.abort(repoRoot);
++				} catch {
++					/* no state to abort */
++				}
++				const stderr =
++					err instanceof git.GitCommandError
++						? err.result.stderr.trim()
++						: err instanceof Error
++							? err.message
++							: String(err);
++				failed.push(branchName);
++				return {
++					merged,
++					failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
++					conflict: `${branchName}: ${stderr}`,
++				};
++			}
++
++			merged.push(branchName);
+ 		}
+ 
+-		merged.push(branchName);
++		return { merged, failed };
++	} finally {
++		if (didStash) {
++			try {
++				await git.stash.pop(repoRoot);
++			} catch {
++				// Pop can fail if cherry-picked changes conflict with stashed changes.
++				// The stash entry is preserved — the user can resolve manually.
++				logger.warn("Failed to restore stashed changes after task merge; stash entry preserved");
++			}
++		}
+ 	}
+-
+-	return { merged, failed };
+ }
+ 
+ /** Clean up temporary task branches. */
+diff --git a/packages/coding-agent/src/utils/git.ts b/packages/coding-agent/src/utils/git.ts
+index 703c0dbd7..0f7521421 100644
+--- a/packages/coding-agent/src/utils/git.ts
++++ b/packages/coding-agent/src/utils/git.ts
+@@ -1110,6 +1110,26 @@ export const cherryPick = Object.assign(
+ 	},
+ );
+ 
++// ════════════════════════════════════════════════════════════════════════════
++// API: stash
++// ════════════════════════════════════════════════════════════════════════════
++
++export const stash = {
++	/** Stash working tree + index changes. Returns true if something was stashed. */
++	async push(cwd: string, message?: string): Promise<boolean> {
++		ensureAvailable();
++		const args = ["stash", "push", "--include-untracked"];
++		if (message) args.push("-m", message);
++		const result = await runCommand(cwd, args);
++		// git stash push exits 0 whether or not it stashed; check output
++		return result.exitCode === 0 && !result.stdout.includes("No local changes to save");
++	},
++	/** Pop the most recent stash entry. */
++	async pop(cwd: string): Promise<void> {
++		await runEffect(cwd, ["stash", "pop"]);
++	},
++};
++
+ // ════════════════════════════════════════════════════════════════════════════
+ // API: clone, restore, clean
+ // ════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,5 @@
+ packages/tui/test/deccara-grid-parity.test.ts      | 470 ---------------------
+ packages/tui/test/image-budget.test.ts             |   6 +-
+ packages/tui/test/overlay-scroll.test.ts           |   2 +-
+ .../tui/test/streaming-scrollback-defer.test.ts    |   5 +-
+ 4 files changed, 9 insertions(+), 474 deletions(-)

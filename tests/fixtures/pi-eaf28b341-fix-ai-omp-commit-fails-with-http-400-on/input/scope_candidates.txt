@@ -1,0 +1,2 @@
+ai (99%, high confidence), ai/providers (45%, moderate confidence)
+Prefer 2-segment scopes marked 'high confidence'

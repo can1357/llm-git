@@ -1,0 +1,3 @@
+ packages/coding-agent/CHANGELOG.md               |  5 ++
+ packages/coding-agent/src/core/python-prelude.py | 71 +++++++++++++++++-------
+ 2 files changed, 57 insertions(+), 19 deletions(-)

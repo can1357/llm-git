@@ -1,0 +1,47 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 6ff6ebbec..212d08c01 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2499,6 +2499,7 @@ dependencies = [
+  "regex",
+  "serde",
+  "serde_json",
++ "smallvec",
+  "tokio",
+  "tokio-util",
+  "toml",
+diff --git a/crates/pi-shell/Cargo.toml b/crates/pi-shell/Cargo.toml
+index 053033f17..6b21be3db 100644
+--- a/crates/pi-shell/Cargo.toml
++++ b/crates/pi-shell/Cargo.toml
+@@ -29,6 +29,7 @@ libc = "0.2"
+ 
+ [target.'cfg(windows)'.dependencies]
+ winreg = "0.56"
++smallvec = "1.15"
+ windows-sys = { version = "0.61", features = [
+ 	"Win32_Foundation",
+ 	"Win32_Storage_ProjectedFileSystem",
+diff --git a/crates/pi-shell/src/windows.rs b/crates/pi-shell/src/windows.rs
+index 2d22750c8..4863d5a52 100644
+--- a/crates/pi-shell/src/windows.rs
++++ b/crates/pi-shell/src/windows.rs
+@@ -5,8 +5,8 @@ use std::{
+ 	process::Command,
+ };
+ 
++use anyhow::{Error, Result};
+ use brush_core::{Shell as BrushShell, ShellValue, ShellVariable};
+-use napi::{Error, Result};
+ use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
+ 
+ pub fn configure_windows_path(shell: &mut BrushShell) -> Result<()> {
+@@ -68,7 +68,7 @@ pub fn configure_windows_path(shell: &mut BrushShell) -> Result<()> {
+ 	shell
+ 		.env_mut()
+ 		.set_global("PATH", var)
+-		.map_err(|err| Error::from_reason(format!("Failed to set PATH: {err}")))?;
++		.map_err(|err| Error::msg(format!("Failed to set PATH: {err}")))?;
+ 
+ 	Ok(())
+ }

@@ -1,0 +1,4 @@
+ crates/pi-shell/src/minimizer/filters/gh.rs   | 65 ++++++--------------------
+ crates/pi-shell/src/minimizer/filters/glab.rs | 67 +++++++--------------------
+ crates/pi-shell/src/minimizer/primitives.rs   | 37 +++++++++++++++
+ 3 files changed, 68 insertions(+), 101 deletions(-)

@@ -1,0 +1,83 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 907c306f2..b9e9b63ab 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -21,7 +21,7 @@
+ 
+ ### Fixed
+ 
+-- Fixed hashline pure inserts to drop a single echoed anchor line by default when `+ ANCHOR` payloads start with the anchor line or `< ANCHOR` payloads end with it, preventing duplicate context lines in hashline edit output. ([#1090](https://github.com/can1357/oh-my-pi/issues/1090))
++- Fixed hashline pure inserts to drop a single echoed anchor line when `edit.hashlineAutoDropPureInsertDuplicates` is enabled and `+ ANCHOR` payloads start with the anchor line or `< ANCHOR` payloads end with it, while preserving intentional single-line duplicates by default. ([#1090](https://github.com/can1357/oh-my-pi/issues/1090))
+ - Fixed bash command fixups to remove a redundant standalone trailing `2>&1` redirect when no other pipe or redirection remains
+ - Fixed command-fixup notices to list all stripped segments instead of reporting only one
+ - Fixed summarized `read` output stalling agents on elided regions by appending an explicit footer like `[NN lines across MM elided regions; read <path>:raw or a line range like <path>:1-9999 for verbatim content]`. The footer fires whenever the structural summarizer elided at least one span, so the model gets a concrete recovery selector instead of having to guess from a bare `...` / `{ .. }` marker. Surfaces `elidedLines` on `ReadToolDetails.summary` alongside the existing `elidedSpans`. ([#1046](https://github.com/can1357/oh-my-pi/issues/1046))
+diff --git a/packages/coding-agent/src/hashline/apply.ts b/packages/coding-agent/src/hashline/apply.ts
+index b4f19b4e4..ea32131c3 100644
+--- a/packages/coding-agent/src/hashline/apply.ts
++++ b/packages/coding-agent/src/hashline/apply.ts
+@@ -382,10 +382,9 @@ interface PureInsertAbsorbResult {
+  * Mirror of replacement-absorb's prefix/suffix block check, but for pure
+  * inserts: drop payload lines that exactly duplicate the file lines
+  * immediately above (leading) or immediately below (trailing) the insertion
+- * point. Generic context echo absorption requires a minimum run of 2, but the
+- * anchor line itself is also absorbed when a `+ ANCHOR` payload starts with it
+- * or a `< ANCHOR` payload ends with it. A single structural closing delimiter
+- * still uses the balance-validated structural rule below.
++ * point. Generic context echo absorption requires the caller's opt-in setting;
++ * without it, only single structural closing delimiters use the
++ * balance-validated structural rule below.
+  */
+ function tryAbsorbPureInsertGroup(
+ 	group: HashlinePureInsertGroup,
+@@ -417,6 +416,7 @@ function tryAbsorbPureInsertGroup(
+ 	}
+ 	if (
+ 		absorbedLeading === 0 &&
++		allowGenericBoundaryAbsorb &&
+ 		group.cursor.kind === "after_anchor" &&
+ 		group.payload.length > 0 &&
+ 		aboveEndIdx >= 0 &&
+@@ -460,6 +460,7 @@ function tryAbsorbPureInsertGroup(
+ 	if (
+ 		absorbedTrailing === 0 &&
+ 		group.cursor.kind === "before_anchor" &&
++		allowGenericBoundaryAbsorb &&
+ 		remaining > 0 &&
+ 		belowStartIdx < fileLines.length &&
+ 		!isStructuralClosingBoundaryLine(remainingPayload[remainingPayload.length - 1]) &&
+diff --git a/packages/coding-agent/test/core/hashline.test.ts b/packages/coding-agent/test/core/hashline.test.ts
+index 994f41a39..d9f5033bf 100644
+--- a/packages/coding-agent/test/core/hashline.test.ts
++++ b/packages/coding-agent/test/core/hashline.test.ts
+@@ -237,18 +237,18 @@ describe("hashline parser — block op syntax", () => {
+ 		expect(applyDiff(source, diff)).toBe(["   });", "added();", "next();"].join("\n"));
+ 	});
+ 
+-	it("auto-drops a non-structural anchor echo for `+ ANCHOR` by default", () => {
++	it("preserves an intentional non-structural anchor duplicate for `+ ANCHOR` by default", () => {
+ 		const source = ["aaa", "bbb", "ccc"].join("\n");
+ 		const diff = [`+ ${tag(2, "bbb")}`, pl("bbb"), pl("NEW")].join("\n");
+ 
+-		expect(applyDiff(source, diff)).toBe("aaa\nbbb\nNEW\nccc");
++		expect(applyDiff(source, diff)).toBe("aaa\nbbb\nbbb\nNEW\nccc");
+ 	});
+ 
+-	it("auto-drops a non-structural anchor echo for `< ANCHOR` by default", () => {
++	it("preserves an intentional non-structural anchor duplicate for `< ANCHOR` by default", () => {
+ 		const source = ["aaa", "bbb", "ccc"].join("\n");
+ 		const diff = [`< ${tag(2, "bbb")}`, pl("NEW"), pl("bbb")].join("\n");
+ 
+-		expect(applyDiff(source, diff)).toBe("aaa\nNEW\nbbb\nccc");
++		expect(applyDiff(source, diff)).toBe("aaa\nNEW\nbbb\nbbb\nccc");
+ 	});
+ 
+ 	it("does not drop a single structural pure-insert suffix when it preserves balance", () => {
+@@ -297,7 +297,7 @@ describe("hashline parser — block op syntax", () => {
+ 		expect(applyDiffWithPureInsertAutoDrop(source, diff)).toBe("NEW\naaa\nbbb\nccc");
+ 	});
+ 
+-	it("auto-drops a single duplicated anchor line in a pure insert", () => {
++	it("auto-drops a single duplicated anchor line in a pure insert when generic duplicate absorption is enabled", () => {
+ 		const source = ["aaa", "bbb", "ccc"].join("\n");
+ 		const diff = [`+ ${tag(2, "bbb")}`, pl("bbb"), pl("NEW")].join("\n");
+ 

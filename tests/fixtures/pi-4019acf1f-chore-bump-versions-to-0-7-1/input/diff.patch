@@ -1,0 +1,191 @@
+diff --git a/package-lock.json b/package-lock.json
+index 4ebe7db11..4439a24c7 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -3193,7 +3193,7 @@
+ 		},
+ 		"packages/agent": {
+ 			"name": "@mariozechner/pi-agent",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-ai": "^0.7.0",
+@@ -3223,7 +3223,7 @@
+ 		},
+ 		"packages/ai": {
+ 			"name": "@mariozechner/pi-ai",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@anthropic-ai/sdk": "^0.61.0",
+@@ -3270,7 +3270,7 @@
+ 		},
+ 		"packages/coding-agent": {
+ 			"name": "@mariozechner/pi-coding-agent",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-agent": "^0.7.0",
+@@ -3317,7 +3317,7 @@
+ 		},
+ 		"packages/pods": {
+ 			"name": "@mariozechner/pi",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-agent": "^0.7.0",
+@@ -3343,7 +3343,7 @@
+ 		},
+ 		"packages/proxy": {
+ 			"name": "@mariozechner/pi-proxy",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"dependencies": {
+ 				"@hono/node-server": "^1.14.0",
+ 				"hono": "^4.6.16"
+@@ -3359,7 +3359,7 @@
+ 		},
+ 		"packages/tui": {
+ 			"name": "@mariozechner/pi-tui",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@types/mime-types": "^2.1.4",
+@@ -3398,7 +3398,7 @@
+ 		},
+ 		"packages/web-ui": {
+ 			"name": "@mariozechner/pi-web-ui",
+-			"version": "0.7.0",
++			"version": "0.7.1",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@lmstudio/sdk": "^1.5.0",
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index c2123633f..2eba5b520 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-agent",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+@@ -18,8 +18,8 @@
+ 		"prepublishOnly": "npm run clean && npm run build"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-ai": "^0.7.0",
+-		"@mariozechner/pi-tui": "^0.7.0"
++		"@mariozechner/pi-ai": "^0.7.1",
++		"@mariozechner/pi-tui": "^0.7.1"
+ 	},
+ 	"keywords": [
+ 		"ai",
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index 7b980bccc..d4b86320d 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-ai",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index e5d2c7086..6db6c7585 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-coding-agent",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"type": "module",
+ 	"bin": {
+@@ -20,8 +20,8 @@
+ 		"prepublishOnly": "npm run clean && npm run build"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent": "^0.7.0",
+-		"@mariozechner/pi-ai": "^0.7.0",
++		"@mariozechner/pi-agent": "^0.7.1",
++		"@mariozechner/pi-ai": "^0.7.1",
+ 		"chalk": "^5.5.0",
+ 		"diff": "^8.0.2",
+ 		"glob": "^11.0.3"
+diff --git a/packages/pods/package.json b/packages/pods/package.json
+index d62e34eac..637648eb4 100644
+--- a/packages/pods/package.json
++++ b/packages/pods/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"description": "CLI tool for managing vLLM deployments on GPU pods",
+ 	"type": "module",
+ 	"bin": {
+@@ -34,7 +34,7 @@
+ 		"node": ">=20.0.0"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent": "^0.7.0",
++		"@mariozechner/pi-agent": "^0.7.1",
+ 		"chalk": "^5.5.0"
+ 	},
+ 	"devDependencies": {}
+diff --git a/packages/proxy/package.json b/packages/proxy/package.json
+index 4eb4dda60..e8ce06ac8 100644
+--- a/packages/proxy/package.json
++++ b/packages/proxy/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-proxy",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"type": "module",
+ 	"description": "CORS and authentication proxy for pi-ai",
+ 	"main": "dist/index.js",
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 904753255..059bcadff 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-tui",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+diff --git a/packages/web-ui/package.json b/packages/web-ui/package.json
+index 852663143..3b90ee4d1 100644
+--- a/packages/web-ui/package.json
++++ b/packages/web-ui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-web-ui",
+-	"version": "0.7.0",
++	"version": "0.7.1",
+ 	"description": "Reusable web UI components for AI chat interfaces powered by @mariozechner/pi-ai",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+@@ -19,7 +19,7 @@
+ 	"dependencies": {
+ 		"@lmstudio/sdk": "^1.5.0",
+ 		"@mariozechner/pi-ai": "^0.6.0",
+-		"@mariozechner/pi-tui": "^0.7.0",
++		"@mariozechner/pi-tui": "^0.7.1",
+ 		"docx-preview": "^0.3.7",
+ 		"jszip": "^3.10.1",
+ 		"lucide": "^0.544.0",

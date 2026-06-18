@@ -1,0 +1,14 @@
+ package-lock.json                    | 38 ++++++++++++++++++------------------
+ packages/agent-old/package-lock.json |  4 ++--
+ packages/agent-old/package.json      |  2 +-
+ packages/agent/package.json          |  4 ++--
+ packages/ai/package.json             |  2 +-
+ packages/ai/src/models.generated.ts  | 38 ++++++++++++++++++------------------
+ packages/coding-agent/package.json   |  2 +-
+ packages/pods/package-lock.json      |  4 ++--
+ packages/pods/package.json           |  4 ++--
+ packages/proxy/package.json          |  2 +-
+ packages/tui/package-lock.json       |  4 ++--
+ packages/tui/package.json            |  2 +-
+ packages/web-ui/package.json         |  4 ++--
+ 13 files changed, 55 insertions(+), 55 deletions(-)

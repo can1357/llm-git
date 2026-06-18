@@ -1,0 +1,40 @@
+diff --git a/packages/coding-agent/src/eval/js/shared/runtime.ts b/packages/coding-agent/src/eval/js/shared/runtime.ts
+index 8f3a25d75..a2ce2c702 100644
+--- a/packages/coding-agent/src/eval/js/shared/runtime.ts
++++ b/packages/coding-agent/src/eval/js/shared/runtime.ts
+@@ -86,7 +86,7 @@ export class JsRuntime {
+ 		const wrapped = wrapCode(code);
+ 		const value = indirectEval(wrapped.source, filename);
+ 		const awaited = await awaitMaybePromise(value);
+-		if (Reflect.has(globalThis, "__omp_final_expr__")) {
++		if (Object.hasOwn(globalThis, "__omp_final_expr__")) {
+ 			const finalValue = (globalThis as { __omp_final_expr__?: unknown }).__omp_final_expr__;
+ 			Reflect.deleteProperty(globalThis, "__omp_final_expr__");
+ 			return await awaitMaybePromise(finalValue);
+diff --git a/packages/coding-agent/test/core/js-executor.test.ts b/packages/coding-agent/test/core/js-executor.test.ts
+index 8333f432d..2018ebff6 100644
+--- a/packages/coding-agent/test/core/js-executor.test.ts
++++ b/packages/coding-agent/test/core/js-executor.test.ts
+@@ -94,6 +94,22 @@ describe("executeJs", () => {
+ 		expect(persisted.output.trim()).toBe("41");
+ 	});
+ 
++	it("ignores inherited final expression markers", async () => {
++		try {
++			await executeJs("Object.prototype.__omp_final_expr__ = 'poisoned';", { sessionId, session, sessionFile });
++
++			const result = await executeJs("const localOnly = 7;", { sessionId, session, sessionFile });
++			expect(result.exitCode).toBe(0);
++			expect(result.output.trim()).toBe("");
++
++			const persisted = await executeJs("return localOnly;", { sessionId, session, sessionFile });
++			expect(persisted.exitCode).toBe(0);
++			expect(persisted.output.trim()).toBe("7");
++		} finally {
++			await executeJs("delete Object.prototype.__omp_final_expr__;", { sessionId, session, sessionFile });
++		}
++	});
++
+ 	it("exposes the worker's real process object", async () => {
+ 		const result = await executeJs(
+ 			[

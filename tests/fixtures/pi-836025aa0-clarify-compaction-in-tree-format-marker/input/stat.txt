@@ -1,0 +1,2 @@
+ packages/coding-agent/docs/session-tree.md | 34 ++++++++++++++++++------------
+ 1 file changed, 20 insertions(+), 14 deletions(-)

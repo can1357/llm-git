@@ -1,0 +1,297 @@
+diff --git a/.gitignore b/.gitignore
+index b1193c8af..a4cb0245a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -25,6 +25,7 @@ target/
+ *~
+ 
+ # OS
++*.tmp
+ .DS_Store
+ 
+ # Logs & profiling
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index ddbd867c6..74d34e49e 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## [Unreleased]
+ 
++### Fixed
++- Fixed `omp commit` failing with HTTP 400 errors when using reasoning-enabled models on OpenAI-compatible endpoints that don't support the `developer` role (e.g., GitHub Copilot, custom proxies). Now falls back to `system` role when `developer` is unsupported.
+ ## [13.17.0] - 2026-03-30
+ 
+ ### Changed
+diff --git a/packages/ai/src/providers/azure-openai-responses.ts b/packages/ai/src/providers/azure-openai-responses.ts
+index 0459cbcfc..f2a11f880 100644
+--- a/packages/ai/src/providers/azure-openai-responses.ts
++++ b/packages/ai/src/providers/azure-openai-responses.ts
+@@ -22,6 +22,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
+ import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+ import { getOpenAIStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+ import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
++import { supportsDeveloperRole } from "./openai-responses";
+ import {
+ 	appendResponsesToolResultMessages,
+ 	convertResponsesAssistantMessage,
+@@ -113,7 +114,8 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
+ 			// Create Azure OpenAI client
+ 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+ 			const client = createClient(model, apiKey, options);
+-			const params = buildParams(model, context, options, deploymentName);
++			const { baseUrl } = resolveAzureConfig(model, options);
++			const params = buildParams(model, context, options, deploymentName, baseUrl);
+ 			const requestAbortController = new AbortController();
+ 			const requestSignal = options?.signal
+ 				? AbortSignal.any([options.signal, requestAbortController.signal])
+@@ -124,7 +126,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
+ 				api: output.api,
+ 				model: model.id,
+ 				method: "POST",
+-				url: `${resolveAzureConfig(model, options).baseUrl}/responses`,
++				url: `${baseUrl}/responses`,
+ 				body: params,
+ 			};
+ 			const openaiStream = await client.responses.create(params, { signal: requestSignal });
+@@ -245,8 +247,9 @@ function buildParams(
+ 	context: Context,
+ 	options: AzureOpenAIResponsesOptions | undefined,
+ 	deploymentName: string,
++	resolvedBaseUrl?: string,
+ ) {
+-	const messages = convertMessages(model, context, true);
++	const messages = convertMessages(model, context, true, resolvedBaseUrl);
+ 
+ 	const params: AzureOpenAIResponsesSamplingParams = {
+ 		model: deploymentName,
+@@ -323,13 +326,14 @@ function convertMessages(
+ 	model: Model<"azure-openai-responses">,
+ 	context: Context,
+ 	strictResponsesPairing: boolean,
++	resolvedBaseUrl?: string,
+ ): ResponseInput {
+ 	const messages: ResponseInput = [];
+ 	const transformedMessages = transformMessages(context.messages, model, normalizeResponsesToolCallIdForTransform);
+ 	const knownCallIds = new Set<string>();
+ 
+ 	if (context.systemPrompt) {
+-		const role = model.reasoning ? "developer" : "system";
++		const role = model.reasoning && supportsDeveloperRole(resolvedBaseUrl ?? model) ? "developer" : "system";
+ 		messages.push({
+ 			role,
+ 			content: context.systemPrompt.toWellFormed(),
+diff --git a/packages/ai/src/providers/openai-completions-compat.ts b/packages/ai/src/providers/openai-completions-compat.ts
+index d6ff51bcb..f18adc84a 100644
+--- a/packages/ai/src/providers/openai-completions-compat.ts
++++ b/packages/ai/src/providers/openai-completions-compat.ts
+@@ -36,10 +36,14 @@ function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
+ /**
+  * Detect compatibility settings from provider and baseUrl for known providers.
+  * Provider takes precedence over URL-based detection since it's explicitly configured.
++ * @param model - The model configuration
++ * @param resolvedBaseUrl - Optional resolved base URL (e.g., after GitHub Copilot proxy-ep resolution).
++ *                           If provided, this takes precedence over model.baseUrl for URL-based checks.
+  */
+-export function detectOpenAICompat(model: Model<"openai-completions">): ResolvedOpenAICompat {
++export function detectOpenAICompat(model: Model<"openai-completions">, resolvedBaseUrl?: string): ResolvedOpenAICompat {
+ 	const provider = model.provider;
+-	const baseUrl = model.baseUrl;
++	// Use resolvedBaseUrl if provided (e.g., after GitHub Copilot proxy-ep resolution)
++	const baseUrl = resolvedBaseUrl ?? model.baseUrl;
+ 
+ 	const isCerebras = provider === "cerebras" || baseUrl.includes("cerebras.ai");
+ 	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
+@@ -109,9 +113,15 @@ export function detectOpenAICompat(model: Model<"openai-completions">): Resolved
+ /**
+  * Resolve compatibility settings by layering explicit model.compat overrides onto
+  * the detected defaults. This is the canonical compat view for both metadata and transport.
++ * @param model - The model configuration
++ * @param resolvedBaseUrl - Optional resolved base URL (e.g., after GitHub Copilot proxy-ep resolution).
++ *                           If provided, this takes precedence over model.baseUrl for URL-based checks.
+  */
+-export function resolveOpenAICompat(model: Model<"openai-completions">): ResolvedOpenAICompat {
+-	const detected = detectOpenAICompat(model);
++export function resolveOpenAICompat(
++	model: Model<"openai-completions">,
++	resolvedBaseUrl?: string,
++): ResolvedOpenAICompat {
++	const detected = detectOpenAICompat(model, resolvedBaseUrl);
+ 	if (!model.compat) {
+ 		return detected;
+ 	}
+diff --git a/packages/ai/src/providers/openai-completions.ts b/packages/ai/src/providers/openai-completions.ts
+index f26545224..ab28559d0 100644
+--- a/packages/ai/src/providers/openai-completions.ts
++++ b/packages/ai/src/providers/openai-completions.ts
+@@ -199,7 +199,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
+ 				options?.headers,
+ 				options?.initiatorOverride,
+ 			);
+-			const params = buildParams(model, context, options);
++			const params = buildParams(model, context, options, baseUrl);
+ 			options?.onPayload?.(params);
+ 			rawRequestDump = {
+ 				provider: model.provider,
+@@ -554,8 +554,13 @@ async function createClient(
+ 	};
+ }
+ 
+-function buildParams(model: Model<"openai-completions">, context: Context, options?: OpenAICompletionsOptions) {
+-	const compat = getCompat(model);
++function buildParams(
++	model: Model<"openai-completions">,
++	context: Context,
++	options: OpenAICompletionsOptions | undefined,
++	resolvedBaseUrl?: string,
++) {
++	const compat = getCompat(model, resolvedBaseUrl);
+ 	const messages = convertMessages(model, context, compat);
+ 	maybeAddOpenRouterAnthropicCacheControl(model, messages);
+ 
+@@ -1118,7 +1123,9 @@ export function detectCompat(model: Model<"openai-completions">): ResolvedOpenAI
+ /**
+  * Get resolved compatibility settings for a model.
+  * Uses explicit model.compat if provided, otherwise auto-detects from provider/URL.
++ * @param model - The model configuration
++ * @param resolvedBaseUrl - Optional resolved base URL (e.g., after GitHub Copilot proxy-ep resolution).
+  */
+-function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompat {
+-	return resolveOpenAICompat(model);
++function getCompat(model: Model<"openai-completions">, resolvedBaseUrl?: string): ResolvedOpenAICompat {
++	return resolveOpenAICompat(model, resolvedBaseUrl);
+ }
+diff --git a/packages/ai/src/providers/openai-responses.ts b/packages/ai/src/providers/openai-responses.ts
+index 1fd19a59e..2c76cc094 100644
+--- a/packages/ai/src/providers/openai-responses.ts
++++ b/packages/ai/src/providers/openai-responses.ts
+@@ -167,7 +167,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
+ 				options?.initiatorOverride,
+ 			);
+ 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
+-			const { params } = buildParams(model, context, options, providerSessionState);
++			const { params } = buildParams(model, context, options, providerSessionState, baseUrl);
+ 			const requestAbortController = new AbortController();
+ 			const requestSignal = options?.signal
+ 				? AbortSignal.any([options.signal, requestAbortController.signal])
+@@ -290,6 +290,7 @@ function buildParams(
+ 	context: Context,
+ 	options: OpenAIResponsesOptions | undefined,
+ 	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
++	resolvedBaseUrl?: string,
+ ): { conversationMessages: ResponseInput; params: OpenAIResponsesSamplingParams } {
+ 	const strictResponsesPairing =
+ 		options?.strictResponsesPairing ??
+@@ -303,7 +304,7 @@ function buildParams(
+ 	const messages: ResponseInput = [...conversationMessages];
+ 
+ 	if (context.systemPrompt) {
+-		const role = model.reasoning ? "developer" : "system";
++		const role = model.reasoning && supportsDeveloperRole(resolvedBaseUrl ?? model) ? "developer" : "system";
+ 		messages.unshift({
+ 			role,
+ 			content: context.systemPrompt.toWellFormed(),
+@@ -398,6 +399,19 @@ function supportsStrictMode(model: Model<"openai-responses">): boolean {
+ 	);
+ }
+ 
++export function supportsDeveloperRole(modelOrBaseUrl: Pick<Model, "provider" | "baseUrl"> | string): boolean {
++	const baseUrl =
++		typeof modelOrBaseUrl === "string" ? modelOrBaseUrl.toLowerCase() : (modelOrBaseUrl.baseUrl ?? "").toLowerCase();
++	return (
++		baseUrl.includes("api.openai.com") ||
++		baseUrl.includes(".openai.azure.com") ||
++		baseUrl.includes("azure.com/openai") ||
++		baseUrl.includes("models.inference.ai.azure.com") ||
++		baseUrl.includes("githubcopilot.com") ||
++		baseUrl.includes("copilot-api.")
++	);
++}
++
+ function convertConversationMessages(
+ 	model: Model<"openai-responses">,
+ 	context: Context,
+diff --git a/packages/ai/test/openai-responses-developer-role.test.ts b/packages/ai/test/openai-responses-developer-role.test.ts
+new file mode 100644
+index 000000000..76f6f9f3f
+--- /dev/null
++++ b/packages/ai/test/openai-responses-developer-role.test.ts
+@@ -0,0 +1,78 @@
++import { describe, expect, it } from "bun:test";
++import { supportsDeveloperRole } from "../src/providers/openai-responses";
++import type { Model } from "../src/types";
++
++describe("supportsDeveloperRole", () => {
++	it("returns true for openai provider with official API base URL", () => {
++		const model = { provider: "openai", baseUrl: "https://api.openai.com/v1" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns false for openai provider with custom proxy base URL", () => {
++		const model = { provider: "openai", baseUrl: "https://my-proxy.example.com/v1" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(false);
++	});
++
++	it("returns true for github-copilot provider", () => {
++		const model = { provider: "github-copilot", baseUrl: "https://api.githubcopilot.com" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns false for github-copilot provider with custom proxy base URL", () => {
++		const model = { provider: "github-copilot", baseUrl: "https://proxy.example.com/v1" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(false);
++	});
++
++	it("returns true for Azure OpenAI base URL", () => {
++		const model = { provider: "azure-openai", baseUrl: "https://my-resource.openai.azure.com/openai" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns true for Azure AI Inference base URL", () => {
++		const model = {
++			provider: "azure-openai",
++			baseUrl: "https://models.inference.ai.azure.com/v1/chat/completions",
++		} as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns true for api.openai.com base URL", () => {
++		const model = { provider: "custom", baseUrl: "https://api.openai.com/v1/chat/completions" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns false for generic third-party provider", () => {
++		const model = { provider: "custom", baseUrl: "https://api.example.com/v1" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(false);
++	});
++
++	it("returns false for local/localhost endpoints", () => {
++		const model = { provider: "custom", baseUrl: "http://localhost:8080/v1" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(false);
++	});
++
++	it("is case-insensitive for base URL matching", () => {
++		const model = { provider: "custom", baseUrl: "https://API.OPENAI.COM/v1" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns true for azure.com/openai base URL", () => {
++		const model = { provider: "custom", baseUrl: "https://azure.com/openai/deployments/my-model" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns true for github-copilot provider with api.individual.githubcopilot.com", () => {
++		const model = { provider: "github-copilot", baseUrl: "https://api.individual.githubcopilot.com" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns true for github-copilot provider with api.enterprise.githubcopilot.com", () => {
++		const model = { provider: "github-copilot", baseUrl: "https://api.enterprise.githubcopilot.com" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++
++	it("returns true for github-copilot provider with copilot-api enterprise domain", () => {
++		const model = { provider: "github-copilot", baseUrl: "https://copilot-api.mycompany.com" } as Model;
++		expect(supportsDeveloperRole(model)).toBe(true);
++	});
++});

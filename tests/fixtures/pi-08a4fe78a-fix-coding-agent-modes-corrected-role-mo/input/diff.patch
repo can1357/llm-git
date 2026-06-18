@@ -1,0 +1,147 @@
+diff --git a/packages/coding-agent/src/commit/map-reduce/map-phase.ts b/packages/coding-agent/src/commit/map-reduce/map-phase.ts
+index e96eb1b79..a7eff08ea 100644
+--- a/packages/coding-agent/src/commit/map-reduce/map-phase.ts
++++ b/packages/coding-agent/src/commit/map-reduce/map-phase.ts
+@@ -30,7 +30,13 @@ export interface MapPhaseInput {
+ 	};
+ }
+ 
+-export async function runMapPhase({ model, apiKey, thinkingLevel, files, config }: MapPhaseInput): Promise<FileObservation[]> {
++export async function runMapPhase({
++	model,
++	apiKey,
++	thinkingLevel,
++	files,
++	config,
++}: MapPhaseInput): Promise<FileObservation[]> {
+ 	const filtered = files.filter(file => !isExcludedFile(file.filename));
+ 	const systemPrompt = renderPromptTemplate(fileObserverSystemPrompt);
+ 	const maxFileTokens = config?.maxFileTokens ?? MAX_FILE_TOKENS;
+@@ -61,7 +67,13 @@ export async function runMapPhase({ model, apiKey, thinkingLevel, files, config
+ 		};
+ 
+ 		const response = await withRetry(
+-			() => completeSimple(model, request, { apiKey, maxTokens: 400, reasoning: toReasoningEffort(thinkingLevel), signal: AbortSignal.timeout(timeoutMs) }),
++			() =>
++				completeSimple(model, request, {
++					apiKey,
++					maxTokens: 400,
++					reasoning: toReasoningEffort(thinkingLevel),
++					signal: AbortSignal.timeout(timeoutMs),
++				}),
+ 			maxRetries,
+ 			retryBackoffMs,
+ 		);
+diff --git a/packages/coding-agent/src/commit/model-selection.ts b/packages/coding-agent/src/commit/model-selection.ts
+index 22963014e..54e3d5cb0 100644
+--- a/packages/coding-agent/src/commit/model-selection.ts
++++ b/packages/coding-agent/src/commit/model-selection.ts
+@@ -1,7 +1,7 @@
+ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+ import type { Api, Model } from "@oh-my-pi/pi-ai";
+ import { MODEL_ROLE_IDS } from "../config/model-registry";
+-import { expandRoleAlias, parseModelPattern, resolveModelRoleValue } from "../config/model-resolver";
++import { parseModelPattern, resolveModelRoleValue } from "../config/model-resolver";
+ import type { Settings } from "../config/settings";
+ import MODEL_PRIO from "../priority.json" with { type: "json" };
+ 
+diff --git a/packages/coding-agent/src/commit/pipeline.ts b/packages/coding-agent/src/commit/pipeline.ts
+index a4c5e367a..3cc0e813a 100644
+--- a/packages/coding-agent/src/commit/pipeline.ts
++++ b/packages/coding-agent/src/commit/pipeline.ts
+@@ -46,17 +46,16 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
+ 	const modelRegistry = new ModelRegistry(authStorage);
+ 	await modelRegistry.refresh();
+ 
+-	const { model: primaryModel, apiKey: primaryApiKey, thinkingLevel: primaryThinkingLevel } = await resolvePrimaryModel(
+-		args.model,
+-		settings,
+-		modelRegistry,
+-	);
+-	const { model: smolModel, apiKey: smolApiKey, thinkingLevel: smolThinkingLevel } = await resolveSmolModel(
+-		settings,
+-		modelRegistry,
+-		primaryModel,
+-		primaryApiKey,
+-	);
++	const {
++		model: primaryModel,
++		apiKey: primaryApiKey,
++		thinkingLevel: primaryThinkingLevel,
++	} = await resolvePrimaryModel(args.model, settings, modelRegistry);
++	const {
++		model: smolModel,
++		apiKey: smolApiKey,
++		thinkingLevel: smolThinkingLevel,
++	} = await resolveSmolModel(settings, modelRegistry, primaryModel, primaryApiKey);
+ 
+ 	const git = new ControlledGit(cwd);
+ 	let stagedFiles = await git.getStagedFiles();
+diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
+index 24957116f..b6b4f97d2 100644
+--- a/packages/coding-agent/src/modes/controllers/input-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
+@@ -580,7 +580,7 @@ export class InputController {
+ 
+ 	async cycleRoleModel(options?: { temporary?: boolean }): Promise<void> {
+ 		try {
+-			const roleOrder = ["slow", "default", "smol"] as const;
++			const roleOrder = ["smol", "default", "slow"] as const;
+ 			const result = await this.ctx.session.cycleRoleModels(roleOrder, options);
+ 			if (!result) {
+ 				this.ctx.showStatus("Only one role model available");
+diff --git a/packages/coding-agent/src/utils/commit-message-generator.ts b/packages/coding-agent/src/utils/commit-message-generator.ts
+index 875203d7d..13bb99df2 100644
+--- a/packages/coding-agent/src/utils/commit-message-generator.ts
++++ b/packages/coding-agent/src/utils/commit-message-generator.ts
+@@ -9,10 +9,10 @@ import { logger } from "@oh-my-pi/pi-utils";
+ import type { ModelRegistry } from "../config/model-registry";
+ import { resolveModelRoleValue } from "../config/model-resolver";
+ import { renderPromptTemplate } from "../config/prompt-templates";
+-import { toReasoningEffort } from "../thinking";
+ import type { Settings } from "../config/settings";
+ import MODEL_PRIO from "../priority.json" with { type: "json" };
+ import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
++import { toReasoningEffort } from "../thinking";
+ 
+ const COMMIT_SYSTEM_PROMPT = renderPromptTemplate(commitSystemPrompt);
+ const MAX_DIFF_CHARS = 4000;
+diff --git a/packages/coding-agent/src/utils/title-generator.ts b/packages/coding-agent/src/utils/title-generator.ts
+index f25d97b3c..5e316d2d2 100644
+--- a/packages/coding-agent/src/utils/title-generator.ts
++++ b/packages/coding-agent/src/utils/title-generator.ts
+@@ -8,10 +8,10 @@ import { logger } from "@oh-my-pi/pi-utils";
+ import type { ModelRegistry } from "../config/model-registry";
+ import { resolveModelRoleValue } from "../config/model-resolver";
+ import { renderPromptTemplate } from "../config/prompt-templates";
+-import { toReasoningEffort } from "../thinking";
+ import type { Settings } from "../config/settings";
+ import MODEL_PRIO from "../priority.json" with { type: "json" };
+ import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
++import { toReasoningEffort } from "../thinking";
+ 
+ const TITLE_SYSTEM_PROMPT = renderPromptTemplate(titleSystemPrompt);
+ 
+@@ -27,7 +27,9 @@ function getTitleModelCandidates(
+ 	const candidates: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> = [];
+ 	const addCandidate = (model?: Model<Api>, thinkingLevel?: ThinkingLevel): void => {
+ 		if (!model) return;
+-		const exists = candidates.some(candidate => candidate.model.provider === model.provider && candidate.model.id === model.id);
++		const exists = candidates.some(
++			candidate => candidate.model.provider === model.provider && candidate.model.id === model.id,
++		);
+ 		if (!exists) {
+ 			candidates.push({ model, thinkingLevel });
+ 		}
+@@ -86,7 +88,10 @@ ${truncatedMessage}
+ 	for (const candidate of candidates) {
+ 		const apiKey = await registry.getApiKey(candidate.model, sessionId);
+ 		if (!apiKey) {
+-			logger.debug("title-generator: no API key for model", { provider: candidate.model.provider, id: candidate.model.id });
++			logger.debug("title-generator: no API key for model", {
++				provider: candidate.model.provider,
++				id: candidate.model.id,
++			});
+ 			continue;
+ 		}
+ 

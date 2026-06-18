@@ -1,0 +1,13 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 23e903bb4..a63c5d9ea 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -252,7 +252,7 @@ jobs:
+         env:
+           NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+         run: |
+-          for pkg in packages/*/; do
++          for pkg in packages/utils packages/ai packages/natives packages/tui packages/stats packages/agent packages/coding-agent; do
+             pkg_name=$(basename "$pkg")
+             # Skip private packages
+             if jq -e '.private == true' "$pkg/package.json" > /dev/null 2>&1; then

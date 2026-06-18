@@ -1,0 +1,2 @@
+coding-agent/tools (65%, high confidence), coding-agent (65%, high confidence), tui (35%, high confidence), tui/components (33%, moderate confidence)
+Prefer 2-segment scopes marked 'high confidence'

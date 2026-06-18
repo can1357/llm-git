@@ -1,0 +1,83 @@
+diff --git a/packages/coding-agent/src/modes/components/session-observer-overlay.ts b/packages/coding-agent/src/modes/components/session-observer-overlay.ts
+index ad6379fcc..02dbad034 100644
+--- a/packages/coding-agent/src/modes/components/session-observer-overlay.ts
++++ b/packages/coding-agent/src/modes/components/session-observer-overlay.ts
+@@ -360,7 +360,7 @@ export class SessionObserverOverlayComponent extends Container {
+ 						const totalLines = text.trim().split("\n").length;
+ 						const hint = totalLines > 1 ? theme.fg("dim", ` (${totalLines} lines)`) : "";
+ 						lines.push(
+-							`${cursor} ${theme.fg("dim", `[${label}]`)} ${theme.fg("muted", truncateToWidth(firstLine, 60))}${hint}`,
++							`${cursor} ${theme.fg("dim", `[${label}]`)} ${theme.fg("muted", truncateToWidth(replaceTabs(firstLine), 60))}${hint}`,
+ 						);
+ 					}
+ 					this.#viewerEntries.push({ lineStart: startLine, lineCount: lines.length - startLine, kind: "user" });
+@@ -577,14 +577,14 @@ export class SessionObserverOverlayComponent extends Container {
+ 				const newEntries = parseSessionEntries(completeChunk);
+ 				for (const entry of newEntries) {
+ 					if (entry.type === "message") {
+-						this.#transcriptCache.entries.push(entry as SessionMessageEntry);
++						this.#transcriptCache.entries.push(entry);
+ 						// Extract model from first assistant message
+-						const msg = (entry as SessionMessageEntry).message;
+-						if (!this.#transcriptCache.model && msg.role === "assistant" && "model" in msg) {
+-							this.#transcriptCache.model = (msg as any).model;
++						const msg = entry.message;
++						if (!this.#transcriptCache.model && msg.role === "assistant") {
++							this.#transcriptCache.model = msg.model;
+ 						}
+-					} else if (entry.type === "model_change" && "model" in entry) {
+-						this.#transcriptCache.model = (entry as any).model;
++					} else if (entry.type === "model_change") {
++						this.#transcriptCache.model = entry.model;
+ 					}
+ 				}
+ 				this.#transcriptCache.bytesRead = fromByte + Buffer.byteLength(completeChunk, "utf-8");
+diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+index fb23206ac..176589f75 100644
+--- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+@@ -1,17 +1,14 @@
+-import * as os from "node:os";
+-import * as path from "node:path";
+ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+ import { getOAuthProviders, type OAuthProvider } from "@oh-my-pi/pi-ai";
+-import type { Component } from "@oh-my-pi/pi-tui";
++import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
+ import { Input, Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
+-import { getAgentDbPath, getConfigDirName, getProjectDir } from "@oh-my-pi/pi-utils";
+-import { invalidate as invalidateFsCache } from "../../capability/fs";
++import { getAgentDbPath, getProjectDir } from "@oh-my-pi/pi-utils";
+ import { getRoleInfo } from "../../config/model-registry";
+ import { formatModelSelectorValue } from "../../config/model-resolver";
+ import { settings } from "../../config/settings";
+ import { DebugSelectorComponent } from "../../debug";
+ import { disableProvider, enableProvider } from "../../discovery";
+-import { clearClaudePluginRootsCache, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
++import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+ import {
+ 	getInstalledPluginsRegistryPath,
+ 	getMarketplacesCacheDir,
+@@ -443,13 +440,7 @@ export class SelectorController {
+ 			projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
+ 			marketplacesCacheDir: getMarketplacesCacheDir(),
+ 			pluginsCacheDir: getPluginsCacheDir(),
+-			clearPluginRootsCache: (extraPaths?: readonly string[]) => {
+-				const home = os.homedir();
+-				invalidateFsCache(path.join(home, ".claude", "plugins", "installed_plugins.json"));
+-				invalidateFsCache(path.join(home, getConfigDirName(), "plugins", "installed_plugins.json"));
+-				for (const p of extraPaths ?? []) invalidateFsCache(p);
+-				clearClaudePluginRootsCache();
+-			},
++			clearPluginRootsCache: clearPluginRootsAndCaches,
+ 		});
+ 
+ 		const [marketplaces, installed] = await Promise.all([mgr.listMarketplaces(), mgr.listInstalledPlugins()]);
+@@ -979,7 +970,7 @@ export class SelectorController {
+ 	showSessionObserver(registry: SessionObserverRegistry): void {
+ 		const observeKeys = this.ctx.keybindings.getKeys("app.session.observe");
+ 		let cleanup: (() => void) | undefined;
+-		let overlayHandle: ReturnType<typeof this.ctx.ui.showOverlay> | undefined;
++		let overlayHandle: OverlayHandle | undefined;
+ 
+ 		const done = () => {
+ 			cleanup?.();

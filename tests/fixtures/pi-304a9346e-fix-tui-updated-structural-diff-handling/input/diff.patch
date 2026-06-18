@@ -1,0 +1,128 @@
+diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
+index b1fa42913..c8b422b48 100644
+--- a/packages/coding-agent/src/prompts/tools/task.md
++++ b/packages/coding-agent/src/prompts/tools/task.md
+@@ -35,7 +35,7 @@ Subagents have no conversation history. Every fact, file path, and direction the
+ - **Subagents do not verify, lint, or format.** Every assignment MUST instruct the subagent to skip all gates and formatters. You run them once at the end across the union of changed files — avoids redundant runs and racing formatter passes.
+ - No globs, no "update all", no package-wide scope. Fan out.
+ - Do not concern yourself with how agents might overlap on certain actions. Never use it as an excuse to go slower: they can resolve collisions in real-time with the harness facilities.
+-- Pass large payloads via `local://<path>` URIs, not inline. {{#if contextEnabled}} (other than the context){{/if}} 
++- Pass large payloads via `local://<path>` URIs, not inline. {{#if contextEnabled}} (other than the context){{/if}}
+ {{#if contextEnabled}}- Put shared constraints in `context` once; do not duplicate across assignments.{{/if}}
+ - Prefer agents that investigate **and** edit in one pass; only spin a read-only discovery step when affected files are genuinely unknown.
+ </rules>
+diff --git a/packages/tui/src/tui.ts b/packages/tui/src/tui.ts
+index 80437cced..7c7a841a0 100644
+--- a/packages/tui/src/tui.ts
++++ b/packages/tui/src/tui.ts
+@@ -1315,10 +1315,28 @@ export class TUI extends Container {
+ 		const pureAppend = diff.appendedLines && diff.firstChanged === this.#previousLines.length;
+ 		const structuralMutation = newLines.length !== this.#previousLines.length || diff.firstChanged < prevViewportTop;
+ 		if (!pureAppend && structuralMutation && !isMultiplexerSession()) {
+-			if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom())) {
++			const nativeViewportAtBottom = this.#readNativeViewportAtBottom();
++			if (this.#nativeViewportIsScrolled(nativeViewportAtBottom)) {
+ 				this.#markNativeScrollbackDirty();
+ 				return { kind: "deferredMutation" };
+ 			}
++			// Expanding a collapsed offscreen cell inserts rows before an unchanged
++			// suffix. A viewport-only repaint makes the live bottom look correct but
++			// leaves native scrollback holding the old collapsed rows; scrolling up then
++			// shows a splice of stale history and the new tail. Pure tail appends with an
++			// offscreen status/header tick are still handled by the append-tail path.
++			if (
++				contentGrew &&
++				diff.firstChanged < prevViewportTop &&
++				this.#canReplayNativeScrollbackAtCheckpoint(nativeViewportAtBottom, false)
++			) {
++				const appendedTailStart = diff.appendedLines ? this.#findAppendedTailStart(newLines) : newLines.length;
++				const tailAppendCount = newLines.length - appendedTailStart;
++				const addedCount = newLines.length - this.#previousLines.length;
++				if (addedCount > tailAppendCount) {
++					return { kind: "historyRebuild" };
++				}
++			}
+ 		}
+ 
+ 		// Height changes shift the visible window. Repaint when content didn't
+diff --git a/packages/tui/test/render-regressions.test.ts b/packages/tui/test/render-regressions.test.ts
+index 3d3139b7d..dff27ac9b 100644
+--- a/packages/tui/test/render-regressions.test.ts
++++ b/packages/tui/test/render-regressions.test.ts
+@@ -887,7 +887,7 @@ describe("TUI terminal-state regressions", () => {
+ 				tui.stop();
+ 			}
+ 		});
+-		it("repaints viewport when offscreen expansion and append land together", async () => {
++		it("rebuilds history when offscreen expansion and append land together", async () => {
+ 			const term = new VirtualTerminal(32, 6);
+ 			const tui = new TUI(term);
+ 			const component = new MutableLinesComponent(["status-0", ...rows("line-", 11)]);
+@@ -904,7 +904,6 @@ describe("TUI terminal-state regressions", () => {
+ 					"line-9",
+ 					"line-10",
+ 				]);
+-				const beforeBufferLength = term.getScrollBuffer().length;
+ 
+ 				component.setLines(["status-1", "expanded-details", ...rows("line-", 12)]);
+ 				tui.requestRender();
+@@ -918,7 +917,58 @@ describe("TUI terminal-state regressions", () => {
+ 					"line-10",
+ 					"line-11",
+ 				]);
+-				expect(term.getScrollBuffer().length - beforeBufferLength).toBe(1);
++				const scrollback = term.getScrollBuffer();
++				expect(scrollback.join("\n")).toContain("expanded-details");
++				for (let i = 0; i < 12; i++) {
++					const pattern = new RegExp(`\\bline-${i}\\b`);
++					expect(countMatches(scrollback, pattern), `line-${i} should appear exactly once`).toBe(1);
++				}
++			} finally {
++				tui.stop();
++			}
++		});
++
++		it("removes collapsed ctrl-o markers from scrollback after offscreen expansion", async () => {
++			const term = new VirtualTerminal(48, 6);
++			const tui = new TUI(term);
++			const collapsedLines = [
++				"frame-top",
++				"code preview … 16 more lines ⟨(Ctrl+O for more)⟩",
++				"output preview … 106 more lines (ctrl+o to expand)",
++				...rows("json-", 10),
++				"status",
++				"editor",
++			];
++			const component = new MutableLinesComponent(collapsedLines);
++			tui.addChild(component);
++
++			try {
++				tui.start();
++				await settle(term);
++				expect(term.getScrollBuffer().join("\n")).toContain("ctrl+o");
++
++				component.setLines([
++					"frame-top",
++					"code line 0",
++					"code line 1",
++					"output line 0",
++					"output line 1",
++					...rows("json-", 10),
++					"status",
++					"editor",
++				]);
++				tui.requestRender();
++				await settle(term);
++
++				const scrollback = term.getScrollBuffer();
++				const scrollbackText = scrollback.join("\n");
++				expect(scrollbackText).not.toContain("ctrl+o");
++				expect(scrollbackText).toContain("code line 1");
++				expect(scrollbackText).toContain("output line 1");
++				for (let i = 0; i < 10; i++) {
++					const pattern = new RegExp(`\\bjson-${i}\\b`);
++					expect(countMatches(scrollback, pattern), `json-${i} should appear exactly once`).toBe(1);
++				}
+ 			} finally {
+ 				tui.stop();
+ 			}

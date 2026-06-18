@@ -1,0 +1,4 @@
+ packages/coding-agent/src/utils/image-convert.ts |  40 ++--
+ packages/coding-agent/src/utils/image-resize.ts  | 221 +++++++++++------------
+ packages/coding-agent/src/utils/vips.ts          |  23 +++
+ 3 files changed, 135 insertions(+), 149 deletions(-)

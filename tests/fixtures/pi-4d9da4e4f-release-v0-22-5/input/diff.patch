@@ -1,0 +1,575 @@
+diff --git a/package-lock.json b/package-lock.json
+index cce501509..3c87b05b7 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -6063,11 +6063,11 @@
+ 		},
+ 		"packages/agent": {
+ 			"name": "@mariozechner/pi-agent-core",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-ai": "^0.22.4",
+-				"@mariozechner/pi-tui": "^0.22.4"
++				"@mariozechner/pi-ai": "^0.22.5",
++				"@mariozechner/pi-tui": "^0.22.5"
+ 			},
+ 			"devDependencies": {
+ 				"@types/node": "^24.3.0",
+@@ -6097,7 +6097,7 @@
+ 		},
+ 		"packages/ai": {
+ 			"name": "@mariozechner/pi-ai",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@anthropic-ai/sdk": "0.71.2",
+@@ -6139,12 +6139,12 @@
+ 		},
+ 		"packages/coding-agent": {
+ 			"name": "@mariozechner/pi-coding-agent",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-agent-core": "^0.22.4",
+-				"@mariozechner/pi-ai": "^0.22.4",
+-				"@mariozechner/pi-tui": "^0.22.4",
++				"@mariozechner/pi-agent-core": "^0.22.5",
++				"@mariozechner/pi-ai": "^0.22.5",
++				"@mariozechner/pi-tui": "^0.22.5",
+ 				"chalk": "^5.5.0",
+ 				"diff": "^8.0.2",
+ 				"glob": "^11.0.3",
+@@ -6182,13 +6182,13 @@
+ 		},
+ 		"packages/mom": {
+ 			"name": "@mariozechner/pi-mom",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@anthropic-ai/sandbox-runtime": "^0.0.16",
+-				"@mariozechner/pi-agent-core": "^0.22.4",
+-				"@mariozechner/pi-ai": "^0.22.4",
+-				"@mariozechner/pi-coding-agent": "^0.22.4",
++				"@mariozechner/pi-agent-core": "^0.22.5",
++				"@mariozechner/pi-ai": "^0.22.5",
++				"@mariozechner/pi-coding-agent": "^0.22.5",
+ 				"@sinclair/typebox": "^0.34.0",
+ 				"@slack/socket-mode": "^2.0.0",
+ 				"@slack/web-api": "^7.0.0",
+@@ -6227,10 +6227,10 @@
+ 		},
+ 		"packages/pods": {
+ 			"name": "@mariozechner/pi",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-agent-core": "^0.22.4",
++				"@mariozechner/pi-agent-core": "^0.22.5",
+ 				"chalk": "^5.5.0"
+ 			},
+ 			"bin": {
+@@ -6243,7 +6243,7 @@
+ 		},
+ 		"packages/proxy": {
+ 			"name": "@mariozechner/pi-proxy",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"dependencies": {
+ 				"@hono/node-server": "^1.14.0",
+ 				"hono": "^4.6.16"
+@@ -6259,7 +6259,7 @@
+ 		},
+ 		"packages/tui": {
+ 			"name": "@mariozechner/pi-tui",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@types/mime-types": "^2.1.4",
+@@ -6303,12 +6303,12 @@
+ 		},
+ 		"packages/web-ui": {
+ 			"name": "@mariozechner/pi-web-ui",
+-			"version": "0.22.4",
++			"version": "0.22.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@lmstudio/sdk": "^1.5.0",
+-				"@mariozechner/pi-ai": "^0.22.4",
+-				"@mariozechner/pi-tui": "^0.22.4",
++				"@mariozechner/pi-ai": "^0.22.5",
++				"@mariozechner/pi-tui": "^0.22.5",
+ 				"docx-preview": "^0.3.7",
+ 				"jszip": "^3.10.1",
+ 				"lucide": "^0.544.0",
+@@ -6329,7 +6329,7 @@
+ 		},
+ 		"packages/web-ui/example": {
+ 			"name": "pi-web-ui-example",
+-			"version": "1.10.4",
++			"version": "1.10.5",
+ 			"dependencies": {
+ 				"@mariozechner/mini-lit": "^0.2.0",
+ 				"@mariozechner/pi-ai": "file:../../ai",
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index 9f9fb5a7d..c93ab6cdc 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-agent-core",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+@@ -18,8 +18,8 @@
+ 		"prepublishOnly": "npm run clean && npm run build"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-ai": "^0.22.4",
+-		"@mariozechner/pi-tui": "^0.22.4"
++		"@mariozechner/pi-ai": "^0.22.5",
++		"@mariozechner/pi-tui": "^0.22.5"
+ 	},
+ 	"keywords": [
+ 		"ai",
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index 505f54ec3..716c93772 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-ai",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+diff --git a/packages/ai/src/models.generated.ts b/packages/ai/src/models.generated.ts
+index d8af03f7f..9b3e27a5d 100644
+--- a/packages/ai/src/models.generated.ts
++++ b/packages/ai/src/models.generated.ts
+@@ -5967,9 +5967,9 @@ export const MODELS = {
+ 			contextWindow: 32768,
+ 			maxTokens: 4096,
+ 		} satisfies Model<"openai-completions">,
+-		"anthropic/claude-3.5-haiku": {
+-			id: "anthropic/claude-3.5-haiku",
+-			name: "Anthropic: Claude 3.5 Haiku",
++		"anthropic/claude-3.5-haiku-20241022": {
++			id: "anthropic/claude-3.5-haiku-20241022",
++			name: "Anthropic: Claude 3.5 Haiku (2024-10-22)",
+ 			api: "openai-completions",
+ 			provider: "openrouter",
+ 			baseUrl: "https://openrouter.ai/api/v1",
+@@ -5984,9 +5984,9 @@ export const MODELS = {
+ 			contextWindow: 200000,
+ 			maxTokens: 8192,
+ 		} satisfies Model<"openai-completions">,
+-		"anthropic/claude-3.5-haiku-20241022": {
+-			id: "anthropic/claude-3.5-haiku-20241022",
+-			name: "Anthropic: Claude 3.5 Haiku (2024-10-22)",
++		"anthropic/claude-3.5-haiku": {
++			id: "anthropic/claude-3.5-haiku",
++			name: "Anthropic: Claude 3.5 Haiku",
+ 			api: "openai-completions",
+ 			provider: "openrouter",
+ 			baseUrl: "https://openrouter.ai/api/v1",
+@@ -6018,23 +6018,6 @@ export const MODELS = {
+ 			contextWindow: 200000,
+ 			maxTokens: 8192,
+ 		} satisfies Model<"openai-completions">,
+-		"mistralai/ministral-3b": {
+-			id: "mistralai/ministral-3b",
+-			name: "Mistral: Ministral 3B",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 0.04,
+-				output: 0.04,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 131072,
+-			maxTokens: 4096,
+-		} satisfies Model<"openai-completions">,
+ 		"mistralai/ministral-8b": {
+ 			id: "mistralai/ministral-8b",
+ 			name: "Mistral: Ministral 8B",
+@@ -6052,6 +6035,23 @@ export const MODELS = {
+ 			contextWindow: 131072,
+ 			maxTokens: 4096,
+ 		} satisfies Model<"openai-completions">,
++		"mistralai/ministral-3b": {
++			id: "mistralai/ministral-3b",
++			name: "Mistral: Ministral 3B",
++			api: "openai-completions",
++			provider: "openrouter",
++			baseUrl: "https://openrouter.ai/api/v1",
++			reasoning: false,
++			input: ["text"],
++			cost: {
++				input: 0.04,
++				output: 0.04,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 131072,
++			maxTokens: 4096,
++		} satisfies Model<"openai-completions">,
+ 		"nvidia/llama-3.1-nemotron-70b-instruct": {
+ 			id: "nvidia/llama-3.1-nemotron-70b-instruct",
+ 			name: "NVIDIA: Llama 3.1 Nemotron 70B Instruct",
+@@ -6137,23 +6137,6 @@ export const MODELS = {
+ 			contextWindow: 32768,
+ 			maxTokens: 4096,
+ 		} satisfies Model<"openai-completions">,
+-		"cohere/command-r-plus-08-2024": {
+-			id: "cohere/command-r-plus-08-2024",
+-			name: "Cohere: Command R+ (08-2024)",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 2.5,
+-				output: 10,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 128000,
+-			maxTokens: 4000,
+-		} satisfies Model<"openai-completions">,
+ 		"cohere/command-r-08-2024": {
+ 			id: "cohere/command-r-08-2024",
+ 			name: "Cohere: Command R (08-2024)",
+@@ -6171,6 +6154,23 @@ export const MODELS = {
+ 			contextWindow: 128000,
+ 			maxTokens: 4000,
+ 		} satisfies Model<"openai-completions">,
++		"cohere/command-r-plus-08-2024": {
++			id: "cohere/command-r-plus-08-2024",
++			name: "Cohere: Command R+ (08-2024)",
++			api: "openai-completions",
++			provider: "openrouter",
++			baseUrl: "https://openrouter.ai/api/v1",
++			reasoning: false,
++			input: ["text"],
++			cost: {
++				input: 2.5,
++				output: 10,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 128000,
++			maxTokens: 4000,
++		} satisfies Model<"openai-completions">,
+ 		"sao10k/l3.1-euryale-70b": {
+ 			id: "sao10k/l3.1-euryale-70b",
+ 			name: "Sao10K: Llama 3.1 Euryale 70B v2.2",
+@@ -6222,6 +6222,23 @@ export const MODELS = {
+ 			contextWindow: 128000,
+ 			maxTokens: 16384,
+ 		} satisfies Model<"openai-completions">,
++		"meta-llama/llama-3.1-8b-instruct": {
++			id: "meta-llama/llama-3.1-8b-instruct",
++			name: "Meta: Llama 3.1 8B Instruct",
++			api: "openai-completions",
++			provider: "openrouter",
++			baseUrl: "https://openrouter.ai/api/v1",
++			reasoning: false,
++			input: ["text"],
++			cost: {
++				input: 0.02,
++				output: 0.03,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 131072,
++			maxTokens: 16384,
++		} satisfies Model<"openai-completions">,
+ 		"meta-llama/llama-3.1-405b-instruct": {
+ 			id: "meta-llama/llama-3.1-405b-instruct",
+ 			name: "Meta: Llama 3.1 405B Instruct",
+@@ -6256,23 +6273,6 @@ export const MODELS = {
+ 			contextWindow: 131072,
+ 			maxTokens: 4096,
+ 		} satisfies Model<"openai-completions">,
+-		"meta-llama/llama-3.1-8b-instruct": {
+-			id: "meta-llama/llama-3.1-8b-instruct",
+-			name: "Meta: Llama 3.1 8B Instruct",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 0.02,
+-				output: 0.03,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 131072,
+-			maxTokens: 16384,
+-		} satisfies Model<"openai-completions">,
+ 		"mistralai/mistral-nemo": {
+ 			id: "mistralai/mistral-nemo",
+ 			name: "Mistral: Mistral Nemo",
+@@ -6460,23 +6460,6 @@ export const MODELS = {
+ 			contextWindow: 128000,
+ 			maxTokens: 64000,
+ 		} satisfies Model<"openai-completions">,
+-		"meta-llama/llama-3-8b-instruct": {
+-			id: "meta-llama/llama-3-8b-instruct",
+-			name: "Meta: Llama 3 8B Instruct",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 0.03,
+-				output: 0.06,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 8192,
+-			maxTokens: 16384,
+-		} satisfies Model<"openai-completions">,
+ 		"meta-llama/llama-3-70b-instruct": {
+ 			id: "meta-llama/llama-3-70b-instruct",
+ 			name: "Meta: Llama 3 70B Instruct",
+@@ -6494,6 +6477,23 @@ export const MODELS = {
+ 			contextWindow: 8192,
+ 			maxTokens: 16384,
+ 		} satisfies Model<"openai-completions">,
++		"meta-llama/llama-3-8b-instruct": {
++			id: "meta-llama/llama-3-8b-instruct",
++			name: "Meta: Llama 3 8B Instruct",
++			api: "openai-completions",
++			provider: "openrouter",
++			baseUrl: "https://openrouter.ai/api/v1",
++			reasoning: false,
++			input: ["text"],
++			cost: {
++				input: 0.03,
++				output: 0.06,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 8192,
++			maxTokens: 16384,
++		} satisfies Model<"openai-completions">,
+ 		"mistralai/mixtral-8x22b-instruct": {
+ 			id: "mistralai/mixtral-8x22b-instruct",
+ 			name: "Mistral: Mixtral 8x22B Instruct",
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 874f64603..e57237b79 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -2,6 +2,12 @@
+ 
+ ## [Unreleased]
+ 
++## [0.22.5] - 2025-12-17
++
++### Fixed
++
++- Fixed `--session` flag not saving sessions in print mode (`-p`). The session manager was never receiving events because no subscriber was attached.
++
+ ## [0.22.4] - 2025-12-17
+ 
+ ### Added
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 39d7b4946..54ca09988 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-coding-agent",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"type": "module",
+ 	"piConfig": {
+@@ -39,9 +39,9 @@
+ 		"prepublishOnly": "npm run clean && npm run build"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent-core": "^0.22.4",
+-		"@mariozechner/pi-ai": "^0.22.4",
+-		"@mariozechner/pi-tui": "^0.22.4",
++		"@mariozechner/pi-agent-core": "^0.22.5",
++		"@mariozechner/pi-ai": "^0.22.5",
++		"@mariozechner/pi-tui": "^0.22.5",
+ 		"chalk": "^5.5.0",
+ 		"diff": "^8.0.2",
+ 		"glob": "^11.0.3",
+diff --git a/packages/coding-agent/src/core/session-manager.ts b/packages/coding-agent/src/core/session-manager.ts
+index c2aee205c..f82bc400e 100644
+--- a/packages/coding-agent/src/core/session-manager.ts
++++ b/packages/coding-agent/src/core/session-manager.ts
+@@ -203,6 +203,10 @@ export class SessionManager {
+ 			// Use custom session file path
+ 			this.sessionFile = resolve(customSessionPath);
+ 			this.loadSessionId();
++			// If file doesn't exist, loadSessionId() won't set sessionId, so generate one
++			if (!this.sessionId) {
++				this.sessionId = uuidv4();
++			}
+ 			// Mark as initialized since we're loading an existing session
+ 			this.sessionInitialized = existsSync(this.sessionFile);
+ 			// Load entries into memory
+diff --git a/packages/coding-agent/src/modes/print-mode.ts b/packages/coding-agent/src/modes/print-mode.ts
+index cc11d8467..ae52cb799 100644
+--- a/packages/coding-agent/src/modes/print-mode.ts
++++ b/packages/coding-agent/src/modes/print-mode.ts
+@@ -28,10 +28,11 @@ export async function runPrintMode(
+ 	initialAttachments?: Attachment[],
+ ): Promise<void> {
+ 	// Hook runner already has no-op UI context by default (set in main.ts)
+-	// Set up hooks for print mode (no UI, ephemeral session)
++	// Set up hooks for print mode (no UI)
+ 	const hookRunner = session.hookRunner;
+ 	if (hookRunner) {
+-		hookRunner.setSessionFile(null); // Print mode is ephemeral
++		// Use actual session file if configured (via --session), otherwise null
++		hookRunner.setSessionFile(session.sessionFile);
+ 		hookRunner.onError((err) => {
+ 			console.error(`Hook error (${err.hookPath}): ${err.error}`);
+ 		});
+@@ -43,12 +44,13 @@ export async function runPrintMode(
+ 		await hookRunner.emit({ type: "session_start" });
+ 	}
+ 
+-	if (mode === "json") {
+-		// Output all events as JSON
+-		session.subscribe((event) => {
++	// Always subscribe to enable session persistence via _handleAgentEvent
++	session.subscribe((event) => {
++		// In JSON mode, output all events
++		if (mode === "json") {
+ 			console.log(JSON.stringify(event));
+-		});
+-	}
++		}
++	});
+ 
+ 	// Send initial message with attachments
+ 	if (initialMessage) {
+diff --git a/packages/mom/package.json b/packages/mom/package.json
+index fe7c505f7..fafc6a7bb 100644
+--- a/packages/mom/package.json
++++ b/packages/mom/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-mom",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "Slack bot that delegates messages to the pi coding agent",
+ 	"type": "module",
+ 	"bin": {
+@@ -21,9 +21,9 @@
+ 	},
+ 	"dependencies": {
+ 		"@anthropic-ai/sandbox-runtime": "^0.0.16",
+-		"@mariozechner/pi-agent-core": "^0.22.4",
+-		"@mariozechner/pi-ai": "^0.22.4",
+-		"@mariozechner/pi-coding-agent": "^0.22.4",
++		"@mariozechner/pi-agent-core": "^0.22.5",
++		"@mariozechner/pi-ai": "^0.22.5",
++		"@mariozechner/pi-coding-agent": "^0.22.5",
+ 		"@sinclair/typebox": "^0.34.0",
+ 		"@slack/socket-mode": "^2.0.0",
+ 		"@slack/web-api": "^7.0.0",
+diff --git a/packages/pods/package.json b/packages/pods/package.json
+index c0793bb38..484e255b3 100644
+--- a/packages/pods/package.json
++++ b/packages/pods/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "CLI tool for managing vLLM deployments on GPU pods",
+ 	"type": "module",
+ 	"bin": {
+@@ -34,7 +34,7 @@
+ 		"node": ">=20.0.0"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent-core": "^0.22.4",
++		"@mariozechner/pi-agent-core": "^0.22.5",
+ 		"chalk": "^5.5.0"
+ 	},
+ 	"devDependencies": {}
+diff --git a/packages/proxy/package.json b/packages/proxy/package.json
+index 27045d209..462ca10f6 100644
+--- a/packages/proxy/package.json
++++ b/packages/proxy/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-proxy",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"type": "module",
+ 	"description": "CORS and authentication proxy for pi-ai",
+ 	"main": "dist/index.js",
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 8a83579d5..16d13e619 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-tui",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+diff --git a/packages/web-ui/example/package.json b/packages/web-ui/example/package.json
+index c4614c129..844e5c176 100644
+--- a/packages/web-ui/example/package.json
++++ b/packages/web-ui/example/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "pi-web-ui-example",
+-  "version": "1.10.4",
++  "version": "1.10.5",
+   "private": true,
+   "type": "module",
+   "scripts": {
+diff --git a/packages/web-ui/package.json b/packages/web-ui/package.json
+index ebc7b5578..d53f3cabc 100644
+--- a/packages/web-ui/package.json
++++ b/packages/web-ui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-web-ui",
+-	"version": "0.22.4",
++	"version": "0.22.5",
+ 	"description": "Reusable web UI components for AI chat interfaces powered by @mariozechner/pi-ai",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+@@ -18,8 +18,8 @@
+ 	},
+ 	"dependencies": {
+ 		"@lmstudio/sdk": "^1.5.0",
+-		"@mariozechner/pi-ai": "^0.22.4",
+-		"@mariozechner/pi-tui": "^0.22.4",
++		"@mariozechner/pi-ai": "^0.22.5",
++		"@mariozechner/pi-tui": "^0.22.5",
+ 		"docx-preview": "^0.3.7",
+ 		"jszip": "^3.10.1",
+ 		"lucide": "^0.544.0",

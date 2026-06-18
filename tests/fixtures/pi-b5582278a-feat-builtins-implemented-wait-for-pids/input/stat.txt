@@ -1,0 +1,5 @@
+ crates/brush-builtins-vendored/src/wait.rs | 134 +++++++++++++++++++---
+ crates/brush-core-vendored/Cargo.toml      |   2 +
+ crates/brush-core-vendored/src/jobs.rs     | 178 +++++++++++++++++++++++++++--
+ crates/pi-shell/src/shell.rs               |  51 +++++++++
+ 4 files changed, 344 insertions(+), 21 deletions(-)

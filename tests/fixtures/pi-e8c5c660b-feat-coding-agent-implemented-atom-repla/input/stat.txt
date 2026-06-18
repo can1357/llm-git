@@ -1,0 +1,9 @@
+ packages/coding-agent/CHANGELOG.md                 |   6 +-
+ packages/coding-agent/src/edit/block.ts            | 308 ------------
+ packages/coding-agent/src/edit/indent.ts           | 150 ------
+ packages/coding-agent/src/edit/modes/atom.ts       | 521 ++++-----------------
+ packages/coding-agent/src/prompts/tools/atom.md    |  50 +-
+ packages/coding-agent/test/core/atom.test.ts       | 224 ++++-----
+ .../test/core/splice-block-bugs.test.ts            |  95 ----
+ .../coding-agent/test/core/splice-block.test.ts    | 251 ----------
+ 8 files changed, 226 insertions(+), 1379 deletions(-)

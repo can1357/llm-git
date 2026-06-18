@@ -1,0 +1,7 @@
+ packages/coding-agent/docs/custom-tools.md      | 2 ++
+ packages/coding-agent/docs/hooks.md             | 2 ++
+ packages/coding-agent/docs/skills.md            | 2 ++
+ packages/coding-agent/docs/theme.md             | 2 ++
+ packages/coding-agent/docs/tui.md               | 2 ++
+ packages/coding-agent/src/core/system-prompt.ts | 2 +-
+ 6 files changed, 11 insertions(+), 1 deletion(-)

@@ -1,0 +1,4 @@
+ packages/ai/CHANGELOG.md                            |  4 ++++
+ .../ai/src/providers/openai-completions-compat.ts   | 21 ++++++++++++++-------
+ packages/ai/test/deepseek-reasoning-content.test.ts | 21 +++++++++++++++++++++
+ 3 files changed, 39 insertions(+), 7 deletions(-)

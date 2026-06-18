@@ -1,0 +1,3 @@
+ packages/ai/src/providers/anthropic.ts             |  34 ++++-
+ .../test/anthropic-error-tool-result-image.test.ts | 148 +++++++++++++++++++++
+ 2 files changed, 175 insertions(+), 7 deletions(-)

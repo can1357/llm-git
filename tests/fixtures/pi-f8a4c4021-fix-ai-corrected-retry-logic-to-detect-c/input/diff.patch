@@ -1,0 +1,40 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 7fc0fd1c5..b8c452136 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -1,6 +1,9 @@
+ # Changelog
+ 
+ ## [Unreleased]
++### Fixed
++
++- Fixed retry logic to recognize 'unable to connect' errors as transient failures
+ 
+ ## [12.11.3] - 2026-02-19
+ 
+diff --git a/packages/ai/src/utils/retry.ts b/packages/ai/src/utils/retry.ts
+index 13a52ffd5..de2036577 100644
+--- a/packages/ai/src/utils/retry.ts
++++ b/packages/ai/src/utils/retry.ts
+@@ -8,7 +8,7 @@ type ErrorLike = {
+ };
+ 
+ const TRANSIENT_MESSAGE_PATTERN =
+-	/overloaded|rate.?limit|usage.?limit|too many requests|service.?unavailable|server error|internal error|connection.?error|fetch failed/i;
++	/overloaded|rate.?limit|usage.?limit|too many requests|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed/i;
+ 
+ const VALIDATION_MESSAGE_PATTERN =
+ 	/invalid|validation|bad request|unsupported|schema|missing required|not found|unauthorized|forbidden/i;
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index 8b80a2463..fa6b29363 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -3554,7 +3554,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
+ 
+ 	#isRetryableErrorMessage(errorMessage: string): boolean {
+ 		// Match: overloaded_error, rate limit, usage limit, 429, 500, 502, 503, 504, service unavailable, connection error, fetch failed, retry delay exceeded
+-		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|fetch failed|retry delay/i.test(
++		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|retry delay/i.test(
+ 			errorMessage,
+ 		);
+ 	}

@@ -1,0 +1,59 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index add1da492..471fd6543 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,6 +1,9 @@
+ # Changelog
+ 
+ ## [Unreleased]
++### Changed
++
++- Changed multi-task display to show task descriptions instead of agent names when available
+ 
+ ## [3.20.0] - 2026-01-06
+ ### Added
+@@ -1686,4 +1689,4 @@ Initial public release.
+ - Git branch display in footer
+ - Message queueing during streaming responses
+ - OAuth integration for Gmail and Google Calendar access
+-- HTML export with syntax highlighting and collapsible sections
++- HTML export with syntax highlighting and collapsible sections
+\ No newline at end of file
+diff --git a/packages/coding-agent/src/core/tools/task/render.ts b/packages/coding-agent/src/core/tools/task/render.ts
+index d4b04bd8e..c839d574a 100644
+--- a/packages/coding-agent/src/core/tools/task/render.ts
++++ b/packages/coding-agent/src/core/tools/task/render.ts
+@@ -111,8 +111,8 @@ export function renderCall(args: TaskParams, theme: Theme): Component {
+ 		return new Text(`${label} ${theme.fg("accent", task.agent)}: ${theme.fg("muted", taskPreview)}`, 0, 0);
+ 	}
+ 
+-	// Multiple tasks - show count and agent names
+-	const agents = args.tasks.map((t) => t.agent).join(", ");
++	// Multiple tasks - show count and descriptions (or agent names as fallback)
++	const agents = args.tasks.map((t) => t.description?.trim() || t.agent).join(", ");
+ 	return new Text(
+ 		`${label} ${theme.fg("muted", `${args.tasks.length} agents: ${truncate(agents, 50, theme.format.ellipsis)}`)}`,
+ 		0,
+diff --git a/packages/coding-agent/src/lib/worktree/constants.ts b/packages/coding-agent/src/lib/worktree/constants.ts
+index fc81dd3b7..99d0a78fa 100644
+--- a/packages/coding-agent/src/lib/worktree/constants.ts
++++ b/packages/coding-agent/src/lib/worktree/constants.ts
+@@ -3,12 +3,12 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ 
+ function getWorktreeBase(): string {
+-   try {
+-      accessSync("/work", constants.W_OK);
+-      return "/work/.tree";
+-   } catch {
+-      return path.join(os.tmpdir(), ".tree");
+-   }
++	try {
++		accessSync("/work", constants.W_OK);
++		return "/work/.tree";
++	} catch {
++		return path.join(os.tmpdir(), ".tree");
++	}
+ }
+ 
+ export const WORKTREE_BASE = getWorktreeBase();

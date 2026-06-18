@@ -1,0 +1,389 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 6088cf64f..e3cd50803 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -9,6 +9,7 @@
+ - Fixed usage-report dedup ignoring `projectId` for Google Cloud providers, preventing duplicate credential entries from being recognized as the same account.
+ 
+ - Fixed Cloud Code Assist (Antigravity / Gemini CLI) rejecting the `github` tool with HTTP 400 when the `pr` parameter schema contained `anyOf: [string, array]`. The CCA mixed-type combiner collapse picked the first non-null type (`string`) but indiscriminately copied type-specific keys from variant branches — `items` from the array variant leaked onto the string-typed result, producing `{type: "string", items: {...}}` which Google's API rejects as invalid. The collapse now filters merged variant fields against the winning type's allowed key set. ([#2002](https://github.com/can1357/oh-my-pi/pull/2002))
++- Fixed OpenAI Responses-family providers (Codex, OpenAI Responses, Azure Responses) rejecting requests with `400 No tool output found for function call …` after the user branched/navigated the session tree to a node that ends on a tool call (the tool-result child is dropped from the reconstructed history) or after a turn was aborted/crashed between the call streaming and its result persisting. The converters now synthesize a placeholder `function_call_output`/`custom_tool_call_output` immediately after any unpaired `function_call`/`custom_tool_call`, symmetric to the existing orphan-output repair, so the model still sees the call and can recover instead of the whole request 400ing.
+ ### Fixed
+ 
+ - Fixed Anthropic-compatible reasoning endpoints losing prior-turn reasoning on continuation requests when they emit unsigned `thinking` blocks. `convertAnthropicMessages` treated unknown endpoints as signature-enforcing and demoted unsigned reasoning to `type: "text"`, which destabilized tool-call argument serialization on the next turn — the upstream symptom behind the `args?.ops?.map is not a function` crash reported against the `todo` tool. Official `api.anthropic.com` keeps the conservative text fallback; non-official `anthropic-messages` reasoning models now replay unsigned reasoning as native `type: "thinking"` ([#2005](https://github.com/can1357/oh-my-pi/issues/2005)).
+diff --git a/packages/ai/src/providers/azure-openai-responses.ts b/packages/ai/src/providers/azure-openai-responses.ts
+index 04027d02a..26b3f0a16 100644
+--- a/packages/ai/src/providers/azure-openai-responses.ts
++++ b/packages/ai/src/providers/azure-openai-responses.ts
+@@ -40,6 +40,7 @@ import {
+ 	isOpenAIResponsesProgressEvent,
+ 	normalizeResponsesToolCallIdForTransform,
+ 	processResponsesStream,
++	repairOrphanResponsesToolCalls,
+ } from "./openai-responses-shared";
+ import { transformMessages } from "./transform-messages";
+ 
+@@ -347,7 +348,7 @@ function convertMessages(
+ 		msgIndex++;
+ 	}
+ 
+-	return messages;
++	return repairOrphanResponsesToolCalls(messages);
+ }
+ 
+ function convertTools(tools: Tool[]): OpenAITool[] {
+diff --git a/packages/ai/src/providers/openai-codex/request-transformer.ts b/packages/ai/src/providers/openai-codex/request-transformer.ts
+index f271bbc81..a12996ca6 100644
+--- a/packages/ai/src/providers/openai-codex/request-transformer.ts
++++ b/packages/ai/src/providers/openai-codex/request-transformer.ts
+@@ -76,6 +76,83 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
+ 		});
+ }
+ 
++const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
++/** Placeholder output for a tool call whose result never landed in the input. */
++const CODEX_INTERRUPTED_TOOL_OUTPUT =
++	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
++
++function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputItem {
++	const itemRecord = item as unknown as Record<string, unknown>;
++	const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
++	let text = "";
++	try {
++		const output = itemRecord.output;
++		text = typeof output === "string" ? output : JSON.stringify(output);
++	} catch {
++		text = String(itemRecord.output ?? "");
++	}
++	if (text.length > CODEX_ORPHAN_OUTPUT_LIMIT) {
++		text = `${text.slice(0, CODEX_ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
++	}
++	return {
++		type: "message",
++		role: "assistant",
++		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
++	} as InputItem;
++}
++
++/**
++ * Repair both halves of unpaired tool exchanges so the Responses input grammar
++ * stays valid — the API rejects either orphan with a 400:
++ *
++ * - `function_call_output` with no matching `function_call` → folded into an
++ *   assistant message (`400 No tool call found for function call output …`).
++ *   Regression of #472 / #1351.
++ * - `function_call` / `custom_tool_call` with no matching `*_output` → a
++ *   placeholder output is synthesized immediately after the call
++ *   (`400 No tool output found for function call …`). Hit when the user
++ *   branches/navigates the session tree to a node that ends on a tool call (the
++ *   tool-result child is dropped from the reconstructed history) or when a turn
++ *   is aborted/crashes after the call streamed but before its result persisted.
++ */
++function repairToolCallPairs(input: InputItem[]): InputItem[] {
++	const callIds = new Set<string>();
++	const outputCallIds = new Set<string>();
++	for (const item of input) {
++		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
++		if (callId === undefined) continue;
++		if (item.type === "function_call" || item.type === "custom_tool_call") callIds.add(callId);
++		else if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
++			outputCallIds.add(callId);
++		}
++	}
++
++	const repaired: InputItem[] = [];
++	for (const item of input) {
++		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
++
++		if (item.type === "function_call_output" && callId !== undefined && !callIds.has(callId)) {
++			repaired.push(orphanFunctionOutputToMessage(item, callId));
++			continue;
++		}
++
++		repaired.push(item);
++
++		if (
++			(item.type === "function_call" || item.type === "custom_tool_call") &&
++			callId !== undefined &&
++			!outputCallIds.has(callId)
++		) {
++			repaired.push({
++				type: item.type === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
++				call_id: callId,
++				output: CODEX_INTERRUPTED_TOOL_OUTPUT,
++			} as InputItem);
++		}
++	}
++	return repaired;
++}
++
+ export async function transformRequestBody(
+ 	body: RequestBody,
+ 	model: Model<Api>,
+@@ -87,39 +164,8 @@ export async function transformRequestBody(
+ 
+ 	if (body.input && Array.isArray(body.input)) {
+ 		body.input = filterInput(body.input);
+-
+ 		if (body.input) {
+-			const functionCallIds = new Set(
+-				body.input
+-					.filter(item => item.type === "function_call" && typeof item.call_id === "string")
+-					.map(item => item.call_id as string),
+-			);
+-
+-			body.input = body.input.map(item => {
+-				if (item.type === "function_call_output" && typeof item.call_id === "string") {
+-					const callId = item.call_id as string;
+-					if (!functionCallIds.has(callId)) {
+-						const itemRecord = item as unknown as Record<string, unknown>;
+-						const toolName = typeof itemRecord.name === "string" ? itemRecord.name : "tool";
+-						let text = "";
+-						try {
+-							const output = itemRecord.output;
+-							text = typeof output === "string" ? output : JSON.stringify(output);
+-						} catch {
+-							text = String(itemRecord.output ?? "");
+-						}
+-						if (text.length > 16000) {
+-							text = `${text.slice(0, 16000)}\n...[truncated]`;
+-						}
+-						return {
+-							type: "message",
+-							role: "assistant",
+-							content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
+-						} as InputItem;
+-					}
+-				}
+-				return item;
+-			});
++			body.input = repairToolCallPairs(body.input);
+ 		}
+ 	}
+ 
+diff --git a/packages/ai/src/providers/openai-responses-shared.ts b/packages/ai/src/providers/openai-responses-shared.ts
+index 2b0f5f2b3..8fc389838 100644
+--- a/packages/ai/src/providers/openai-responses-shared.ts
++++ b/packages/ai/src/providers/openai-responses-shared.ts
+@@ -212,6 +212,59 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
+ 	});
+ }
+ 
++/** Placeholder output for a tool call whose result is absent from the input. */
++const ORPHAN_TOOL_CALL_PLACEHOLDER =
++	"[No tool output recorded: the tool call was interrupted before it produced a result.]";
++
++/**
++ * Synthesize a placeholder `function_call_output` / `custom_tool_call_output`
++ * for every `function_call` / `custom_tool_call` whose `call_id` has no matching
++ * output later in the same input. The Responses API rejects an unpaired call
++ * with `400 No tool output found for function call …`.
++ *
++ * Orphan calls surface when the user branches/navigates the session tree to a
++ * node that ends on a tool call (the tool-result child is excluded from the
++ * reconstructed history) or when a turn is aborted/crashes after the call
++ * streamed but before its result persisted. Dropping the call would erase the
++ * assistant's action; a placeholder output keeps the call visible so the model
++ * can recover (e.g. re-issue the call). Symmetric to
++ * {@link repairOrphanResponsesToolOutputs}.
++ */
++export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseInput {
++	const outputCallIds = new Set<string>();
++	for (const item of input) {
++		const t = (item as { type?: string }).type;
++		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
++		const callId = (item as { call_id?: unknown }).call_id;
++		if (typeof callId === "string") outputCallIds.add(callId);
++	}
++	let hasOrphan = false;
++	for (const item of input) {
++		const t = (item as { type?: string }).type;
++		if (t !== "function_call" && t !== "custom_tool_call") continue;
++		const callId = (item as { call_id?: unknown }).call_id;
++		if (typeof callId === "string" && !outputCallIds.has(callId)) {
++			hasOrphan = true;
++			break;
++		}
++	}
++	if (!hasOrphan) return input;
++	const repaired: ResponseInput = [];
++	for (const item of input) {
++		repaired.push(item);
++		const t = (item as { type?: string }).type;
++		if (t !== "function_call" && t !== "custom_tool_call") continue;
++		const callId = (item as { call_id?: unknown }).call_id;
++		if (typeof callId !== "string" || outputCallIds.has(callId)) continue;
++		repaired.push({
++			type: t === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
++			call_id: callId,
++			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
++		} as ResponseInput[number]);
++	}
++	return repaired;
++}
++
+ export function convertResponsesInputContent(
+ 	content: string | Array<TextContent | ImageContent>,
+ 	supportsImages: boolean,
+diff --git a/packages/ai/src/providers/openai-responses.ts b/packages/ai/src/providers/openai-responses.ts
+index ac1684b43..ed6de0481 100644
+--- a/packages/ai/src/providers/openai-responses.ts
++++ b/packages/ai/src/providers/openai-responses.ts
+@@ -62,6 +62,7 @@ import {
+ 	isOpenAIResponsesProgressEvent,
+ 	normalizeResponsesToolCallIdForTransform,
+ 	processResponsesStream,
++	repairOrphanResponsesToolCalls,
+ 	repairOrphanResponsesToolOutputs,
+ } from "./openai-responses-shared";
+ import { transformMessages } from "./transform-messages";
+@@ -614,7 +615,7 @@ function convertConversationMessages(
+ 		msgIndex++;
+ 	}
+ 
+-	return repairOrphanResponsesToolOutputs(messages);
++	return repairOrphanResponsesToolCalls(repairOrphanResponsesToolOutputs(messages));
+ }
+ 
+ /**
+diff --git a/packages/ai/test/openai-codex.test.ts b/packages/ai/test/openai-codex.test.ts
+index 4dbc616a7..ed81d7c78 100644
+--- a/packages/ai/test/openai-codex.test.ts
++++ b/packages/ai/test/openai-codex.test.ts
+@@ -71,6 +71,62 @@ describe("openai-codex request transformer", () => {
+ 	});
+ });
+ 
++describe("openai-codex orphan tool-call repair", () => {
++	it("synthesizes a function_call_output for a function_call with no result", async () => {
++		const body: RequestBody = {
++			model: "gpt-5.1-codex",
++			input: [
++				{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
++				{ type: "function_call", call_id: "call_orphan", name: "read", arguments: "{}" },
++				{ type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
++			],
++		};
++
++		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
++		const input = transformed.input || [];
++
++		const callIndex = input.findIndex(item => item.type === "function_call" && item.call_id === "call_orphan");
++		expect(callIndex).toBeGreaterThanOrEqual(0);
++		// The synthesized output sits immediately after the orphan call.
++		const output = input[callIndex + 1];
++		expect(output?.type).toBe("function_call_output");
++		expect(output?.call_id).toBe("call_orphan");
++		expect(typeof output?.output).toBe("string");
++		expect(output?.output as string).toMatch(/interrupted/i);
++	});
++
++	it("leaves a paired function_call untouched", async () => {
++		const body: RequestBody = {
++			model: "gpt-5.1-codex",
++			input: [
++				{ type: "function_call", call_id: "call_paired", name: "read", arguments: "{}" },
++				{ type: "function_call_output", call_id: "call_paired", output: "real result" },
++			],
++		};
++
++		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
++		const input = transformed.input || [];
++
++		const outputs = input.filter(item => item.type === "function_call_output" && item.call_id === "call_paired");
++		expect(outputs).toHaveLength(1);
++		expect(outputs[0]?.output).toBe("real result");
++	});
++
++	it("synthesizes a custom_tool_call_output for an orphan custom_tool_call", async () => {
++		const body: RequestBody = {
++			model: "gpt-5.1-codex",
++			input: [{ type: "custom_tool_call", call_id: "call_custom", name: "apply_patch" }],
++		};
++
++		const transformed = await transformRequestBody(body, createCodexModel(body.model), {});
++		const input = transformed.input || [];
++
++		const output = input.find(item => item.type === "custom_tool_call_output" && item.call_id === "call_custom");
++		expect(output).toBeDefined();
++		expect(output?.output as string).toMatch(/interrupted/i);
++	});
++});
++
+ describe("openai-codex reasoning effort validation", () => {
+ 	it("rejects gpt-5.1 xhigh when metadata does not list it", async () => {
+ 		const body: RequestBody = { model: "gpt-5.1", input: [] };
+diff --git a/packages/ai/test/openai-responses-orphan-repair.test.ts b/packages/ai/test/openai-responses-orphan-repair.test.ts
+new file mode 100644
+index 000000000..014d6988f
+--- /dev/null
++++ b/packages/ai/test/openai-responses-orphan-repair.test.ts
+@@ -0,0 +1,69 @@
++import { describe, expect, it } from "bun:test";
++import {
++	repairOrphanResponsesToolCalls,
++	repairOrphanResponsesToolOutputs,
++} from "@oh-my-pi/pi-ai/providers/openai-responses-shared";
++import type { ResponseInput } from "openai/resources/responses/responses";
++
++describe("repairOrphanResponsesToolCalls", () => {
++	it("appends a synthetic function_call_output after a call with no result", () => {
++		const input: ResponseInput = [
++			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
++			{ role: "user", content: [{ type: "input_text", text: "continue" }] },
++		];
++
++		const repaired = repairOrphanResponsesToolCalls(input);
++		const callIndex = repaired.findIndex(
++			item =>
++				(item as { type?: string }).type === "function_call" && (item as { call_id?: string }).call_id === "call_a",
++		);
++		const output = repaired[callIndex + 1] as { type?: string; call_id?: string; output?: unknown };
++		expect(output.type).toBe("function_call_output");
++		expect(output.call_id).toBe("call_a");
++		expect(output.output).toMatch(/interrupted/i);
++	});
++
++	it("uses custom_tool_call_output for an orphan custom_tool_call", () => {
++		const input: ResponseInput = [
++			{ type: "custom_tool_call", call_id: "call_c", name: "apply_patch", input: "patch" } as ResponseInput[number],
++		];
++
++		const repaired = repairOrphanResponsesToolCalls(input);
++		const output = repaired.find(item => (item as { type?: string }).type === "custom_tool_call_output") as
++			| { call_id?: string }
++			| undefined;
++		expect(output?.call_id).toBe("call_c");
++	});
++
++	it("returns the input unchanged when every call is paired", () => {
++		const input: ResponseInput = [
++			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
++			{ type: "function_call_output", call_id: "call_a", output: "ok" } as ResponseInput[number],
++		];
++
++		const repaired = repairOrphanResponsesToolCalls(input);
++		expect(repaired).toBe(input);
++	});
++
++	it("composes with output repair so a tree-branch snapshot stays API-valid", () => {
++		// Branching to a node that ends on a tool call drops the result child:
++		// the assistant turn keeps the call, but no matching output remains.
++		const input: ResponseInput = [
++			{ role: "user", content: [{ type: "input_text", text: "do it" }] },
++			{ type: "function_call", call_id: "call_x", name: "bash", arguments: "{}" },
++		];
++
++		const repaired = repairOrphanResponsesToolCalls(repairOrphanResponsesToolOutputs(input));
++		const callIds = new Set(
++			repaired
++				.filter(i => (i as { type?: string }).type === "function_call")
++				.map(i => (i as { call_id: string }).call_id),
++		);
++		const outputIds = new Set(
++			repaired
++				.filter(i => (i as { type?: string }).type === "function_call_output")
++				.map(i => (i as { call_id: string }).call_id),
++		);
++		for (const id of callIds) expect(outputIds.has(id)).toBe(true);
++	});
++});

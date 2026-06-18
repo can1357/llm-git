@@ -1,0 +1,154 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 8846e99e6..0c5e4de5c 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## [Unreleased]
+ 
++### Fixed
++
++- Fixed `/tree` rendering a bare "No entries found" line on a fresh session where the only persisted entries are the `model_change` + `thinking_level_change` written by `sdk.ts` at startup — both are hidden by the tree-selector's default filter, so `#filteredNodes.length === 0` while `tree.length === 2` and the controller's `tree.length === 0` short-circuit never fired. The selector now splits the empty-state into three distinct shapes — truly empty tree, search query with no matches, and filter mode rejecting every entry — surfacing the cause and the recovery key (`Alt+A` to show all, `Backspace` to clear a stale search) so users on a fresh session can see immediately that the panel isn't broken ([#1909](https://github.com/can1357/oh-my-pi/issues/1909)).
++
+ ## [15.9.1] - 2026-06-04
+ 
+ ### Added
+diff --git a/packages/coding-agent/src/modes/components/tree-selector.ts b/packages/coding-agent/src/modes/components/tree-selector.ts
+index c2df593aa..48a4e7880 100644
+--- a/packages/coding-agent/src/modes/components/tree-selector.ts
++++ b/packages/coding-agent/src/modes/components/tree-selector.ts
+@@ -441,8 +441,37 @@ class TreeList implements Component {
+ 		const lines: string[] = [];
+ 
+ 		if (this.#filteredNodes.length === 0) {
+-			lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
+-			lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.#getFilterLabel()}`), width));
++			// Three empty-state shapes:
++			//  - flatNodes empty               → no entries at all (truly fresh session).
++			//  - search query rejects everything → tell the user the search is the cause.
++			//  - filter mode rejects everything  → tell the user the filter is the cause and
++			//    how to widen it. Otherwise fresh sessions whose only persisted entries are
++			//    `model_change` + `thinking_level_change` (both hidden by the default filter)
++			//    read as "broken /tree" — see #1909.
++			if (this.#flatNodes.length === 0) {
++				lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
++				lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.#getFilterLabel()}`), width));
++			} else if (this.#searchQuery.length > 0) {
++				lines.push(
++					truncateToWidth(theme.fg("muted", `  No entries match search "${this.#searchQuery}"`), width),
++				);
++				lines.push(truncateToWidth(theme.fg("muted", "  Press Backspace to clear the search"), width));
++				lines.push(
++					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
++				);
++			} else {
++				const filterLabel = this.#getFilterLabel().trim() || "[default]";
++				lines.push(
++					truncateToWidth(
++						theme.fg("muted", `  ${this.#flatNodes.length} entries hidden by the current filter ${filterLabel}`),
++						width,
++					),
++				);
++				lines.push(truncateToWidth(theme.fg("muted", "  Press Alt+A to show all, Alt+D for default"), width));
++				lines.push(
++					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
++				);
++			}
+ 			return lines;
+ 		}
+ 
+diff --git a/packages/coding-agent/test/modes/components/tree-selector-empty-state-1909.test.ts b/packages/coding-agent/test/modes/components/tree-selector-empty-state-1909.test.ts
+new file mode 100644
+index 000000000..3b6365186
+--- /dev/null
++++ b/packages/coding-agent/test/modes/components/tree-selector-empty-state-1909.test.ts
+@@ -0,0 +1,89 @@
++import { beforeAll, describe, expect, it } from "bun:test";
++import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
++import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
++import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++
++beforeAll(async () => {
++	await initTheme(false, undefined, undefined, "dark", "light");
++});
++
++function freshSessionTree(): SessionTreeNode[] {
++	// Mirror what `sdk.ts` writes on session start: a `model_change` plus a
++	// `thinking_level_change`. Both are settings/bookkeeping entries that the
++	// tree selector's default filter hides — a fresh session contains nothing
++	// else, so the selector sees `flatNodes.length === 2`, `filteredNodes.length === 0`.
++	const modelChange: SessionEntry = {
++		type: "model_change",
++		id: "e1",
++		parentId: null,
++		timestamp: new Date().toISOString(),
++		model: "anthropic/claude-sonnet-4-20250514",
++	};
++	const thinkingChange: SessionEntry = {
++		type: "thinking_level_change",
++		id: "e2",
++		parentId: "e1",
++		timestamp: new Date().toISOString(),
++		thinkingLevel: "medium",
++	};
++	return [
++		{
++			entry: modelChange,
++			children: [{ entry: thinkingChange, children: [] }],
++		},
++	];
++}
++
++function userMessageTree(): SessionTreeNode[] {
++	const entry: SessionEntry = {
++		type: "message",
++		id: "e1",
++		parentId: null,
++		timestamp: new Date().toISOString(),
++		message: { role: "user", content: "hello there", timestamp: 1 },
++	};
++	return [{ entry, children: [] }];
++}
++
++function renderSelector(selector: TreeSelectorComponent): string {
++	const lines = (selector as unknown as { render: (w: number) => string[] }).render(120);
++	return Bun.stripANSI(lines.join("\n"));
++}
++
++describe("issue #1909: tree-selector empty-state messaging", () => {
++	it("explains that the filter — not missing data — is hiding entries on a fresh session", () => {
++		const selector = new TreeSelectorComponent(freshSessionTree(), "e2", 60, () => {}, () => {});
++		const text = renderSelector(selector);
++
++		// Filter-hiding hint and recovery key must both be present so the user knows
++		// the panel isn't broken and can widen the view without leaving the screen.
++		expect(text).toContain("hidden by the current filter");
++		expect(text).toContain("[default]");
++		expect(text.toLowerCase()).toContain("alt+a");
++		// Total count must reflect the real flatNodes count, not 0/0 (otherwise the
++		// "filter hides things" framing is unconvincing).
++		expect(text).toContain("(0/2)");
++	});
++
++	it("explains a zero-result search as a search problem, not a filter problem", () => {
++		const selector = new TreeSelectorComponent(userMessageTree(), "e1", 60, () => {}, () => {});
++		// Type a character that won't match anything in the tree.
++		selector.handleInput("z");
++		const text = renderSelector(selector);
++
++		expect(text).toContain('No entries match search "z"');
++		expect(text.toLowerCase()).toContain("backspace");
++		// Must NOT misattribute the empty result to the filter mode.
++		expect(text).not.toContain("hidden by the current filter");
++	});
++
++	it("falls back to the bare 'No entries found' line when the tree is genuinely empty", () => {
++		const selector = new TreeSelectorComponent([], null, 60, () => {}, () => {});
++		const text = renderSelector(selector);
++
++		expect(text).toContain("No entries found");
++		expect(text).toContain("(0/0)");
++		// Don't tell the user to widen the filter when there's nothing to widen to.
++		expect(text).not.toContain("hidden by the current filter");
++	});
++});

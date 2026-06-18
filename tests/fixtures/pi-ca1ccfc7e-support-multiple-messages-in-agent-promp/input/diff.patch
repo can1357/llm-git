@@ -1,0 +1,210 @@
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 0fd0d6a06..ee63b89f1 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -26,7 +26,7 @@ import type {
+  * The prompt is added to the context and events are emitted for it.
+  */
+ export function agentLoop(
+-	prompt: AgentMessage,
++	prompts: AgentMessage[],
+ 	context: AgentContext,
+ 	config: AgentLoopConfig,
+ 	signal?: AbortSignal,
+@@ -35,16 +35,18 @@ export function agentLoop(
+ 	const stream = createAgentStream();
+ 
+ 	(async () => {
+-		const newMessages: AgentMessage[] = [prompt];
++		const newMessages: AgentMessage[] = [...prompts];
+ 		const currentContext: AgentContext = {
+ 			...context,
+-			messages: [...context.messages, prompt],
++			messages: [...context.messages, ...prompts],
+ 		};
+ 
+ 		stream.push({ type: "agent_start" });
+ 		stream.push({ type: "turn_start" });
+-		stream.push({ type: "message_start", message: prompt });
+-		stream.push({ type: "message_end", message: prompt });
++		for (const prompt of prompts) {
++			stream.push({ type: "message_start", message: prompt });
++			stream.push({ type: "message_end", message: prompt });
++		}
+ 
+ 		await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
+ 	})();
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index 8d5d77062..078b707ea 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -168,29 +168,33 @@ export class Agent {
+ 	}
+ 
+ 	/** Send a prompt with an AgentMessage */
+-	async prompt(message: AgentMessage): Promise<void>;
++	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
+ 	async prompt(input: string, images?: ImageContent[]): Promise<void>;
+-	async prompt(input: string | AgentMessage, images?: ImageContent[]) {
++	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]) {
+ 		const model = this._state.model;
+ 		if (!model) throw new Error("No model configured");
+ 
+-		let userMessage: AgentMessage;
++		let msgs: AgentMessage[];
+ 
+-		if (typeof input === "string") {
++		if (Array.isArray(input)) {
++			msgs = input;
++		} else if (typeof input === "string") {
+ 			const content: Array<TextContent | ImageContent> = [{ type: "text", text: input }];
+ 			if (images && images.length > 0) {
+ 				content.push(...images);
+ 			}
+-			userMessage = {
+-				role: "user",
+-				content,
+-				timestamp: Date.now(),
+-			};
++			msgs = [
++				{
++					role: "user",
++					content,
++					timestamp: Date.now(),
++				},
++			];
+ 		} else {
+-			userMessage = input;
++			msgs = [input];
+ 		}
+ 
+-		await this._runLoop(userMessage);
++		await this._runLoop(msgs);
+ 	}
+ 
+ 	/** Continue from current context (for retry after overflow) */
+@@ -208,10 +212,10 @@ export class Agent {
+ 
+ 	/**
+ 	 * Run the agent loop.
+-	 * If userMessage is provided, starts a new conversation turn.
++	 * If messages are provided, starts a new conversation turn with those messages.
+ 	 * Otherwise, continues from existing context.
+ 	 */
+-	private async _runLoop(userMessage?: AgentMessage) {
++	private async _runLoop(messages?: AgentMessage[]) {
+ 		const model = this._state.model;
+ 		if (!model) throw new Error("No model configured");
+ 
+@@ -262,8 +266,8 @@ export class Agent {
+ 		let partial: AgentMessage | null = null;
+ 
+ 		try {
+-			const stream = userMessage
+-				? agentLoop(userMessage, context, config, this.abortController.signal, this.streamFn)
++			const stream = messages
++				? agentLoop(messages, context, config, this.abortController.signal, this.streamFn)
+ 				: agentLoopContinue(context, config, this.abortController.signal, this.streamFn);
+ 
+ 			for await (const event of stream) {
+diff --git a/packages/agent/test/agent-loop.test.ts b/packages/agent/test/agent-loop.test.ts
+index 5eb8d30e4..b82950389 100644
+--- a/packages/agent/test/agent-loop.test.ts
++++ b/packages/agent/test/agent-loop.test.ts
+@@ -105,7 +105,7 @@ describe("agentLoop with AgentMessage", () => {
+ 		};
+ 
+ 		const events: AgentEvent[] = [];
+-		const stream = agentLoop(userPrompt, context, config, undefined, streamFn);
++		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+ 
+ 		for await (const event of stream) {
+ 			events.push(event);
+@@ -172,7 +172,7 @@ describe("agentLoop with AgentMessage", () => {
+ 		};
+ 
+ 		const events: AgentEvent[] = [];
+-		const stream = agentLoop(userPrompt, context, config, undefined, streamFn);
++		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+ 
+ 		for await (const event of stream) {
+ 			events.push(event);
+@@ -224,7 +224,7 @@ describe("agentLoop with AgentMessage", () => {
+ 			return stream;
+ 		};
+ 
+-		const stream = agentLoop(userPrompt, context, config, undefined, streamFn);
++		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+ 
+ 		for await (const _ of stream) {
+ 			// consume
+@@ -288,7 +288,7 @@ describe("agentLoop with AgentMessage", () => {
+ 		};
+ 
+ 		const events: AgentEvent[] = [];
+-		const stream = agentLoop(userPrompt, context, config, undefined, streamFn);
++		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+ 
+ 		for await (const event of stream) {
+ 			events.push(event);
+@@ -351,7 +351,7 @@ describe("agentLoop with AgentMessage", () => {
+ 		};
+ 
+ 		const events: AgentEvent[] = [];
+-		const stream = agentLoop(userPrompt, context, config, undefined, (_model, ctx, _options) => {
++		const stream = agentLoop([userPrompt], context, config, undefined, (_model, ctx, _options) => {
+ 			// Check if interrupt message is in context on second call
+ 			if (callIndex === 1) {
+ 				sawInterruptInContext = ctx.messages.some(
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 306a7d171..a0d0b1076 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -490,30 +490,36 @@ export class AgentSession {
+ 		// Expand file-based slash commands if requested
+ 		const expandedText = expandCommands ? expandSlashCommand(text, [...this._fileCommands]) : text;
+ 
++		// Build messages array (hook message if any, then user message)
++		const messages: AgentMessage[] = [];
++
++		// Add user message
++		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
++		if (options?.images) {
++			userContent.push(...options.images);
++		}
++		messages.push({
++			role: "user",
++			content: userContent,
++			timestamp: Date.now(),
++		});
++
+ 		// Emit before_agent_start hook event
+ 		if (this._hookRunner) {
+ 			const result = await this._hookRunner.emitBeforeAgentStart(expandedText, options?.images);
+ 			if (result?.message) {
+-				// Append hook message to agent state and session
+-				const hookMessage: HookMessage = {
++				messages.push({
+ 					role: "hookMessage",
+ 					customType: result.message.customType,
+ 					content: result.message.content,
+ 					display: result.message.display,
+ 					details: result.message.details,
+ 					timestamp: Date.now(),
+-				};
+-				this.agent.appendMessage(hookMessage);
+-				this.sessionManager.appendCustomMessageEntry(
+-					result.message.customType,
+-					result.message.content,
+-					result.message.display,
+-					result.message.details,
+-				);
++				});
+ 			}
+ 		}
+ 
+-		await this.agent.prompt(expandedText, options?.images);
++		await this.agent.prompt(messages);
+ 		await this.waitForRetry();
+ 	}
+ 

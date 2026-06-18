@@ -1,0 +1,5 @@
+ packages/coding-agent/src/edit/modes/atom.lark  |  5 ++--
+ packages/coding-agent/src/edit/modes/atom.ts    | 31 ++++++++++++++++++-------
+ packages/coding-agent/src/prompts/tools/atom.md | 10 ++++----
+ packages/coding-agent/test/core/atom.test.ts    | 29 ++++++++++++++++++++++-
+ 4 files changed, 59 insertions(+), 16 deletions(-)

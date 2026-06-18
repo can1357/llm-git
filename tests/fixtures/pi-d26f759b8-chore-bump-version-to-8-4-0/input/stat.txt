@@ -1,0 +1,11 @@
+ bun.lock                           | 12 ++++++------
+ packages/agent/package.json        |  2 +-
+ packages/ai/CHANGELOG.md           |  2 ++
+ packages/ai/package.json           |  2 +-
+ packages/coding-agent/CHANGELOG.md |  2 ++
+ packages/coding-agent/package.json |  2 +-
+ packages/pi-utils/package.json     |  2 +-
+ packages/stats/package.json        |  2 +-
+ packages/tui/CHANGELOG.md          |  2 ++
+ packages/tui/package.json          |  2 +-
+ 10 files changed, 18 insertions(+), 12 deletions(-)

@@ -1,0 +1,8 @@
+ docs/advisor-watchdog.md                           |  2 +
+ docs/settings.md                                   |  1 +
+ packages/coding-agent/CHANGELOG.md                 |  1 +
+ .../src/advisor/__tests__/advisor.test.ts          | 59 ++++++++++++++++++++++
+ packages/coding-agent/src/advisor/advise-tool.ts   | 13 +++++
+ .../coding-agent/src/config/settings-schema.ts     | 19 +++++++
+ packages/coding-agent/src/session/agent-session.ts | 29 +++++++++++
+ 7 files changed, 124 insertions(+)

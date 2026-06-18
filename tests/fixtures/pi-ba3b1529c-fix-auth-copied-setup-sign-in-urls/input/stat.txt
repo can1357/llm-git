@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                 |  1 +
+ .../src/modes/setup-wizard/scenes/sign-in.ts       | 26 ++++++++-
+ .../coding-agent/test/setup-wizard-sign-in.test.ts | 62 +++++++++++++++++++++-
+ 3 files changed, 86 insertions(+), 3 deletions(-)

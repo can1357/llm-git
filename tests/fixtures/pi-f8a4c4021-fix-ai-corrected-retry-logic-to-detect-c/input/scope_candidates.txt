@@ -1,0 +1,2 @@
+ai (71%, high confidence), coding-agent (29%, high confidence), ai/utils (29%, moderate confidence), coding-agent/session (29%, moderate confidence)
+Prefer 2-segment scopes marked 'high confidence'

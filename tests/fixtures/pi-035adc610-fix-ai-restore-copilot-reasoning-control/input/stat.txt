@@ -1,0 +1,6 @@
+ packages/ai/CHANGELOG.md                           |  1 +
+ packages/ai/src/providers/anthropic.ts             |  6 +-
+ packages/ai/src/providers/openai-responses.ts      |  2 +-
+ .../ai/test/github-copilot-anthropic-auth.test.ts  |  7 +--
+ packages/ai/test/github-copilot-reasoning.test.ts  | 64 ++++++++++++++++++++++
+ 5 files changed, 69 insertions(+), 11 deletions(-)

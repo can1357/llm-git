@@ -1,0 +1,4 @@
+ packages/coding-agent/src/prompts/tools/task.md |  2 +-
+ packages/tui/src/tui.ts                         | 20 ++++++++-
+ packages/tui/test/render-regressions.test.ts    | 56 +++++++++++++++++++++++--
+ 3 files changed, 73 insertions(+), 5 deletions(-)

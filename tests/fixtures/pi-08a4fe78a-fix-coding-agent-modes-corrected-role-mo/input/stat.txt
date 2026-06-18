@@ -1,0 +1,7 @@
+ .../coding-agent/src/commit/map-reduce/map-phase.ts | 16 ++++++++++++++--
+ packages/coding-agent/src/commit/model-selection.ts |  2 +-
+ packages/coding-agent/src/commit/pipeline.ts        | 21 ++++++++++-----------
+ .../src/modes/controllers/input-controller.ts       |  2 +-
+ .../src/utils/commit-message-generator.ts           |  2 +-
+ packages/coding-agent/src/utils/title-generator.ts  | 11 ++++++++---
+ 6 files changed, 35 insertions(+), 19 deletions(-)

@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                        | 2 ++
+ packages/coding-agent/src/prompts/system/system-prompt.md | 9 ++++++++-
+ packages/coding-agent/src/system-prompt.ts                | 6 ++++++
+ 3 files changed, 16 insertions(+), 1 deletion(-)

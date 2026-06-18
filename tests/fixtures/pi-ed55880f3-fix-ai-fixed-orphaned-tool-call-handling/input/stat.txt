@@ -1,0 +1,8 @@
+ packages/ai/CHANGELOG.md                           |   1 +
+ .../ai/src/providers/azure-openai-responses.ts     |   3 +-
+ .../providers/openai-codex/request-transformer.ts  | 110 +++++++++++++++------
+ .../ai/src/providers/openai-responses-shared.ts    |  53 ++++++++++
+ packages/ai/src/providers/openai-responses.ts      |   3 +-
+ packages/ai/test/openai-codex.test.ts              |  56 +++++++++++
+ .../ai/test/openai-responses-orphan-repair.test.ts |  69 +++++++++++++
+ 7 files changed, 261 insertions(+), 34 deletions(-)

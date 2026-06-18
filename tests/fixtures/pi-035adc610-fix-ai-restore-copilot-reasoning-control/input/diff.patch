@@ -1,0 +1,151 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 0064ae693..80cd74268 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -89,6 +89,7 @@
+ - Fixed shell execution failure responses to preserve all result fields when sanitizing, preventing truncated metadata in stream results
+ - Fixed context overflow detection to recognize `model_context_window_exceeded` from z.ai / GLM providers, preventing infinite retry loops when context window is exceeded ([#638](https://github.com/can1357/oh-my-pi/issues/638))
+ - Fixed strict tool schema enforcement to preserve `additionalProperties: false` and required keys for reused nested object schemas, preventing invalid `todo_write` function schemas in Codex/OpenAI requests
++- Fixed GitHub Copilot reasoning regressions by preserving GPT-5.x / Claude 4.x reasoning controls instead of stripping them from requests ([#773](https://github.com/can1357/oh-my-pi/issues/773))
+ 
+ ## [14.1.0] - 2026-04-11
+ 
+diff --git a/packages/ai/src/providers/anthropic.ts b/packages/ai/src/providers/anthropic.ts
+index b3cf549c5..939b27b75 100644
+--- a/packages/ai/src/providers/anthropic.ts
++++ b/packages/ai/src/providers/anthropic.ts
+@@ -1519,7 +1519,7 @@ function buildParams(
+ 		);
+ 	}
+ 
+-	if (options?.thinkingEnabled && model.reasoning && model.provider !== "github-copilot") {
++	if (options?.thinkingEnabled && model.reasoning) {
+ 		const mode = model.thinking?.mode;
+ 		const requestedEffort = options.reasoning;
+ 		const effort =
+@@ -1583,10 +1583,6 @@ function buildParams(
+ 		params.system = systemBlocks;
+ 	}
+ 	disableThinkingIfToolChoiceForced(params);
+-	if (model.provider === "github-copilot") {
+-		delete params.thinking;
+-		delete params.output_config;
+-	}
+ 	ensureMaxTokensForThinking(params, model);
+ 	applyPromptCaching(params, cacheControl);
+ 	enforceCacheControlLimit(params, 4);
+diff --git a/packages/ai/src/providers/openai-responses.ts b/packages/ai/src/providers/openai-responses.ts
+index 5c4111ebf..4a9efa9f7 100644
+--- a/packages/ai/src/providers/openai-responses.ts
++++ b/packages/ai/src/providers/openai-responses.ts
+@@ -404,7 +404,7 @@ function buildParams(
+ 		}
+ 	}
+ 
+-	if (model.reasoning && model.provider !== "github-copilot") {
++	if (model.reasoning) {
+ 		// Always request encrypted reasoning content so reasoning items can be
+ 		// replayed in multi-turn conversations when store is false (items aren't
+ 		// persisted server-side, so we must include the full content).
+diff --git a/packages/ai/test/github-copilot-anthropic-auth.test.ts b/packages/ai/test/github-copilot-anthropic-auth.test.ts
+index a04e980da..841462eee 100644
+--- a/packages/ai/test/github-copilot-anthropic-auth.test.ts
++++ b/packages/ai/test/github-copilot-anthropic-auth.test.ts
+@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
+ import { buildAnthropicClientOptions, streamAnthropic } from "../src/providers/anthropic";
+ import type { Context, Model } from "../src/types";
+ import { buildAnthropicUrl } from "../src/utils/anthropic-auth";
++import { OPENCODE_HEADERS } from "../src/utils/oauth/github-copilot";
+ 
+ const originalFetch = global.fetch;
+ 
+@@ -10,10 +11,6 @@ afterEach(() => {
+ 	vi.restoreAllMocks();
+ });
+ 
+-const COPILOT_HEADERS = {
+-	"User-Agent": "opencode/1.3.15",
+-};
+-
+ function makeCopilotClaudeModel(): Model<"anthropic-messages"> {
+ 	return {
+ 		id: "claude-sonnet-4",
+@@ -21,7 +18,7 @@ function makeCopilotClaudeModel(): Model<"anthropic-messages"> {
+ 		api: "anthropic-messages",
+ 		provider: "github-copilot",
+ 		baseUrl: "https://api.githubcopilot.com",
+-		headers: { ...COPILOT_HEADERS },
++		headers: { ...OPENCODE_HEADERS },
+ 		reasoning: true,
+ 		input: ["text", "image"],
+ 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+diff --git a/packages/ai/test/github-copilot-reasoning.test.ts b/packages/ai/test/github-copilot-reasoning.test.ts
+new file mode 100644
+index 000000000..32a88c006
+--- /dev/null
++++ b/packages/ai/test/github-copilot-reasoning.test.ts
+@@ -0,0 +1,64 @@
++import { describe, expect, it } from "bun:test";
++import { Effort } from "../src/model-thinking";
++import { getBundledModel } from "../src/models";
++import { streamAnthropic } from "../src/providers/anthropic";
++import { streamOpenAIResponses } from "../src/providers/openai-responses";
++import type { Context, Model } from "../src/types";
++
++const testContext: Context = {
++	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
++};
++
++function createAbortedSignal(): AbortSignal {
++	const controller = new AbortController();
++	controller.abort();
++	return controller.signal;
++}
++
++function captureResponsesPayload(model: Model<"openai-responses">): Promise<unknown> {
++	const { promise, resolve } = Promise.withResolvers<unknown>();
++	streamOpenAIResponses(model, testContext, {
++		apiKey: "ghu_test_copilot_token",
++		reasoning: Effort.High,
++		signal: createAbortedSignal(),
++		onPayload: payload => resolve(payload),
++	});
++	return promise;
++}
++
++function captureAnthropicPayload(model: Model<"anthropic-messages">): Promise<unknown> {
++	const { promise, resolve } = Promise.withResolvers<unknown>();
++	streamAnthropic(model, testContext, {
++		apiKey: "ghu_test_copilot_token",
++		isOAuth: false,
++		reasoning: Effort.High,
++		thinkingEnabled: true,
++		signal: createAbortedSignal(),
++		onPayload: payload => resolve(payload),
++	});
++	return promise;
++}
++
++describe("GitHub Copilot reasoning request construction", () => {
++	it("keeps reasoning controls for GPT-5.4 responses requests", async () => {
++		const model = getBundledModel("github-copilot", "gpt-5.4") as Model<"openai-responses">;
++		const payload = (await captureResponsesPayload(model)) as {
++			include?: string[];
++			reasoning?: { effort?: string; summary?: string };
++		};
++
++		expect(payload.include).toContain("reasoning.encrypted_content");
++		expect(payload.reasoning).toEqual({ effort: "high", summary: "auto" });
++	});
++
++	it("keeps thinking controls for Claude Opus 4.6 anthropic requests", async () => {
++		const model = getBundledModel("github-copilot", "claude-opus-4.6") as Model<"anthropic-messages">;
++		const payload = (await captureAnthropicPayload(model)) as {
++			thinking?: { type?: string };
++			output_config?: { effort?: string };
++		};
++
++		expect(payload.thinking).toEqual({ type: "adaptive" });
++		expect(payload.output_config).toEqual({ effort: "high" });
++	});
++});

@@ -1,0 +1,278 @@
+diff --git a/packages/agent/CHANGELOG.md b/packages/agent/CHANGELOG.md
+index 35a4e933a..1b2e5b6c8 100644
+--- a/packages/agent/CHANGELOG.md
++++ b/packages/agent/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## [Unreleased]
+ 
++### Added
++
++- Added an `onResponse` stream option for observing provider response metadata after response headers arrive.
++
+ ## [14.2.0] - 2026-04-23
+ 
+ ### Changed
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index 17c18ec4e..5fbdd5ba0 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -131,6 +131,10 @@ export interface AgentOptions {
+ 	 * Inspect or replace provider payloads before they are sent.
+ 	 */
+ 	onPayload?: SimpleStreamOptions["onPayload"];
++	/**
++	 * Inspect provider response metadata after headers arrive and before streaming body consumption.
++	 */
++	onResponse?: SimpleStreamOptions["onResponse"];
+ 	/**
+ 	 * Inspect assistant streaming events before they are emitted to subscribers.
+ 	 * Use this when abort decisions must happen before buffered events continue flowing.
+@@ -244,6 +248,7 @@ export class Agent {
+ 	#intentTracing: boolean;
+ 	#getToolChoice?: () => ToolChoice | undefined;
+ 	#onPayload?: SimpleStreamOptions["onPayload"];
++	#onResponse?: SimpleStreamOptions["onResponse"];
+ 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+ 
+ 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
+@@ -273,6 +278,7 @@ export class Agent {
+ 		this.#maxRetryDelayMs = opts.maxRetryDelayMs;
+ 		this.getApiKey = opts.getApiKey;
+ 		this.#onPayload = opts.onPayload;
++		this.#onResponse = opts.onResponse;
+ 		this.#getToolContext = opts.getToolContext;
+ 		this.#cursorExecHandlers = opts.cursorExecHandlers;
+ 		this.#cursorOnToolResult = opts.cursorOnToolResult;
+@@ -762,6 +768,7 @@ export class Agent {
+ 			convertToLlm: this.#convertToLlm,
+ 			transformContext: this.#transformContext,
+ 			onPayload: this.#onPayload,
++			onResponse: this.#onResponse,
+ 			getApiKey: this.getApiKey,
+ 			getToolContext: this.#getToolContext,
+ 			syncContextBeforeModelCall: async context => {
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 95b95b828..e968e7c39 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,7 @@
+ 
+ ## [Unreleased]
+ 
++<<<<<<< HEAD
+ ## [14.5.9] - 2026-04-30
+ ### Added
+ 
+@@ -23,6 +24,13 @@
+ 
+ - Fixed OpenAI Codex GPT model pricing by inheriting matching OpenAI catalog rates for zero-priced discovered Codex entries.
+ 
++||||||| parent of 57b1918ba (feat(ai): expose provider response metadata)
++=======
++### Added
++
++- Added provider response metadata callbacks for Anthropic and OpenAI streaming requests.
++
++>>>>>>> 57b1918ba (feat(ai): expose provider response metadata)
+ ## [14.5.3] - 2026-04-27
+ ### Added
+ 
+diff --git a/packages/ai/src/providers/anthropic.ts b/packages/ai/src/providers/anthropic.ts
+index b07981952..dc4c7806e 100644
+--- a/packages/ai/src/providers/anthropic.ts
++++ b/packages/ai/src/providers/anthropic.ts
+@@ -40,6 +40,7 @@ import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotError } fr
+ import { createWatchdog, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+ import { parseStreamingJson } from "../utils/json-parse";
+ import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
++import { notifyProviderResponse } from "../utils/provider-response";
+ import { extractHttpStatusFromError, isCopilotRetryableError } from "../utils/retry";
+ import { COMBINATOR_KEYS, NO_STRICT } from "../utils/schema";
+ import {
+@@ -841,7 +842,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
+ 				let streamedReplayUnsafeContent = false;
+ 
+ 				try {
+-					const { data: anthropicStream } = await anthropicRequest.withResponse();
++					const { data: anthropicStream, response, request_id } = await anthropicRequest.withResponse();
++					await notifyProviderResponse(options, response, model, request_id);
+ 					const firstEventWatchdog = createWatchdog(firstEventTimeoutMs, () =>
+ 						activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
+ 					);
+diff --git a/packages/ai/src/providers/openai-completions.ts b/packages/ai/src/providers/openai-completions.ts
+index d58928199..06eab3911 100644
+--- a/packages/ai/src/providers/openai-completions.ts
++++ b/packages/ai/src/providers/openai-completions.ts
+@@ -48,6 +48,7 @@ import {
+ import { parseStreamingJson } from "../utils/json-parse";
+ import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
+ import { getKimiCommonHeaders } from "../utils/oauth/kimi";
++import { notifyProviderResponse } from "../utils/provider-response";
+ import { callWithCopilotModelRetry, extractHttpStatusFromError } from "../utils/retry";
+ import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
+ import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
+@@ -340,7 +341,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
+ 					headers: requestHeaders,
+ 					body: params,
+ 				};
+-				return client.chat.completions.create(params, { signal: requestSignal });
++				const { data, response, request_id } = await client.chat.completions
++					.create(params, { signal: requestSignal })
++					.withResponse();
++				await notifyProviderResponse(options, response, model, request_id);
++				return data;
+ 			};
+ 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
+ 			try {
+diff --git a/packages/ai/src/providers/openai-responses.ts b/packages/ai/src/providers/openai-responses.ts
+index 84444b716..644cb2c9f 100644
+--- a/packages/ai/src/providers/openai-responses.ts
++++ b/packages/ai/src/providers/openai-responses.ts
+@@ -38,6 +38,7 @@ import {
+ 	iterateWithIdleTimeout,
+ } from "../utils/idle-iterator";
+ import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
++import { notifyProviderResponse } from "../utils/provider-response";
+ import { callWithCopilotModelRetry } from "../utils/retry";
+ import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
+ import { mapToOpenAIResponsesToolChoice, type OpenAIResponsesToolChoice } from "../utils/tool-choice";
+@@ -196,7 +197,13 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
+ 				body: params,
+ 			};
+ 			const openaiStream = await callWithCopilotModelRetry(
+-				() => client.responses.create(params, { signal: requestSignal }),
++				async () => {
++					const { data, response, request_id } = await client.responses
++						.create(params, { signal: requestSignal })
++						.withResponse();
++					await notifyProviderResponse(options, response, model, request_id);
++					return data;
++				},
+ 				{ provider: model.provider, signal: requestSignal },
+ 			);
+ 			const firstEventWatchdog = createWatchdog(
+diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
+index 1e65a8d5f..8757f7101 100644
+--- a/packages/ai/src/types.ts
++++ b/packages/ai/src/types.ts
+@@ -171,6 +171,13 @@ export interface ProviderSessionState {
+ 	close(): void;
+ }
+ 
++export interface ProviderResponseMetadata {
++	status: number;
++	headers: Record<string, string>;
++	requestId?: string | null;
++	metadata?: Record<string, unknown>;
++}
++
+ export interface StreamOptions {
+ 	temperature?: number;
+ 	topP?: number;
+@@ -221,6 +228,10 @@ export interface StreamOptions {
+ 	 * Return undefined to keep the payload unchanged.
+ 	 */
+ 	onPayload?: (payload: unknown, model?: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
++	/**
++	 * Optional callback for provider response metadata after headers are received.
++	 */
++	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>) => void | Promise<void>;
+ 	/**
+ 	 * Optional override for the first streamed event watchdog in milliseconds.
+ 	 * Set to 0 to disable the first-event watchdog for this request.
+diff --git a/packages/ai/src/utils/provider-response.ts b/packages/ai/src/utils/provider-response.ts
+new file mode 100644
+index 000000000..a03412d79
+--- /dev/null
++++ b/packages/ai/src/utils/provider-response.ts
+@@ -0,0 +1,30 @@
++import type { Api, Model, ProviderResponseMetadata, StreamOptions } from "../types";
++
++export function normalizeProviderResponse(
++	response: Response,
++	requestId?: string | null,
++	metadata?: Record<string, unknown>,
++): ProviderResponseMetadata {
++	const headers: Record<string, string> = {};
++	response.headers.forEach((value, key) => {
++		headers[key.toLowerCase()] = value;
++	});
++	const providerResponse: ProviderResponseMetadata = {
++		status: response.status,
++		headers,
++	};
++	if (requestId !== undefined) providerResponse.requestId = requestId;
++	if (metadata !== undefined) providerResponse.metadata = metadata;
++	return providerResponse;
++}
++
++export async function notifyProviderResponse(
++	options: Pick<StreamOptions, "onResponse"> | undefined,
++	response: Response,
++	model?: Model<Api>,
++	requestId?: string | null,
++	metadata?: Record<string, unknown>,
++): Promise<void> {
++	if (!options?.onResponse) return;
++	await options.onResponse(normalizeProviderResponse(response, requestId, metadata), model);
++}
+diff --git a/packages/ai/test/provider-response.test.ts b/packages/ai/test/provider-response.test.ts
+new file mode 100644
+index 000000000..1a7190254
+--- /dev/null
++++ b/packages/ai/test/provider-response.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from "bun:test";
++import type { Model, ProviderResponseMetadata } from "../src/types";
++import { normalizeProviderResponse, notifyProviderResponse } from "../src/utils/provider-response";
++
++describe("provider response metadata", () => {
++	it("normalizes response status, headers, and request id", () => {
++		const response = new Response(null, {
++			status: 202,
++			headers: {
++				"X-Request-ID": "req_123",
++				"X-RateLimit-Remaining": "42",
++			},
++		});
++
++		expect(normalizeProviderResponse(response, "req_123")).toEqual({
++			status: 202,
++			headers: {
++				"x-request-id": "req_123",
++				"x-ratelimit-remaining": "42",
++			},
++			requestId: "req_123",
++		});
++	});
++
++	it("invokes the response callback with normalized metadata", async () => {
++		const seen: Array<{ response: ProviderResponseMetadata; model: Model | undefined }> = [];
++		const model = { provider: "openai", api: "openai-responses", id: "gpt-test" } as Model;
++
++		await notifyProviderResponse(
++			{
++				onResponse: (response, responseModel) => {
++					seen.push({ response, model: responseModel });
++				},
++			},
++			new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } }),
++			model,
++			null,
++			{ attempt: 1 },
++		);
++
++		expect(seen).toEqual([
++			{
++				response: {
++					status: 204,
++					headers: { "cache-control": "no-store" },
++					requestId: null,
++					metadata: { attempt: 1 },
++				},
++				model,
++			},
++		]);
++	});
++});

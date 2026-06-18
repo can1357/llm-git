@@ -1,0 +1,4267 @@
+diff --git a/packages/ai/src/providers/openai-codex-responses.ts b/packages/ai/src/providers/openai-codex-responses.ts
+index 04b5e21ce..9cec8f4a8 100644
+--- a/packages/ai/src/providers/openai-codex-responses.ts
++++ b/packages/ai/src/providers/openai-codex-responses.ts
+@@ -32,6 +32,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
+ import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+ import { parseStreamingJson } from "../utils/json-parse";
+ import { sanitizeSurrogates } from "../utils/sanitize-unicode";
++import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
+ import {
+ 	CODEX_BASE_URL,
+ 	JWT_CLAIM_PATH,
+@@ -1681,16 +1682,26 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
+ 	return messages;
+ }
+ 
+-function convertTools(
+-	tools: Tool[],
+-): Array<{ type: "function"; name: string; description: string; parameters: Record<string, unknown>; strict: null }> {
+-	return tools.map(tool => ({
+-		type: "function",
+-		name: tool.name,
+-		description: tool.description,
+-		parameters: tool.parameters as unknown as Record<string, unknown>,
+-		strict: null,
+-	}));
++function convertTools(tools: Tool[]): Array<{
++	type: "function";
++	name: string;
++	description: string;
++	parameters: Record<string, unknown>;
++	strict?: boolean;
++}> {
++	return tools.map(tool => {
++		const strict = !NO_STRICT && tool.strict;
++		return {
++			type: "function",
++			name: tool.name,
++			description: tool.description,
++			parameters: strict
++				? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
++				: (tool.parameters as unknown as Record<string, unknown>),
++			// Only include strict if provider supports it. Some reject unknown fields.
++			...(strict && { strict: true }),
++		};
++	});
+ }
+ 
+ function mapStopReason(status: string | undefined): StopReason {
+diff --git a/packages/ai/src/providers/openai-completions.ts b/packages/ai/src/providers/openai-completions.ts
+index cedec7489..98da53b30 100644
+--- a/packages/ai/src/providers/openai-completions.ts
++++ b/packages/ai/src/providers/openai-completions.ts
+@@ -33,6 +33,7 @@ import { parseStreamingJson } from "../utils/json-parse";
+ import { getKimiCommonHeaders } from "../utils/oauth/kimi";
+ import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+ import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
++import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
+ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
+ import { transformMessages } from "./transform-messages";
+ 
+@@ -888,16 +889,21 @@ export function convertMessages(
+ }
+ 
+ function convertTools(tools: Tool[], compat: ResolvedOpenAICompat): OpenAI.Chat.Completions.ChatCompletionTool[] {
+-	return tools.map(tool => ({
+-		type: "function",
+-		function: {
+-			name: tool.name,
+-			description: tool.description,
+-			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
+-			// Only include strict if provider supports it. Some reject unknown fields.
+-			...(compat.supportsStrictMode !== false && { strict: false }),
+-		},
+-	}));
++	return tools.map(tool => {
++		const strict = !NO_STRICT && compat.supportsStrictMode !== false && tool.strict;
++		return {
++			type: "function",
++			function: {
++				name: tool.name,
++				description: tool.description,
++				parameters: strict
++					? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
++					: (tool.parameters as unknown as Record<string, unknown>),
++				// Only include strict if provider supports it. Some reject unknown fields.
++				...(strict && { strict: true }),
++			},
++		};
++	});
+ }
+ 
+ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"]): StopReason {
+@@ -919,6 +925,21 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"]): Sto
+ 	}
+ }
+ 
++function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
++	if (provider === "openai" || provider === "cerebras" || provider === "together") return true;
++
++	const normalizedBaseUrl = baseUrl.toLowerCase();
++	return (
++		normalizedBaseUrl.includes("api.openai.com") ||
++		normalizedBaseUrl.includes(".openai.azure.com") ||
++		normalizedBaseUrl.includes("models.inference.ai.azure.com") ||
++		normalizedBaseUrl.includes("api.cerebras.ai") ||
++		normalizedBaseUrl.includes("api.together.xyz") ||
++		normalizedBaseUrl.includes("api.deepseek.com") ||
++		normalizedBaseUrl.includes("deepseek.com")
++	);
++}
++
+ /**
+  * Detect compatibility settings from provider and baseUrl for known providers.
+  * Provider takes precedence over URL-based detection since it's explicitly configured.
+@@ -967,7 +988,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAICompat
+ 		requiresAssistantContentForToolCalls: isOpenRouterKimi,
+ 		openRouterRouting: undefined,
+ 		vercelGatewayRouting: undefined,
+-		supportsStrictMode: true,
++		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
+ 	};
+ }
+ 
+diff --git a/packages/ai/src/providers/openai-responses.ts b/packages/ai/src/providers/openai-responses.ts
+index 2e2f1c3ce..872edf97e 100644
+--- a/packages/ai/src/providers/openai-responses.ts
++++ b/packages/ai/src/providers/openai-responses.ts
+@@ -34,6 +34,7 @@ import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-ins
+ import { parseStreamingJson } from "../utils/json-parse";
+ import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+ import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
++import { enforceStrictSchema, NO_STRICT } from "../utils/typebox-helpers";
+ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
+ import { transformMessages } from "./transform-messages";
+ 
+@@ -428,7 +429,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
+ 	}
+ 
+ 	if (context.tools) {
+-		params.tools = convertTools(context.tools);
++		params.tools = convertTools(context.tools, supportsStrictMode(model));
+ 		if (options?.toolChoice) {
+ 			params.tool_choice = mapToOpenAIResponsesToolChoice(options.toolChoice);
+ 		}
+@@ -469,6 +470,17 @@ function isAzureOpenAIBaseUrl(baseUrl: string): boolean {
+ 	return baseUrl.includes(".openai.azure.com") || baseUrl.includes("azure.com/openai");
+ }
+ 
++function supportsStrictMode(model: Model<"openai-responses">): boolean {
++	if (model.provider === "openai" || model.provider === "azure") return true;
++
++	const baseUrl = model.baseUrl.toLowerCase();
++	return (
++		baseUrl.includes("api.openai.com") ||
++		baseUrl.includes(".openai.azure.com") ||
++		baseUrl.includes("models.inference.ai.azure.com")
++	);
++}
++
+ function convertMessages(
+ 	model: Model<"openai-responses">,
+ 	context: Context,
+@@ -656,14 +668,20 @@ function convertMessages(
+ 	return messages;
+ }
+ 
+-function convertTools(tools: Tool[]): OpenAITool[] {
+-	return tools.map(tool => ({
+-		type: "function",
+-		name: tool.name,
+-		description: tool.description,
+-		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
+-		strict: false,
+-	}));
++function convertTools(tools: Tool[], strictMode: boolean): OpenAITool[] {
++	return tools.map(tool => {
++		const strict = !NO_STRICT && strictMode && tool.strict;
++		const parameters = strict
++			? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
++			: (tool.parameters as unknown as Record<string, unknown>);
++		return {
++			type: "function",
++			name: tool.name,
++			description: tool.description,
++			parameters,
++			...(strict && { strict: true }),
++		} as OpenAITool;
++	});
+ }
+ 
+ function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {
+diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
+index 94c58a9e2..eb960a6f8 100644
+--- a/packages/ai/src/types.ts
++++ b/packages/ai/src/types.ts
+@@ -320,6 +320,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
+ 	name: string;
+ 	description: string;
+ 	parameters: TParameters;
++	/** If true, tool is strictly typed and validated against the parameters schema before execution */
++	strict?: boolean;
+ }
+ 
+ export interface Context {
+@@ -380,7 +382,7 @@ export interface OpenAICompat {
+ 	openRouterRouting?: OpenRouterRouting;
+ 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
+ 	vercelGatewayRouting?: VercelGatewayRouting;
+-	/** Whether the provider supports the `strict` field in tool definitions. Default: true. */
++	/** Whether the provider supports the `strict` field in tool definitions. Default: auto-detected per provider/baseUrl (conservative for unknown providers). */
+ 	supportsStrictMode?: boolean;
+ }
+ 
+diff --git a/packages/ai/src/utils/typebox-helpers.ts b/packages/ai/src/utils/typebox-helpers.ts
+index 1f0fddfda..6d485cc9e 100644
+--- a/packages/ai/src/utils/typebox-helpers.ts
++++ b/packages/ai/src/utils/typebox-helpers.ts
+@@ -17,8 +17,50 @@ export function StringEnum<const T extends readonly string[]>(
+ ): TUnsafe<T[number]> {
+ 	return Type.Unsafe<T[number]>({
+ 		type: "string",
+-		enum: values as any,
++		enum: values as unknown as string[],
+ 		...(options?.description && { description: options.description }),
+ 		...(options?.default && { default: options.default }),
+ 	});
+ }
++
++export const NO_STRICT = Bun.env.PI_NO_STRICT === "1";
++
++/**
++ * Recursively enforces JSON Schema constraints required by OpenAI/Codex strict mode:
++ *   - `additionalProperties: false` on every object node
++ *   - every key in `properties` present in `required`
++ *
++ * Properties absent from the original `required` array were TypeBox-optional.
++ * They are made nullable (`anyOf: [T, { type: "null" }]`) so the model can
++ * signal omission by outputting null rather than omitting the key entirely.
++ */
++export function enforceStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
++	const result = { ...schema };
++	if (result.type === "object") {
++		result.additionalProperties = false;
++		if (result.properties != null && typeof result.properties === "object") {
++			const props = result.properties as Record<string, Record<string, unknown>>;
++			const required = new Set(Array.isArray(result.required) ? (result.required as string[]) : []);
++			result.properties = Object.fromEntries(
++				Object.entries(props).map(([k, v]) => {
++					const processed = enforceStrictSchema(v);
++					// Optional property — wrap as nullable so strict mode accepts it
++					if (!required.has(k)) {
++						return [k, { anyOf: [processed, { type: "null" }] }];
++					}
++					return [k, processed];
++				}),
++			);
++			result.required = Object.keys(props);
++		}
++	}
++	if (result.items != null && typeof result.items === "object" && !Array.isArray(result.items)) {
++		result.items = enforceStrictSchema(result.items as Record<string, unknown>);
++	}
++	for (const key of ["anyOf", "allOf", "oneOf"] as const) {
++		if (Array.isArray(result[key])) {
++			result[key] = (result[key] as Record<string, unknown>[]).map(enforceStrictSchema);
++		}
++	}
++	return result;
++}
+diff --git a/packages/ai/src/utils/validation.ts b/packages/ai/src/utils/validation.ts
+index 3458575b0..f6a65714b 100644
+--- a/packages/ai/src/utils/validation.ts
++++ b/packages/ai/src/utils/validation.ts
+@@ -228,6 +228,116 @@ function cloneJsonValue<T>(value: T): T {
+ 	return JSON.parse(JSON.stringify(value)) as T;
+ }
+ 
++function normalizeOptionalNullsForSchema(schema: unknown, value: unknown): { value: unknown; changed: boolean } {
++	if (value === null || value === undefined) return { value, changed: false };
++	if (schema === null || typeof schema !== "object") return { value, changed: false };
++
++	const schemaObject = schema as Record<string, unknown>;
++
++	const normalizeAnyOfLike = (keyword: "anyOf" | "oneOf"): { value: unknown; changed: boolean } => {
++		const branches = schemaObject[keyword];
++		if (!Array.isArray(branches)) return { value, changed: false };
++
++		let changedCandidate: { value: unknown; changed: true } | null = null;
++
++		for (const branch of branches) {
++			const normalized = normalizeOptionalNullsForSchema(branch, value);
++			if (!normalized.changed) continue;
++
++			try {
++				const validateBranch = ajv.compile(branch);
++				if (validateBranch(normalized.value)) {
++					return normalized;
++				}
++			} catch {
++				// Ignore branch-level compilation/validation errors and keep scanning.
++			}
++
++			if (!changedCandidate) {
++				changedCandidate = { value: normalized.value, changed: true };
++			}
++		}
++
++		return changedCandidate ?? { value, changed: false };
++	};
++
++	const anyOfNormalization = normalizeAnyOfLike("anyOf");
++	if (anyOfNormalization.changed) return anyOfNormalization;
++
++	const oneOfNormalization = normalizeAnyOfLike("oneOf");
++	if (oneOfNormalization.changed) return oneOfNormalization;
++
++	if (Array.isArray(schemaObject.allOf)) {
++		let changed = false;
++		let nextValue: unknown = value;
++		for (const branch of schemaObject.allOf) {
++			const normalized = normalizeOptionalNullsForSchema(branch, nextValue);
++			if (!normalized.changed) continue;
++			nextValue = normalized.value;
++			changed = true;
++		}
++		if (changed) return { value: nextValue, changed: true };
++	}
++
++	if (Array.isArray(value)) {
++		const itemSchema = schemaObject.items;
++		if (itemSchema === null || typeof itemSchema !== "object" || Array.isArray(itemSchema)) {
++			return { value, changed: false };
++		}
++
++		let changed = false;
++		let nextValue = value;
++		for (let i = 0; i < value.length; i += 1) {
++			const normalized = normalizeOptionalNullsForSchema(itemSchema, value[i]);
++			if (!normalized.changed) continue;
++			if (!changed) {
++				nextValue = [...value];
++				changed = true;
++			}
++			nextValue[i] = normalized.value;
++		}
++		return { value: changed ? nextValue : value, changed };
++	}
++
++	if (schemaObject.type !== "object") return { value, changed: false };
++	if (typeof value !== "object" || value === null) return { value, changed: false };
++	if (Array.isArray(value)) return { value, changed: false };
++	if (schemaObject.properties === null || typeof schemaObject.properties !== "object") {
++		return { value, changed: false };
++	}
++
++	const properties = schemaObject.properties as Record<string, unknown>;
++	const required = new Set(Array.isArray(schemaObject.required) ? (schemaObject.required as string[]) : []);
++
++	let changed = false;
++	let nextValue = value as Record<string, unknown>;
++
++	for (const [key, propertySchema] of Object.entries(properties)) {
++		if (!(key in nextValue)) continue;
++		const currentValue = nextValue[key];
++
++		if (currentValue === null && !required.has(key)) {
++			if (!changed) {
++				nextValue = { ...nextValue };
++				changed = true;
++			}
++			delete nextValue[key];
++			continue;
++		}
++
++		const normalized = normalizeOptionalNullsForSchema(propertySchema, currentValue);
++		if (!normalized.changed) continue;
++
++		if (!changed) {
++			nextValue = { ...nextValue };
++			changed = true;
++		}
++		nextValue[key] = normalized.value;
++	}
++
++	return { value: changed ? nextValue : value, changed };
++}
++
+ /**
+  * Attempts to fix type errors by parsing JSON-encoded strings.
+  *
+@@ -323,6 +433,15 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+ 	let normalizedArgs: unknown = originalArgs;
+ 	let changed = false;
+ 
++	const optionalNullNormalization = normalizeOptionalNullsForSchema(tool.parameters, normalizedArgs);
++	if (optionalNullNormalization.changed) {
++		normalizedArgs = optionalNullNormalization.value;
++		changed = true;
++		if (validate(normalizedArgs)) {
++			return normalizedArgs;
++		}
++	}
++
+ 	for (let pass = 0; pass < MAX_TYPE_COERCION_PASSES; pass += 1) {
+ 		const coercion = coerceArgsFromErrors(normalizedArgs, validate.errors);
+ 		if (!coercion.changed) break;
+@@ -330,6 +449,11 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+ 		normalizedArgs = coercion.value;
+ 		changed = true;
+ 
++		const nullNormalization = normalizeOptionalNullsForSchema(tool.parameters, normalizedArgs);
++		if (nullNormalization.changed) {
++			normalizedArgs = nullNormalization.value;
++		}
++
+ 		if (validate(normalizedArgs)) {
+ 			return normalizedArgs;
+ 		}
+diff --git a/packages/ai/test/openai-tool-strict-mode.test.ts b/packages/ai/test/openai-tool-strict-mode.test.ts
+new file mode 100644
+index 000000000..092619de9
+--- /dev/null
++++ b/packages/ai/test/openai-tool-strict-mode.test.ts
+@@ -0,0 +1,107 @@
++import { afterEach, describe, expect, it, vi } from "bun:test";
++import { getBundledModel } from "@oh-my-pi/pi-ai/models";
++import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
++import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
++import type { Context, Model, OpenAICompat, Tool } from "@oh-my-pi/pi-ai/types";
++import { Type } from "@sinclair/typebox";
++
++const originalFetch = global.fetch;
++
++afterEach(() => {
++	global.fetch = originalFetch;
++	vi.restoreAllMocks();
++});
++
++const testTool: Tool = {
++	name: "echo",
++	description: "Echo input",
++	parameters: Type.Object({
++		text: Type.String(),
++	}),
++};
++
++const testContext: Context = {
++	messages: [
++		{
++			role: "user",
++			content: "say hi",
++			timestamp: Date.now(),
++		},
++	],
++	tools: [testTool],
++};
++
++function createAbortedSignal(): AbortSignal {
++	const controller = new AbortController();
++	controller.abort();
++	return controller.signal;
++}
++
++function captureCompletionsPayload(model: Model<"openai-completions">): Promise<unknown> {
++	const { promise, resolve } = Promise.withResolvers<unknown>();
++	streamOpenAICompletions(model, testContext, {
++		apiKey: "test-key",
++		signal: createAbortedSignal(),
++		onPayload: payload => resolve(payload),
++	});
++	return promise;
++}
++
++function captureResponsesPayload(model: Model<"openai-responses">): Promise<unknown> {
++	const { promise, resolve } = Promise.withResolvers<unknown>();
++	streamOpenAIResponses(model, testContext, {
++		apiKey: "test-key",
++		signal: createAbortedSignal(),
++		onPayload: payload => resolve(payload),
++	});
++	return promise;
++}
++
++describe("OpenAI tool strict mode", () => {
++	it("sends strict=true for openai-completions tool schemas", async () => {
++		const model: Model<"openai-completions"> = {
++			...getBundledModel("openai", "gpt-4o-mini"),
++			api: "openai-completions",
++		};
++
++		const payload = (await captureCompletionsPayload(model)) as {
++			tools?: Array<{ function?: { strict?: boolean } }>;
++		};
++		expect(payload.tools?.[0]?.function?.strict).toBe(true);
++	});
++
++	it("omits strict for openai-completions when compatibility disables strict mode", async () => {
++		const model: Model<"openai-completions"> = {
++			...getBundledModel("openai", "gpt-4o-mini"),
++			api: "openai-completions",
++			compat: { supportsStrictMode: false } satisfies OpenAICompat,
++		};
++
++		const payload = (await captureCompletionsPayload(model)) as {
++			tools?: Array<{ function?: { strict?: boolean } }>;
++		};
++		expect(payload.tools?.[0]?.function?.strict).toBeUndefined();
++	});
++
++	it("sends strict=true for openai-responses tool schemas on OpenAI", async () => {
++		const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
++
++		const payload = (await captureResponsesPayload(model)) as {
++			tools?: Array<{ strict?: boolean }>;
++		};
++		expect(payload.tools?.[0]?.strict).toBe(true);
++	});
++
++	it("omits strict for openai-responses on unknown compatibility providers", async () => {
++		const model = {
++			...(getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">),
++			provider: "github-copilot",
++			baseUrl: "https://api.individual.githubcopilot.com",
++		};
++
++		const payload = (await captureResponsesPayload(model)) as {
++			tools?: Array<{ strict?: boolean }>;
++		};
++		expect(payload.tools?.[0]?.strict).toBeUndefined();
++	});
++});
+diff --git a/packages/ai/test/tool-argument-coercion.test.ts b/packages/ai/test/tool-argument-coercion.test.ts
+index 1e55ff6f5..e375fd18a 100644
+--- a/packages/ai/test/tool-argument-coercion.test.ts
++++ b/packages/ai/test/tool-argument-coercion.test.ts
+@@ -96,6 +96,58 @@ describe("Tool argument coercion", () => {
+ 		expect(result.payload.items).toEqual([4, 5]);
+ 	});
+ 
++	it("coerces JSON-stringified object arrays when schema expects array of objects", () => {
++		const tool: Tool = {
++			name: "t9",
++			description: "",
++			parameters: Type.Object({
++				a: Type.String(),
++				b: Type.Array(
++					Type.Object({
++						k: Type.String(),
++					}),
++				),
++			}),
++		};
++		const toolCall: ToolCall = {
++			type: "toolCall",
++			id: "call-9",
++			name: "t9",
++			arguments: {
++				a: "hello",
++				b: '[{"k":"y"}]',
++			},
++		};
++		const result = validateToolArguments(tool, toolCall);
++		expect(result.b).toEqual([{ k: "y" }]);
++	});
++
++	it("coerces JSON-stringified root arguments containing array-of-object fields", () => {
++		const tool: Tool = {
++			name: "t10",
++			description: "",
++			parameters: Type.Object({
++				a: Type.String(),
++				b: Type.Array(
++					Type.Object({
++						k: Type.String(),
++					}),
++				),
++			}),
++		};
++		const toolCall: ToolCall = {
++			type: "toolCall",
++			id: "call-10",
++			name: "t10",
++			arguments: '{"a":"hello","b":"[{\\"k\\":\\"y\\"}]"}' as unknown as Record<string, unknown>,
++		};
++		const result = validateToolArguments(tool, toolCall);
++		expect(result).toEqual({
++			a: "hello",
++			b: [{ k: "y" }],
++		});
++	});
++
+ 	it("iteratively coerces when both root arguments and nested fields are JSON strings", () => {
+ 		const tool: Tool = {
+ 			name: "t7",
+@@ -156,6 +208,107 @@ describe("Tool argument coercion", () => {
+ 		expect(result.edits).toEqual([{ target: "13#cf", new_content: "..." }]);
+ 	});
+ 
++	it("accepts null for optional properties by treating them as omitted", () => {
++		const tool: Tool = {
++			name: "t11",
++			description: "",
++			parameters: Type.Object({
++				requiredText: Type.String(),
++				optionalCount: Type.Optional(Type.Number()),
++			}),
++		};
++
++		const toolCall: ToolCall = {
++			type: "toolCall",
++			id: "call-11",
++			name: "t11",
++			arguments: { requiredText: "ok", optionalCount: null },
++		};
++
++		const result = validateToolArguments(tool, toolCall);
++		expect(result).toEqual({ requiredText: "ok" });
++	});
++
++	it("drops null optional properties nested in array objects", () => {
++		const tool: Tool = {
++			name: "t12",
++			description: "",
++			parameters: Type.Object({
++				edits: Type.Array(
++					Type.Object({
++						target: Type.String(),
++						pos: Type.Optional(Type.String()),
++						end: Type.Optional(Type.String()),
++					}),
++				),
++			}),
++		};
++
++		const toolCall: ToolCall = {
++			type: "toolCall",
++			id: "call-12",
++			name: "t12",
++			arguments: { edits: [{ target: "a", pos: null, end: "e" }] },
++		};
++
++		const result = validateToolArguments(tool, toolCall);
++		expect(result).toEqual({ edits: [{ target: "a", end: "e" }] });
++	});
++
++	it("drops null optional properties in anyOf object branches", () => {
++		const opSchema = Type.Union([
++			Type.Object({
++				op: Type.Literal("add_task"),
++				phase: Type.String(),
++				content: Type.String(),
++			}),
++			Type.Object({
++				op: Type.Literal("update"),
++				id: Type.String(),
++				status: Type.Optional(Type.String()),
++				content: Type.Optional(Type.String()),
++				notes: Type.Optional(Type.String()),
++			}),
++		]);
++
++		const tool: Tool = {
++			name: "t13",
++			description: "",
++			parameters: Type.Object({
++				ops: Type.Array(opSchema),
++			}),
++		};
++
++		const toolCall: ToolCall = {
++			type: "toolCall",
++			id: "call-13",
++			name: "t13",
++			arguments: {
++				ops: [
++					{
++						op: "update",
++						id: "task-1",
++						status: "completed",
++						content: null,
++						notes: "",
++					},
++				],
++			},
++		};
++
++		const result = validateToolArguments(tool, toolCall);
++		expect(result).toEqual({
++			ops: [
++				{
++					op: "update",
++					id: "task-1",
++					status: "completed",
++					notes: "",
++				},
++			],
++		});
++	});
++
+ 	it("does not parse quoted JSON strings when schema expects number", () => {
+ 		const tool: Tool = {
+ 			name: "t6",
+diff --git a/packages/ai/test/typebox-helpers.test.ts b/packages/ai/test/typebox-helpers.test.ts
+new file mode 100644
+index 000000000..1369af632
+--- /dev/null
++++ b/packages/ai/test/typebox-helpers.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, it } from "bun:test";
++import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/typebox-helpers";
++import { Type } from "@sinclair/typebox";
++
++describe("enforceStrictSchema", () => {
++	it("converts optional properties to nullable schemas and requires all object keys", () => {
++		const schema = Type.Object({
++			requiredText: Type.String(),
++			optionalCount: Type.Optional(Type.Number()),
++		});
++
++		const strict = enforceStrictSchema(schema as unknown as Record<string, unknown>);
++		const properties = strict.properties as Record<string, Record<string, unknown>>;
++
++		expect(strict.required).toEqual(["requiredText", "optionalCount"]);
++		expect((properties.requiredText.type as string) === "string").toBe(true);
++		const optionalVariants = (properties.optionalCount.anyOf as Array<{ type?: string }>).map(v => v.type);
++		expect(optionalVariants).toEqual(["number", "null"]);
++	});
++
++	it("never emits undefined as a schema type", () => {
++		const schema = Type.Object({
++			questions: Type.Array(
++				Type.Object({
++					id: Type.String(),
++					recommended: Type.Optional(Type.Number()),
++				}),
++			),
++		});
++
++		const strict = enforceStrictSchema(schema as unknown as Record<string, unknown>);
++		const serialized = JSON.stringify(strict);
++
++		expect(serialized.includes('"undefined"')).toBe(false);
++		expect(serialized.includes('"null"')).toBe(true);
++	});
++});
+diff --git a/packages/coding-agent/scripts/format-prompts.ts b/packages/coding-agent/scripts/format-prompts.ts
+index 50fc430d9..2fec77e41 100644
+--- a/packages/coding-agent/scripts/format-prompts.ts
++++ b/packages/coding-agent/scripts/format-prompts.ts
+@@ -62,6 +62,12 @@ function compactTableSep(line: string): string {
+ }
+ 
+ function formatPrompt(content: string): string {
++	// Replace common ascii ellipsis and arrow patterns with their unicode equivalents
++	content = content
++		.replace(/\.{3}/g, "…")
++		.replace(/->/g, "→")
++		.replace(/<-/g, "←")
++		.replace(/<->/g, "↔");
+ 	const lines = content.split("\n");
+ 	const result: string[] = [];
+ 	let inCodeBlock = false;
+diff --git a/packages/coding-agent/src/commit/prompts/analysis-system.md b/packages/coding-agent/src/commit/prompts/analysis-system.md
+index 85dc1b48f..83a9643b5 100644
+--- a/packages/coding-agent/src/commit/prompts/analysis-system.md
++++ b/packages/coding-agent/src/commit/prompts/analysis-system.md
+@@ -7,8 +7,8 @@ Classify git diff into conventional commit format.
+ ## 1. Determine Scope
+ 
+ Apply scope when 60%+ line changes target single component:
+-- 150 lines in src/api/, 30 in src/lib.rs -> "api"
+-- 50 lines in src/api/, 50 in src/types/ -> null (50/50 split)
++- 150 lines in src/api/, 30 in src/lib.rs → "api"
++- 50 lines in src/api/, 50 in src/types/ → null (50/50 split)
+ 
+ Use null for: cross-cutting changes, project-wide refactoring.
+ 
+@@ -32,7 +32,7 @@ Group 3+ similar changes: "Updated 5 test files for new API." (not five bullets)
+ 
+ Issue references inline: (#123), (#123, #456), (#123-#125).
+ 
+-Priority: user-visible -> perf/security -> architecture -> internal.
++Priority: user-visible → perf/security → architecture → internal.
+ 
+ Exclude: import changes, whitespace, formatting, trivial renames, debug prints, comment-only, file moves without modification.
+ 
+diff --git a/packages/coding-agent/src/commit/prompts/changelog-system.md b/packages/coding-agent/src/commit/prompts/changelog-system.md
+index 8991d0055..e0eab977b 100644
+--- a/packages/coding-agent/src/commit/prompts/changelog-system.md
++++ b/packages/coding-agent/src/commit/prompts/changelog-system.md
+@@ -30,9 +30,9 @@ Good:
+ - Changed default timeout from 30s to 60s for slow connections
+ 
+ Bad:
+-- **cli**: Added dry-run flag -> redundant scope prefix
+-- Added new feature. -> vague, trailing period
+-- Refactored parser internals -> not user-visible
++- **cli**: Added dry-run flag → redundant scope prefix
++- Added new feature. → vague, trailing period
++- Refactored parser internals → not user-visible
+ 
+ Breaking Changes:
+ - Removed legacy auth flow; users must re-authenticate with OAuth tokens
+diff --git a/packages/coding-agent/src/commit/prompts/summary-system.md b/packages/coding-agent/src/commit/prompts/summary-system.md
+index 3ac586c1f..458a59a2f 100644
+--- a/packages/coding-agent/src/commit/prompts/summary-system.md
++++ b/packages/coding-agent/src/commit/prompts/summary-system.md
+@@ -23,15 +23,15 @@ Output: ONLY description after "{{ commit_type }}{{ scope_prefix }}:"; max {{ ch
+ </verb-reference>
+ <examples>
+ feat | TLS encryption added to HTTP client for MITM prevention
+--> added TLS support to prevent man-in-the-middle attacks
++→ added TLS support to prevent man-in-the-middle attacks
+ refactor | Consolidated HTTP transport into unified builder pattern
+--> migrated HTTP transport to unified builder API
++→ migrated HTTP transport to unified builder API
+ fix | Race condition in connection pool causing exhaustion under load
+--> corrected race condition causing connection pool exhaustion
++→ corrected race condition causing connection pool exhaustion
+ perf | Batch processing optimized to reduce memory allocations
+--> eliminated allocation overhead in batch processing
++→ eliminated allocation overhead in batch processing
+ build | Updated serde to fix CVE-2024-1234
+--> upgraded serde to 1.0.200 for CVE-2024-1234
++→ upgraded serde to 1.0.200 for CVE-2024-1234
+ </examples>
+ <banned-words>
+ comprehensive, various, several, improved, enhanced, quickly, simply, basically, this change, this commit, now
+diff --git a/packages/coding-agent/src/extensibility/custom-tools/wrapper.ts b/packages/coding-agent/src/extensibility/custom-tools/wrapper.ts
+index 2e6e60efa..e3edeeb0f 100644
+--- a/packages/coding-agent/src/extensibility/custom-tools/wrapper.ts
++++ b/packages/coding-agent/src/extensibility/custom-tools/wrapper.ts
+@@ -14,6 +14,7 @@ export class CustomToolAdapter<TParams extends TSchema = TSchema, TDetails = any
+ 	declare label: string;
+ 	declare description: string;
+ 	declare parameters: TParams;
++	readonly strict = true;
+ 
+ 	constructor(
+ 		private tool: CustomTool<TParams, TDetails>,
+diff --git a/packages/coding-agent/src/extensibility/extensions/wrapper.ts b/packages/coding-agent/src/extensibility/extensions/wrapper.ts
+index 6d404453d..547b6a11a 100644
+--- a/packages/coding-agent/src/extensibility/extensions/wrapper.ts
++++ b/packages/coding-agent/src/extensibility/extensions/wrapper.ts
+@@ -17,6 +17,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 	declare description: string;
+ 	declare parameters: any;
+ 	declare label: string;
++	declare strict: boolean;
+ 
+ 	renderCall?: (args: any, options: any, theme: any) => any;
+ 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+@@ -83,6 +84,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
+ 	declare description: string;
+ 	declare parameters: TParameters;
+ 	declare label: string;
++	declare strict: boolean;
+ 
+ 	constructor(
+ 		private tool: AgentTool<TParameters, TDetails>,
+diff --git a/packages/coding-agent/src/extensibility/hooks/tool-wrapper.ts b/packages/coding-agent/src/extensibility/hooks/tool-wrapper.ts
+index ea7c7290b..58e5fd808 100644
+--- a/packages/coding-agent/src/extensibility/hooks/tool-wrapper.ts
++++ b/packages/coding-agent/src/extensibility/hooks/tool-wrapper.ts
+@@ -22,6 +22,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
+ 	declare description: string;
+ 	declare parameters: TParameters;
+ 	declare label: string;
++	declare strict: boolean;
+ 
+ 	constructor(
+ 		private tool: AgentTool<TParameters, TDetails>,
+diff --git a/packages/coding-agent/src/lsp/index.ts b/packages/coding-agent/src/lsp/index.ts
+index 9e03eeaff..deedddbd7 100644
+--- a/packages/coding-agent/src/lsp/index.ts
++++ b/packages/coding-agent/src/lsp/index.ts
+@@ -866,6 +866,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
+ 	readonly label = "LSP";
+ 	readonly description: string;
+ 	readonly parameters = lspSchema;
++	readonly strict = true;
+ 	readonly renderCall = renderCall;
+ 	readonly renderResult = renderResult;
+ 	readonly mergeCallAndResult = true;
+diff --git a/packages/coding-agent/src/patch/diff.ts b/packages/coding-agent/src/patch/diff.ts
+index 3370d0f2d..acd624512 100644
+--- a/packages/coding-agent/src/patch/diff.ts
++++ b/packages/coding-agent/src/patch/diff.ts
+@@ -414,11 +414,11 @@ export async function computeHashlineDiff(
+ 		const normalizedContent = normalizeToLF(content);
+ 
+ 		const result = applyHashlineEdits(normalizedContent, edits);
+-		if (normalizedContent === result.content) {
++		if (normalizedContent === result.text) {
+ 			return { error: `No changes would be made to ${path}. The edits produce identical content.` };
+ 		}
+ 
+-		return generateDiffString(normalizedContent, result.content);
++		return generateDiffString(normalizedContent, result.text);
+ 	} catch (err) {
+ 		return { error: err instanceof Error ? err.message : String(err) };
+ 	}
+diff --git a/packages/coding-agent/src/patch/hashline.ts b/packages/coding-agent/src/patch/hashline.ts
+index 10d95e5af..b9e87963f 100644
+--- a/packages/coding-agent/src/patch/hashline.ts
++++ b/packages/coding-agent/src/patch/hashline.ts
+@@ -1,26 +1,24 @@
+ /**
+- * Hashline edit mode — a line-addressable edit format using content hashes.
++ * Hashline edit mode — a line-addressable edit format using text hashes.
+  *
+  * Each line in a file is identified by its 1-indexed line number and a short
+- * hexadecimal hash derived from the normalized line content (xxHash32, truncated to 2
++ * hexadecimal hash derived from the normalized line text (xxHash32, truncated to 2
+  * hex chars).
+  * The combined `LINE#ID` reference acts as both an address and a staleness check:
+  * if the file has changed since the caller last read it, hash mismatches are caught
+  * before any mutation occurs.
+  *
+- * Displayed format: `LINENUM#HASH:CONTENT`
++ * Displayed format: `LINENUM#HASH:TEXT`
+  * Reference format: `"LINENUM#HASH"` (e.g. `"5#aa"`)
+  */
+ 
+ import type { HashMismatch } from "./types";
+ 
+-export type LineTag = { line: number; hash: string };
++export type Anchor = { line: number; hash: string };
+ export type HashlineEdit =
+-	| { op: "replace"; tag: LineTag; content: string[] }
+-	| { op: "replace"; first: LineTag; last: LineTag; content: string[] }
+-	| { op: "append"; after?: LineTag; content: string[] }
+-	| { op: "prepend"; before?: LineTag; content: string[] }
+-	| { op: "insert"; after: LineTag; before: LineTag; content: string[] };
++	| { op: "replace"; pos: Anchor; end?: Anchor; lines: string[] }
++	| { op: "append"; pos?: Anchor; lines: string[] }
++	| { op: "prepend"; pos?: Anchor; lines: string[] };
+ 
+ const NIBBLE_STR = "ZPMQVRWSNKTXJBYH";
+ 
+@@ -30,12 +28,14 @@ const DICT = Array.from({ length: 256 }, (_, i) => {
+ 	return `${NIBBLE_STR[h]}${NIBBLE_STR[l]}`;
+ });
+ 
++const RE_SIGNIFICANT = /[\p{L}\p{N}]/u;
++
+ /**
+  * Compute a short hexadecimal hash of a single line.
+  *
+- * Uses xxHash32 on a whitespace-normalized line, truncated to {@link HASH_LEN}
+- * hex characters. The `idx` parameter is accepted for compatibility with older
+- * call sites, but is not currently mixed into the hash.
++ * Uses xxHash32 on a whitespace-normalized line, truncated to 2 chars from
++ * {@link NIBBLE_STR}. For lines containing no alphanumeric characters (only
++ * punctuation/symbols/whitespace), the line number is mixed in to reduce hash collisions.
+  * The line input should not include a trailing newline.
+  */
+ export function computeLineHash(idx: number, line: string): string {
+@@ -43,23 +43,27 @@ export function computeLineHash(idx: number, line: string): string {
+ 		line = line.slice(0, -1);
+ 	}
+ 	line = line.replace(/\s+/g, "");
+-	void idx; // Might use line, but for now, let's not.
+-	return DICT[Bun.hash.xxHash32(line) & 0xff];
++
++	let seed = 0;
++	if (!RE_SIGNIFICANT.test(line)) {
++		seed = idx;
++	}
++	return DICT[Bun.hash.xxHash32(line, seed) & 0xff];
+ }
+ 
+ /**
+- * Formats a tag given the line number and content.
++ * Formats a tag given the line number and text.
+  */
+-export function formatLineTag(line: number, content: string): string {
+-	return `${line}#${computeLineHash(line, content)}`;
++export function formatLineTag(line: number, lines: string): string {
++	return `${line}#${computeLineHash(line, lines)}`;
+ }
+ 
+ /**
+- * Format file content with hashline prefixes for display.
++ * Format file text with hashline prefixes for display.
+  *
+- * Each line becomes `LINENUM#HASH:CONTENT` where LINENUM is 1-indexed.
++ * Each line becomes `LINENUM#HASH:TEXT` where LINENUM is 1-indexed.
+  *
+- * @param content - Raw file content string
++ * @param text - Raw file text string
+  * @param startLine - First line number (1-indexed, defaults to 1)
+  * @returns Formatted string with one hashline-prefixed line per input line
+  *
+@@ -69,8 +73,8 @@ export function formatLineTag(line: number, content: string): string {
+  * // "1#HH:function hi() {\n2#HH:  return;\n3#HH:}"
+  * ```
+  */
+-export function formatHashLines(content: string, startLine = 1): string {
+-	const lines = content.split("\n");
++export function formatHashLines(text: string, startLine = 1): string {
++	const lines = text.split("\n");
+ 	return lines
+ 		.map((line, i) => {
+ 			const num = startLine + i;
+@@ -375,14 +379,14 @@ export class HashlineMismatchError extends Error {
+ 			}
+ 			prevLine = lineNum;
+ 
+-			const content = fileLines[lineNum - 1];
+-			const hash = computeLineHash(lineNum, content);
++			const text = fileLines[lineNum - 1];
++			const hash = computeLineHash(lineNum, text);
+ 			const prefix = `${lineNum}#${hash}`;
+ 
+ 			if (mismatchSet.has(lineNum)) {
+-				lines.push(`>>> ${prefix}:${content}`);
++				lines.push(`>>> ${prefix}:${text}`);
+ 			} else {
+-				lines.push(`    ${prefix}:${content}`);
++				lines.push(`    ${prefix}:${text}`);
+ 			}
+ 		}
+ 		return lines.join("\n");
+@@ -415,7 +419,7 @@ export function validateLineRef(ref: { line: number; hash: string }, fileLines:
+  * Apply an array of hashline edits to file content.
+  *
+  * Each edit operation identifies target lines directly (`replace`,
+- * `insert`). Line references are resolved via {@link parseTag}
++ * `append`, `prepend`). Line references are resolved via {@link parseTag}
+  * and hashes validated before any mutation.
+  *
+  * Edits are sorted bottom-up (highest effective line first) so earlier
+@@ -424,22 +428,22 @@ export function validateLineRef(ref: { line: number; hash: string }, fileLines:
+  * @returns The modified content and the 1-indexed first changed line number
+  */
+ export function applyHashlineEdits(
+-	content: string,
++	text: string,
+ 	edits: HashlineEdit[],
+ ): {
+-	content: string;
++	lines: string;
+ 	firstChangedLine: number | undefined;
+ 	warnings?: string[];
+-	noopEdits?: Array<{ editIndex: number; loc: string; currentContent: string }>;
++	noopEdits?: Array<{ editIndex: number; loc: string; current: string }>;
+ } {
+ 	if (edits.length === 0) {
+-		return { content, firstChangedLine: undefined };
++		return { lines: text, firstChangedLine: undefined };
+ 	}
+ 
+-	const fileLines = content.split("\n");
++	const fileLines = text.split("\n");
+ 	const originalFileLines = [...fileLines];
+ 	let firstChangedLine: number | undefined;
+-	const noopEdits: Array<{ editIndex: number; loc: string; currentContent: string }> = [];
++	const noopEdits: Array<{ editIndex: number; loc: string; current: string }> = [];
+ 
+ 	// Pre-validate: collect all hash mismatches before mutating
+ 	const mismatches: HashMismatch[] = [];
+@@ -457,42 +461,30 @@ export function applyHashlineEdits(
+ 	for (const edit of edits) {
+ 		switch (edit.op) {
+ 			case "replace": {
+-				if ("tag" in edit) {
+-					if (!validateRef(edit.tag)) continue;
+-				} else {
+-					if (edit.first.line > edit.last.line) {
+-						throw new Error(`Range start line ${edit.first.line} must be <= end line ${edit.last.line}`);
+-					}
+-					const startValid = validateRef(edit.first);
+-					const endValid = validateRef(edit.last);
++				if (edit.end) {
++					const startValid = validateRef(edit.pos);
++					const endValid = validateRef(edit.end);
+ 					if (!startValid || !endValid) continue;
++					if (edit.pos.line > edit.end.line) {
++						throw new Error(`Range start line ${edit.pos.line} must be <= end line ${edit.end.line}`);
++					}
++				} else {
++					if (!validateRef(edit.pos)) continue;
+ 				}
+ 				break;
+ 			}
+ 			case "append": {
+-				if (edit.content.length === 0) {
+-					throw new Error('Insert-after edit (src "N#HH..") requires non-empty dst');
++				if (edit.pos && !validateRef(edit.pos)) continue;
++				if (edit.lines.length === 0) {
++					edit.lines = [""]; // insert an empty line
+ 				}
+-				if (edit.after && !validateRef(edit.after)) continue;
+ 				break;
+ 			}
+ 			case "prepend": {
+-				if (edit.content.length === 0) {
+-					throw new Error('Insert-before edit (src "N#HH..") requires non-empty dst');
++				if (edit.pos && !validateRef(edit.pos)) continue;
++				if (edit.lines.length === 0) {
++					edit.lines = [""]; // insert an empty line
+ 				}
+-				if (edit.before && !validateRef(edit.before)) continue;
+-				break;
+-			}
+-			case "insert": {
+-				if (edit.content.length === 0) {
+-					throw new Error('Insert-between edit (src "A#HH.. B#HH..") requires non-empty dst');
+-				}
+-				if (edit.before.line <= edit.after.line) {
+-					throw new Error(`insert requires after (${edit.after.line}) < before (${edit.before.line})`);
+-				}
+-				const afterValid = validateRef(edit.after);
+-				const beforeValid = validateRef(edit.before);
+-				if (!afterValid || !beforeValid) continue;
+ 				break;
+ 			}
+ 		}
+@@ -508,31 +500,28 @@ export function applyHashlineEdits(
+ 		let lineKey: string;
+ 		switch (edit.op) {
+ 			case "replace":
+-				if ("tag" in edit) {
+-					lineKey = `s:${edit.tag.line}`;
++				if (!edit.end) {
++					lineKey = `s:${edit.pos.line}`;
+ 				} else {
+-					lineKey = `r:${edit.first.line}:${edit.last.line}`;
++					lineKey = `r:${edit.pos.line}:${edit.end.line}`;
+ 				}
+ 				break;
+ 			case "append":
+-				if (edit.after) {
+-					lineKey = `i:${edit.after.line}`;
++				if (edit.pos) {
++					lineKey = `i:${edit.pos.line}`;
+ 					break;
+ 				}
+ 				lineKey = "ieof";
+ 				break;
+ 			case "prepend":
+-				if (edit.before) {
+-					lineKey = `ib:${edit.before.line}`;
++				if (edit.pos) {
++					lineKey = `ib:${edit.pos.line}`;
+ 					break;
+ 				}
+ 				lineKey = "ibef";
+ 				break;
+-			case "insert":
+-				lineKey = `ix:${edit.after.line}:${edit.before.line}`;
+-				break;
+ 		}
+-		const dstKey = `${lineKey}:${edit.content.join("\n")}`;
++		const dstKey = `${lineKey}:${edit.lines.join("\n")}`;
+ 		if (seenEditKeys.has(dstKey)) {
+ 			dedupIndices.add(i);
+ 		} else {
+@@ -551,25 +540,21 @@ export function applyHashlineEdits(
+ 		let precedence: number;
+ 		switch (edit.op) {
+ 			case "replace":
+-				if ("tag" in edit) {
+-					sortLine = edit.tag.line;
++				if (!edit.end) {
++					sortLine = edit.pos.line;
+ 				} else {
+-					sortLine = edit.last.line;
++					sortLine = edit.end.line;
+ 				}
+ 				precedence = 0;
+ 				break;
+ 			case "append":
+-				sortLine = edit.after ? edit.after.line : fileLines.length + 1;
++				sortLine = edit.pos ? edit.pos.line : fileLines.length + 1;
+ 				precedence = 1;
+ 				break;
+ 			case "prepend":
+-				sortLine = edit.before ? edit.before.line : 0;
++				sortLine = edit.pos ? edit.pos.line : 0;
+ 				precedence = 2;
+ 				break;
+-			case "insert":
+-				sortLine = edit.before.line;
+-				precedence = 3;
+-				break;
+ 		}
+ 		return { edit, idx, sortLine, precedence };
+ 	});
+@@ -580,40 +565,40 @@ export function applyHashlineEdits(
+ 	for (const { edit, idx } of annotated) {
+ 		switch (edit.op) {
+ 			case "replace": {
+-				if ("tag" in edit) {
+-					const origLines = originalFileLines.slice(edit.tag.line - 1, edit.tag.line);
+-					const newLines = edit.content;
++				if (!edit.end) {
++					const origLines = originalFileLines.slice(edit.pos.line - 1, edit.pos.line);
++					const newLines = edit.lines;
+ 					if (origLines.every((line, i) => line === newLines[i])) {
+ 						noopEdits.push({
+ 							editIndex: idx,
+-							loc: `${edit.tag.line}#${edit.tag.hash}`,
+-							currentContent: origLines.join("\n"),
++							loc: `${edit.pos.line}#${edit.pos.hash}`,
++							current: origLines.join("\n"),
+ 						});
+ 						break;
+ 					}
+-					fileLines.splice(edit.tag.line - 1, 1, ...newLines);
+-					trackFirstChanged(edit.tag.line);
++					fileLines.splice(edit.pos.line - 1, 1, ...newLines);
++					trackFirstChanged(edit.pos.line);
+ 				} else {
+-					const count = edit.last.line - edit.first.line + 1;
+-					const newLines = edit.content;
+-					fileLines.splice(edit.first.line - 1, count, ...newLines);
+-					trackFirstChanged(edit.first.line);
++					const count = edit.end.line - edit.pos.line + 1;
++					const newLines = edit.lines;
++					fileLines.splice(edit.pos.line - 1, count, ...newLines);
++					trackFirstChanged(edit.pos.line);
+ 				}
+ 				break;
+ 			}
+ 			case "append": {
+-				const inserted = edit.content;
++				const inserted = edit.lines;
+ 				if (inserted.length === 0) {
+ 					noopEdits.push({
+ 						editIndex: idx,
+-						loc: edit.after ? `${edit.after.line}#${edit.after.hash}` : "EOF",
+-						currentContent: edit.after ? originalFileLines[edit.after.line - 1] : "",
++						loc: edit.pos ? `${edit.pos.line}#${edit.pos.hash}` : "EOF",
++						current: edit.pos ? originalFileLines[edit.pos.line - 1] : "",
+ 					});
+ 					break;
+ 				}
+-				if (edit.after) {
+-					fileLines.splice(edit.after.line, 0, ...inserted);
+-					trackFirstChanged(edit.after.line + 1);
++				if (edit.pos) {
++					fileLines.splice(edit.pos.line, 0, ...inserted);
++					trackFirstChanged(edit.pos.line + 1);
+ 				} else {
+ 					if (fileLines.length === 1 && fileLines[0] === "") {
+ 						fileLines.splice(0, 1, ...inserted);
+@@ -626,18 +611,18 @@ export function applyHashlineEdits(
+ 				break;
+ 			}
+ 			case "prepend": {
+-				const inserted = edit.content;
++				const inserted = edit.lines;
+ 				if (inserted.length === 0) {
+ 					noopEdits.push({
+ 						editIndex: idx,
+-						loc: edit.before ? `${edit.before.line}#${edit.before.hash}` : "BOF",
+-						currentContent: edit.before ? originalFileLines[edit.before.line - 1] : "",
++						loc: edit.pos ? `${edit.pos.line}#${edit.pos.hash}` : "BOF",
++						current: edit.pos ? originalFileLines[edit.pos.line - 1] : "",
+ 					});
+ 					break;
+ 				}
+-				if (edit.before) {
+-					fileLines.splice(edit.before.line - 1, 0, ...inserted);
+-					trackFirstChanged(edit.before.line);
++				if (edit.pos) {
++					fileLines.splice(edit.pos.line - 1, 0, ...inserted);
++					trackFirstChanged(edit.pos.line);
+ 				} else {
+ 					if (fileLines.length === 1 && fileLines[0] === "") {
+ 						fileLines.splice(0, 1, ...inserted);
+@@ -648,27 +633,11 @@ export function applyHashlineEdits(
+ 				}
+ 				break;
+ 			}
+-			case "insert": {
+-				const afterLine = originalFileLines[edit.after.line - 1];
+-				const beforeLine = originalFileLines[edit.before.line - 1];
+-				const inserted = edit.content;
+-				if (inserted.length === 0) {
+-					noopEdits.push({
+-						editIndex: idx,
+-						loc: `${edit.after.line}#${edit.after.hash}..${edit.before.line}#${edit.before.hash}`,
+-						currentContent: `${afterLine}\n${beforeLine}`,
+-					});
+-					break;
+-				}
+-				fileLines.splice(edit.before.line - 1, 0, ...inserted);
+-				trackFirstChanged(edit.before.line);
+-				break;
+-			}
+ 		}
+ 	}
+ 
+ 	return {
+-		content: fileLines.join("\n"),
++		lines: fileLines.join("\n"),
+ 		firstChangedLine,
+ 		...(noopEdits.length > 0 ? { noopEdits } : {}),
+ 	};
+diff --git a/packages/coding-agent/src/patch/index.ts b/packages/coding-agent/src/patch/index.ts
+index b37238e72..d846a26ba 100644
+--- a/packages/coding-agent/src/patch/index.ts
++++ b/packages/coding-agent/src/patch/index.ts
+@@ -34,9 +34,8 @@ import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard"
+ import { applyPatch } from "./applicator";
+ import { generateDiffString, generateUnifiedDiffString, replaceText } from "./diff";
+ import { findMatch } from "./fuzzy";
+-import { applyHashlineEdits, computeLineHash, type HashlineEdit, type LineTag, parseTag } from "./hashline";
++import { type Anchor, applyHashlineEdits, computeLineHash, type HashlineEdit, parseTag } from "./hashline";
+ import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "./normalize";
+-import { buildNormativeUpdateInput } from "./normative";
+ import { type EditToolDetails, getLspBatchRequest } from "./shared";
+ // Internal imports
+ import type { FileSystem, Operation, PatchInput } from "./types";
+@@ -109,14 +108,14 @@ export { ApplyPatchError, EditMatchError, ParseError } from "./types";
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+ const replaceEditSchema = Type.Object({
+-	path: Type.String({ description: "File path (relative or absolute)" }),
++	file: Type.String({ description: "File path (relative or absolute)" }),
+ 	old_text: Type.String({ description: "Text to find (fuzzy whitespace matching enabled)" }),
+ 	new_text: Type.String({ description: "Replacement text" }),
+ 	all: Type.Optional(Type.Boolean({ description: "Replace all occurrences (default: unique match required)" })),
+ });
+ 
+ const patchEditSchema = Type.Object({
+-	path: Type.String({ description: "File path" }),
++	file: Type.String({ description: "File path" }),
+ 	op: Type.Optional(
+ 		StringEnum(["create", "delete", "update"], {
+ 			description: "Operation (default: update)",
+@@ -168,7 +167,7 @@ export function stripNewLinePrefixes(lines: string[]): string[] {
+ 	});
+ }
+ 
+-export function hashlineParseContent(edit: string | string[] | null): string[] {
++export function hashlineParseText(edit: string[] | string | null): string[] {
+ 	if (edit === null) return [];
+ 	if (Array.isArray(edit)) return edit;
+ 	const lines = stripNewLinePrefixes(edit.split("\n"));
+@@ -177,52 +176,45 @@ export function hashlineParseContent(edit: string | string[] | null): string[] {
+ 	return lines;
+ }
+ 
+-const hashlineEditSpecSchema = Type.Object(
++const hashlineEditSchema = Type.Object(
+ 	{
+-		op: StringEnum(["replace", "append", "prepend", "insert"], {
+-			description: "Operation type",
+-		}),
+-		first: Type.Optional(Type.String({ description: 'First/start anchor tag in "LINE#ID" format' })),
+-		last: Type.Optional(Type.String({ description: 'Last/end anchor tag in "LINE#ID" format' })),
+-		content: Type.Union([
++		op: StringEnum(["replace", "append", "prepend"]),
++		pos: Type.Optional(Type.String({ description: "anchor" })),
++		end: Type.Optional(Type.String({ description: "limit position" })),
++		lines: Type.Union([
++			Type.Array(Type.String(), { description: "content (preferred format)" }),
++			Type.String(),
+ 			Type.Null(),
+-			Type.Array(Type.String(), { description: "Content lines" }),
+-			Type.String({ description: "Content line" }),
+ 		]),
+ 	},
+ 	{ additionalProperties: false },
+ );
+ 
+-const hashlineEditSchema = Type.Object(
++const hashlineEditParamsSchema = Type.Object(
+ 	{
+-		path: Type.String({ description: "File path (relative or absolute)" }),
+-		edits: Type.Array(hashlineEditSpecSchema, {
+-			description: "Changes to apply to the file at `path`",
+-			minItems: 0,
+-		}),
+-		delete: Type.Optional(Type.Boolean({ description: "Delete the file when true" })),
+-		rename: Type.Optional(Type.String({ description: "New path if moving" })),
++		file: Type.String({ description: "path" }),
++		edits: Type.Array(hashlineEditSchema, { description: "edits over $file" }),
++		delete: Type.Optional(Type.Boolean({ description: "If true, delete $file" })),
++		move: Type.Optional(Type.String({ description: "If set, move $file to $move" })),
+ 	},
+ 	{ additionalProperties: false },
+ );
+ 
+-export type HashlineToolEdit = Static<typeof hashlineEditSpecSchema>;
+-export type HashlineParams = Static<typeof hashlineEditSchema>;
++export type HashlineToolEdit = Static<typeof hashlineEditSchema>;
++export type HashlineParams = Static<typeof hashlineEditParamsSchema>;
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+ // Resilient anchor resolution
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+ /**
+- * Map flat tool-schema edits (first/last) into typed HashlineEdit objects.
++ * Map flat tool-schema edits (tag/end) into typed HashlineEdit objects.
+  *
+  * Resilient: as long as at least one anchor exists, we execute.
+- * - replace + first only → single-line replace (tag = first)
+- * - replace + first + last → range replace
+- * - append + first or last → append after that anchor
+- * - prepend + first or last → prepend before that anchor
+- * - insert + first + last → insert between them
+- * - insert + one anchor → degrade to append/prepend
++ * - replace + tag only → single-line replace
++ * - replace + tag + end → range replace
++ * - append + tag or end → append after that anchor
++ * - prepend + tag or end → prepend before that anchor
+  * - no anchors → file-level append/prepend (only for those ops)
+  *
+  * Unknown ops default to "replace".
+@@ -230,51 +222,29 @@ export type HashlineParams = Static<typeof hashlineEditSchema>;
+ function resolveEditAnchors(edits: HashlineToolEdit[]): HashlineEdit[] {
+ 	const result: HashlineEdit[] = [];
+ 	for (const edit of edits) {
+-		const content = hashlineParseContent(edit.content);
+-		const first = edit.first ? tryParseTag(edit.first) : undefined;
+-		const last = edit.last ? tryParseTag(edit.last) : undefined;
++		const lines = hashlineParseText(edit.lines);
++		const tag = edit.pos ? tryParseTag(edit.pos) : undefined;
++		const end = edit.end ? tryParseTag(edit.end) : undefined;
+ 
+ 		// Normalize op — default unknown values to "replace"
+-		const op = edit.op === "append" || edit.op === "prepend" || edit.op === "insert" ? edit.op : "replace";
+-
++		const op = edit.op === "append" || edit.op === "prepend" ? edit.op : "replace";
+ 		switch (op) {
+ 			case "replace": {
+-				if (first && last) {
+-					result.push({ op: "replace", first, last, content });
+-				} else if (first) {
+-					result.push({ op: "replace", tag: first, content });
+-				} else if (last) {
+-					result.push({ op: "replace", tag: last, content });
++				if (tag && end) {
++					result.push({ op: "replace", pos: tag, end, lines });
++				} else if (tag || end) {
++					result.push({ op: "replace", pos: tag || end!, lines });
+ 				} else {
+-					throw new Error("Replace requires at least one anchor (first or last).");
++					throw new Error("Replace requires at least one anchor (tag or end).");
+ 				}
+ 				break;
+ 			}
+ 			case "append": {
+-				// Prefer first as the "after" anchor; fall back to last
+-				const anchor = first ?? last;
+-				result.push({ op: "append", ...(anchor ? { after: anchor } : {}), content });
++				result.push({ op: "append", pos: tag ?? end, lines });
+ 				break;
+ 			}
+ 			case "prepend": {
+-				// Prefer last as the "before" anchor; fall back to first
+-				const anchor = last ?? first;
+-				result.push({ op: "prepend", ...(anchor ? { before: anchor } : {}), content });
+-				break;
+-			}
+-			case "insert": {
+-				if (first && last) {
+-					result.push({ op: "insert", after: first, before: last, content });
+-				} else if (first) {
+-					// Degrade: insert after first
+-					result.push({ op: "append", after: first, content });
+-				} else if (last) {
+-					// Degrade: insert before last
+-					result.push({ op: "prepend", before: last, content });
+-				} else {
+-					// No anchors — append to end
+-					result.push({ op: "append", content });
+-				}
++				result.push({ op: "prepend", pos: end ?? tag, lines });
+ 				break;
+ 			}
+ 		}
+@@ -283,7 +253,7 @@ function resolveEditAnchors(edits: HashlineToolEdit[]): HashlineEdit[] {
+ }
+ 
+ /** Parse a tag, returning undefined instead of throwing on garbage. */
+-function tryParseTag(raw: string): LineTag | undefined {
++function tryParseTag(raw: string): Anchor | undefined {
+ 	try {
+ 		return parseTag(raw);
+ 	} catch {
+@@ -379,11 +349,11 @@ function mergeDiagnosticsWithWarnings(
+ // Tool Class
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+-type TInput = typeof replaceEditSchema | typeof patchEditSchema | typeof hashlineEditSchema;
++type TInput = typeof replaceEditSchema | typeof patchEditSchema | typeof hashlineEditParamsSchema;
+ 
+ export type EditMode = "replace" | "patch" | "hashline";
+ 
+-export const DEFAULT_EDIT_MODE: EditMode = "patch";
++export const DEFAULT_EDIT_MODE: EditMode = "hashline";
+ 
+ export function normalizeEditMode(mode?: string | null): EditMode | null {
+ 	switch (mode) {
+@@ -408,6 +378,7 @@ export class EditTool implements AgentTool<TInput> {
+ 	readonly label = "Edit";
+ 	readonly nonAbortable = true;
+ 	readonly concurrency = "exclusive";
++	readonly strict = true;
+ 
+ 	readonly #allowFuzzy: boolean;
+ 	readonly #fuzzyThreshold: number;
+@@ -499,7 +470,7 @@ export class EditTool implements AgentTool<TInput> {
+ 			case "patch":
+ 				return patchEditSchema;
+ 			case "hashline":
+-				return hashlineEditSchema;
++				return hashlineEditParamsSchema;
+ 			default:
+ 				return replaceEditSchema;
+ 		}
+@@ -518,21 +489,20 @@ export class EditTool implements AgentTool<TInput> {
+ 		// Hashline mode execution
+ 		// ─────────────────────────────────────────────────────────────────
+ 		if (this.mode === "hashline") {
+-			const { path, edits, delete: deleteFile, rename } = params as HashlineParams;
++			const { file: path, edits, delete: deleteFile, move } = params as HashlineParams;
+ 
+-			enforcePlanModeWrite(this.session, path, { op: deleteFile ? "delete" : "update", rename });
++			enforcePlanModeWrite(this.session, path, { op: deleteFile ? "delete" : "update", move });
+ 
+ 			if (path.endsWith(".ipynb") && edits?.length > 0) {
+ 				throw new Error("Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead.");
+ 			}
+ 
+ 			const absolutePath = resolvePlanPath(this.session, path);
+-			const resolvedRename = rename ? resolvePlanPath(this.session, rename) : undefined;
+-			const file = Bun.file(absolutePath);
++			const resolvedMove = move ? resolvePlanPath(this.session, move) : undefined;
+ 
+ 			if (deleteFile) {
+-				if (await file.exists()) {
+-					await file.unlink();
++				if (await fs.exists(absolutePath)) {
++					await fs.unlink(absolutePath);
+ 				}
+ 				invalidateFsScanAfterDelete(absolutePath);
+ 				return {
+@@ -545,21 +515,21 @@ export class EditTool implements AgentTool<TInput> {
+ 				};
+ 			}
+ 
+-			if (!(await file.exists())) {
+-				const content: string[] = [];
++			if (!(await fs.exists(absolutePath))) {
++				const lines: string[] = [];
+ 				for (const edit of edits) {
+ 					// For file creation, only anchorless appends/prepends are valid
+-					if ((edit.op === "append" || edit.op === "prepend") && !edit.first && !edit.last) {
++					if ((edit.op === "append" || edit.op === "prepend") && !edit.pos && !edit.end) {
+ 						if (edit.op === "prepend") {
+-							content.unshift(...hashlineParseContent(edit.content));
++							lines.unshift(...hashlineParseText(edit.lines));
+ 						} else {
+-							content.push(...hashlineParseContent(edit.content));
++							lines.push(...hashlineParseText(edit.lines));
+ 						}
+ 					} else {
+ 						throw new Error(`File not found: ${path}`);
+ 					}
+ 				}
+-				await file.write(content.join("\n"));
++				await fs.writeFile(absolutePath, lines.join("\n"));
+ 				return {
+ 					content: [{ type: "text", text: `Created ${path}` }],
+ 					details: {
+@@ -572,29 +542,29 @@ export class EditTool implements AgentTool<TInput> {
+ 
+ 			const anchorEdits = resolveEditAnchors(edits);
+ 
+-			const rawContent = await file.text();
+-			const { bom, text: content } = stripBom(rawContent);
+-			const originalEnding = detectLineEnding(content);
+-			const originalNormalized = normalizeToLF(content);
+-			let normalizedContent = originalNormalized;
++			const rawContent = await fs.readFile(absolutePath, "utf-8");
++			const { bom, text } = stripBom(rawContent);
++			const originalEnding = detectLineEnding(text);
++			const originalNormalized = normalizeToLF(text);
++			let normalizedText = originalNormalized;
+ 
+-			// Apply anchor-based edits first (set, set_range, insert)
+-			const anchorResult = applyHashlineEdits(normalizedContent, anchorEdits);
+-			normalizedContent = anchorResult.content;
++			// Apply anchor-based edits first (replace, append, prepend)
++			const anchorResult = applyHashlineEdits(normalizedText, anchorEdits);
++			normalizedText = anchorResult.lines;
+ 
+ 			const result = {
+-				content: normalizedContent,
++				text: normalizedText,
+ 				firstChangedLine: anchorResult.firstChangedLine,
+ 				warnings: anchorResult.warnings,
+ 				noopEdits: anchorResult.noopEdits,
+ 			};
+-			if (originalNormalized === result.content && !rename) {
++			if (originalNormalized === result.text && !move) {
+ 				let diagnostic = `No changes made to ${path}. The edits produced identical content.`;
+ 				if (result.noopEdits && result.noopEdits.length > 0) {
+ 					const details = result.noopEdits
+ 						.map(
+ 							e =>
+-								`Edit ${e.editIndex}: replacement for ${e.loc} is identical to current content:\n  ${e.loc}| ${e.currentContent}`,
++								`Edit ${e.editIndex}: replacement for ${e.loc} is identical to current content:\n  ${e.loc}| ${e.current}`,
+ 						)
+ 						.join("\n");
+ 					diagnostic += `\n${details}`;
+@@ -602,27 +572,24 @@ export class EditTool implements AgentTool<TInput> {
+ 						"\nYour content must differ from what the file already contains. Re-read the file to see the current state.";
+ 				} else {
+ 					// Edits were not literally identical but heuristics normalized them back
+-					const lines = result.content.split("\n");
++					const lines = result.text.split("\n");
+ 					const targetLines: string[] = [];
+-					const refs: LineTag[] = [];
++					const refs: Anchor[] = [];
+ 					for (const edit of anchorEdits) {
+ 						refs.length = 0;
+ 						switch (edit.op) {
+ 							case "replace":
+-								if ("tag" in edit) {
+-									refs.push(edit.tag);
++								if (edit.end) {
++									refs.push(edit.end, edit.pos);
+ 								} else {
+-									refs.push(edit.first, edit.last);
++									refs.push(edit.pos);
+ 								}
+ 								break;
+ 							case "append":
+-								if (edit.after) refs.push(edit.after);
++								if (edit.pos) refs.push(edit.pos);
+ 								break;
+ 							case "prepend":
+-								if (edit.before) refs.push(edit.before);
+-								break;
+-							case "insert":
+-								refs.push(edit.after, edit.before);
++								if (edit.pos) refs.push(edit.pos);
+ 								break;
+ 							default:
+ 								break;
+@@ -631,9 +598,9 @@ export class EditTool implements AgentTool<TInput> {
+ 						for (const ref of refs) {
+ 							try {
+ 								if (ref.line >= 1 && ref.line <= lines.length) {
+-									const lineContent = lines[ref.line - 1];
+-									const hash = computeLineHash(ref.line, lineContent);
+-									targetLines.push(`${ref.line}#${hash}:${lineContent}`);
++									const text = lines[ref.line - 1];
++									const hash = computeLineHash(ref.line, text);
++									targetLines.push(`${ref.line}#${hash}:${text}`);
+ 								}
+ 							} catch {
+ 								/* skip malformed refs */
+@@ -648,8 +615,8 @@ export class EditTool implements AgentTool<TInput> {
+ 				throw new Error(diagnostic);
+ 			}
+ 
+-			const finalContent = bom + restoreLineEndings(result.content, originalEnding);
+-			const writePath = resolvedRename ?? absolutePath;
++			const finalContent = bom + restoreLineEndings(result.text, originalEnding);
++			const writePath = resolvedMove ?? absolutePath;
+ 			const diagnostics = await this.#writethrough(
+ 				writePath,
+ 				finalContent,
+@@ -657,26 +624,19 @@ export class EditTool implements AgentTool<TInput> {
+ 				Bun.file(writePath),
+ 				batchRequest,
+ 			);
+-			if (resolvedRename && resolvedRename !== absolutePath) {
+-				await file.unlink();
+-				invalidateFsScanAfterRename(absolutePath, resolvedRename);
++			if (resolvedMove && resolvedMove !== absolutePath) {
++				await fs.unlink(absolutePath);
++				invalidateFsScanAfterRename(absolutePath, resolvedMove);
+ 			} else {
+ 				invalidateFsScanAfterWrite(absolutePath);
+ 			}
+-			const diffResult = generateDiffString(originalNormalized, result.content);
+-
+-			const normative = buildNormativeUpdateInput({
+-				path,
+-				...(rename ? { rename } : {}),
+-				oldContent: rawContent,
+-				newContent: finalContent,
+-			});
++			const diffResult = generateDiffString(originalNormalized, result.text);
+ 
+ 			const meta = outputMeta()
+ 				.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
+ 				.get();
+ 
+-			const resultText = rename ? `Updated and moved ${path} to ${rename}` : `Updated ${path}`;
++			const resultText = move ? `Moved ${path} to ${move}` : `Updated ${path}`;
+ 			return {
+ 				content: [
+ 					{
+@@ -689,10 +649,9 @@ export class EditTool implements AgentTool<TInput> {
+ 					firstChangedLine: result.firstChangedLine ?? diffResult.firstChangedLine,
+ 					diagnostics,
+ 					op: "update",
+-					rename,
++					move,
+ 					meta,
+ 				},
+-				$normative: normative,
+ 			};
+ 		}
+ 
+@@ -700,12 +659,12 @@ export class EditTool implements AgentTool<TInput> {
+ 		// Patch mode execution
+ 		// ─────────────────────────────────────────────────────────────────
+ 		if (this.mode === "patch") {
+-			const { path, op: rawOp, rename, diff } = params as PatchParams;
++			const { file: path, op: rawOp, rename, diff } = params as PatchParams;
+ 
+ 			// Normalize unrecognized operations to "update"
+ 			const op: Operation = rawOp === "create" || rawOp === "delete" ? rawOp : "update";
+ 
+-			enforcePlanModeWrite(this.session, path, { op, rename });
++			enforcePlanModeWrite(this.session, path, { op, move: rename });
+ 			const resolvedPath = resolvePlanPath(this.session, path);
+ 			const resolvedRename = rename ? resolvePlanPath(this.session, rename) : undefined;
+ 
+@@ -773,7 +732,7 @@ export class EditTool implements AgentTool<TInput> {
+ 					firstChangedLine: diffResult.firstChangedLine,
+ 					diagnostics: mergedDiagnostics,
+ 					op,
+-					rename: effRename,
++					move: effRename,
+ 					meta,
+ 				},
+ 			};
+@@ -782,7 +741,7 @@ export class EditTool implements AgentTool<TInput> {
+ 		// ─────────────────────────────────────────────────────────────────
+ 		// Replace mode execution
+ 		// ─────────────────────────────────────────────────────────────────
+-		const { path, old_text, new_text, all } = params as ReplaceParams;
++		const { file: path, old_text, new_text, all } = params as ReplaceParams;
+ 
+ 		enforcePlanModeWrite(this.session, path);
+ 
+@@ -795,13 +754,12 @@ export class EditTool implements AgentTool<TInput> {
+ 		}
+ 
+ 		const absolutePath = resolvePlanPath(this.session, path);
+-		const file = Bun.file(absolutePath);
+ 
+-		if (!(await file.exists())) {
++		if (!(await fs.exists(absolutePath))) {
+ 			throw new Error(`File not found: ${path}`);
+ 		}
+ 
+-		const rawContent = await file.text();
++		const rawContent = await fs.readFile(absolutePath, "utf-8");
+ 		const { bom, text: content } = stripBom(rawContent);
+ 		const originalEnding = detectLineEnding(content);
+ 		const normalizedContent = normalizeToLF(content);
+@@ -844,7 +802,13 @@ export class EditTool implements AgentTool<TInput> {
+ 		}
+ 
+ 		const finalContent = bom + restoreLineEndings(result.content, originalEnding);
+-		const diagnostics = await this.#writethrough(absolutePath, finalContent, signal, file, batchRequest);
++		const diagnostics = await this.#writethrough(
++			absolutePath,
++			finalContent,
++			signal,
++			Bun.file(absolutePath),
++			batchRequest,
++		);
+ 		invalidateFsScanAfterWrite(absolutePath);
+ 		const diffResult = generateDiffString(normalizedContent, result.content);
+ 
+diff --git a/packages/coding-agent/src/patch/shared.ts b/packages/coding-agent/src/patch/shared.ts
+index 01ea62c4b..768e14d50 100644
+--- a/packages/coding-agent/src/patch/shared.ts
++++ b/packages/coding-agent/src/patch/shared.ts
+@@ -22,6 +22,7 @@ import {
+ 	truncateDiffByHunk,
+ } from "../tools/render-utils";
+ import { Ellipsis, Hasher, type RenderCache, renderStatusLine, truncateToWidth } from "../tui";
++import type { HashlineToolEdit } from "./index";
+ import type { DiffError, DiffResult, Operation } from "./types";
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+@@ -58,7 +59,7 @@ export interface EditToolDetails {
+ 	/** Operation type (patch mode only) */
+ 	op?: Operation;
+ 	/** New path after move/rename (patch mode only) */
+-	rename?: string;
++	move?: string;
+ 	/** Structured output metadata */
+ 	meta?: OutputMeta;
+ }
+@@ -70,6 +71,7 @@ export interface EditToolDetails {
+ interface EditRenderArgs {
+ 	path?: string;
+ 	file_path?: string;
++	file?: string;
+ 	oldText?: string;
+ 	newText?: string;
+ 	patch?: string;
+@@ -83,16 +85,9 @@ interface EditRenderArgs {
+ 	 */
+ 	previewDiff?: string;
+ 	// Hashline mode fields
+-	edits?: HashlineEditPreview[];
++	edits?: Partial<HashlineToolEdit>[];
+ }
+ 
+-type HashlineEditPreview = {
+-	op: string;
+-	first?: string;
+-	last?: string;
+-	content: string | string[] | null;
+-};
+-
+ /** Extended context for edit tool rendering */
+ export interface EditRenderContext {
+ 	/** Pre-computed diff preview (computed before tool executes) */
+@@ -123,7 +118,7 @@ function formatStreamingDiff(diff: string, rawPath: string, uiTheme: Theme, labe
+ 	return text;
+ }
+ 
+-function formatStreamingHashlineEdits(edits: unknown[], uiTheme: Theme): string {
++function formatStreamingHashlineEdits(edits: Partial<HashlineToolEdit>[], uiTheme: Theme): string {
+ 	const MAX_EDITS = 4;
+ 	const MAX_DST_LINES = 8;
+ 	let text = "\n\n";
+@@ -158,22 +153,21 @@ function formatStreamingHashlineEdits(edits: unknown[], uiTheme: Theme): string
+ 	}
+ 
+ 	return text.trimEnd();
+-	function formatHashlineEdit(edit: unknown): { srcLabel: string; dst: string } {
+-		const editRecord = typeof edit === "object" && edit !== null ? (edit as Record<string, unknown>) : undefined;
+-		if (!editRecord) {
++	function formatHashlineEdit(edit: Partial<HashlineToolEdit>): { srcLabel: string; dst: string } {
++		if (typeof edit !== "object" || !edit) {
+ 			return { srcLabel: "• (incomplete edit)", dst: "" };
+ 		}
+ 
+-		const contentLines = Array.isArray(editRecord.content) ? (editRecord.content as string[]).join("\n") : "";
++		const contentLines = Array.isArray(edit.lines) ? (edit.lines as string[]).join("\n") : "";
+ 
+-		const op = typeof editRecord.op === "string" ? editRecord.op : "?";
+-		const first = typeof editRecord.first === "string" ? editRecord.first : undefined;
+-		const last = typeof editRecord.last === "string" ? editRecord.last : undefined;
++		const op = typeof edit.op === "string" ? edit.op : "?";
++		const pos = typeof edit.pos === "string" ? edit.pos : undefined;
++		const end = typeof edit.end === "string" ? edit.end : undefined;
+ 
+-		if (first && last && first !== last) {
+-			return { srcLabel: `\u2022 ${op} ${first}..${last}`, dst: contentLines };
++		if (pos && end && pos !== end) {
++			return { srcLabel: `• ${op} ${pos}…${end}`, dst: contentLines };
+ 		}
+-		const anchor = first ?? last;
++		const anchor = pos ?? end;
+ 		if (anchor) {
+ 			return { srcLabel: `\u2022 ${op} ${anchor}`, dst: contentLines };
+ 		}
+@@ -226,7 +220,7 @@ export const editToolRenderer = {
+ 	mergeCallAndResult: true,
+ 
+ 	renderCall(args: EditRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
+-		const rawPath = args.file_path || args.path || "";
++		const rawPath = args.file_path || args.path || args.file || "";
+ 		const filePath = shortenPath(rawPath);
+ 		const editLanguage = getLanguageFromPath(rawPath) ?? "text";
+ 		const editIcon = uiTheme.fg("muted", uiTheme.getLangIcon(editLanguage));
+@@ -281,13 +275,13 @@ export const editToolRenderer = {
+ 		uiTheme: Theme,
+ 		args?: EditRenderArgs,
+ 	): Component {
+-		const rawPath = args?.file_path || args?.path || "";
++		const rawPath = args?.file_path || args?.path || args?.file || "";
+ 		const filePath = shortenPath(rawPath);
+ 		const editLanguage = getLanguageFromPath(rawPath) ?? "text";
+ 		const editIcon = uiTheme.fg("muted", uiTheme.getLangIcon(editLanguage));
+ 
+ 		const op = args?.op || result.details?.op;
+-		const rename = args?.rename || result.details?.rename;
++		const rename = args?.rename || result.details?.move;
+ 		const opTitle = op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit";
+ 
+ 		// Pre-compute metadata line (static across renders)
+diff --git a/packages/coding-agent/src/prompts/system/agent-creation-architect.md b/packages/coding-agent/src/prompts/system/agent-creation-architect.md
+index de71cce3d..d8232a3f0 100644
+--- a/packages/coding-agent/src/prompts/system/agent-creation-architect.md
++++ b/packages/coding-agent/src/prompts/system/agent-creation-architect.md
+@@ -50,8 +50,8 @@ When a user describes what they want an agent to do, you will:
+ Your output MUST be a valid JSON object with exactly these fields:
+ {
+   "identifier": "A unique, descriptive identifier using lowercase letters, numbers, and hyphens (e.g., 'test-runner', 'api-docs-writer', 'code-formatter')",
+-  "whenToUse": "A precise, actionable description starting with 'Use this agent when...' that clearly defines the triggering conditions and use cases. Ensure you include examples as described above.",
+-  "systemPrompt": "The complete system prompt that will govern the agent's behavior, written in second person ('You are...', 'You will...') and structured for maximum clarity and effectiveness"
++  "whenToUse": "A precise, actionable description starting with 'Use this agent when…' that clearly defines the triggering conditions and use cases. Ensure you include examples as described above.",
++  "systemPrompt": "The complete system prompt that will govern the agent's behavior, written in second person ('You are…', 'You will…') and structured for maximum clarity and effectiveness"
+ }
+ 
+ Key principles for your system prompts:
+diff --git a/packages/coding-agent/src/prompts/system/system-prompt.md b/packages/coding-agent/src/prompts/system/system-prompt.md
+index 457944278..a9655f707 100644
+--- a/packages/coding-agent/src/prompts/system/system-prompt.md
++++ b/packages/coding-agent/src/prompts/system/system-prompt.md
+@@ -90,7 +90,7 @@ Semantic questions MUST be answered with semantic tools.
+ {{#has tools "ssh"}}
+ ### SSH: match commands to host shell
+ Commands MUST match the host shell. linux/bash, macos/zsh: Unix. windows/cmd: dir, type, findstr. windows/powershell: Get-ChildItem, Get-Content.
+-Remote filesystems: `~/.omp/remote/<hostname>/`. Windows paths need colons: `C:/Users/...`
++Remote filesystems: `~/.omp/remote/<hostname>/`. Windows paths need colons: `C:/Users/…`
+ {{/has}}
+ 
+ {{#ifAny (includes tools "grep") (includes tools "find")}}
+diff --git a/packages/coding-agent/src/prompts/tools/bash.md b/packages/coding-agent/src/prompts/tools/bash.md
+index cdd673459..864bfb357 100644
+--- a/packages/coding-agent/src/prompts/tools/bash.md
++++ b/packages/coding-agent/src/prompts/tools/bash.md
+@@ -3,7 +3,7 @@
+ Executes bash command in shell session for terminal operations like git, bun, cargo, python.
+ 
+ <instruction>
+-- You MUST use `cwd` parameter to set working directory instead of `cd dir && ...`
++- You MUST use `cwd` parameter to set working directory instead of `cd dir && …`
+ - PTY mode is opt-in: set `pty: true` only when command expects a real terminal (for example `sudo`, `ssh` where you need input from the user); default is `false`
+ - You MUST use `;` only when later commands should run regardless of earlier failures
+ - `skill://` URIs are auto-resolved to filesystem paths before execution
+diff --git a/packages/coding-agent/src/prompts/tools/find.md b/packages/coding-agent/src/prompts/tools/find.md
+index b60c6eceb..53777e51e 100644
+--- a/packages/coding-agent/src/prompts/tools/find.md
++++ b/packages/coding-agent/src/prompts/tools/find.md
+@@ -13,6 +13,15 @@ Fast file pattern matching that works with any codebase size.
+ Matching file paths sorted by modification time (most recent first). Results truncated at 1000 entries or 50KB (configurable via `limit`).
+ </output>
+ 
++<example name="find files">
++```
++{
++  "pattern": "src/**/*.ts",
++  "limit": 1000
++}
++```
++</example>
++
+ <avoid>
+ For open-ended searches requiring multiple rounds of globbing and grepping, you MUST use Task tool instead.
+ </avoid>
+\ No newline at end of file
+diff --git a/packages/coding-agent/src/prompts/tools/hashline.md b/packages/coding-agent/src/prompts/tools/hashline.md
+index 3011a5ce6..b09bb0a92 100644
+--- a/packages/coding-agent/src/prompts/tools/hashline.md
++++ b/packages/coding-agent/src/prompts/tools/hashline.md
+@@ -1,97 +1,115 @@
+ # Edit
+ 
+-Apply precise file edits using `LINE#ID` tags, anchoring to the file content.
++Apply precise file edits using `LINE#ID` tags from `read` output.
+ 
+ <workflow>
+-1. You MUST `read` the target range to capture current `LINE#ID` tags.
+-2. You MUST pick the smallest operation per change site (line/range/insert/content-replace).
+-3. You MUST direction-lock every edit: exact current text → intended text.
+-4. You MUST submit one `edit` call per file containing all operations.
+-5. If another edit is needed in that file, you MUST re-read first (hashes changed).
+-6. You MUST output tool calls only; no prose.
++1. You SHOULD issue a `read` call before editing if you have no tagged context for a file.
++2. You MUST pick the smallest operation per change site.
++3. You MUST submit one `edit` call per file with all operations, think your changes through before submitting.
+ </workflow>
+ 
+ <operations>
+-Every edit has `op`, `first` (start anchor), `last` (end anchor), and `content`. All anchors use `"LINE#ID"` format.
+-- **Line or range replace/delete**
+-  - `{ op: "replace", first: "N#ID", content: […] }` (single line)
+-  - `{ op: "replace", first: "N#ID", last: "N#ID", content: […] }` (range)
+-  - Use for swaps, block rewrites, or deleting a full span (`content: null`).
+-- **Insert** (new content)
+-  - `{ op: "prepend", last: "N#ID", content: […] }` or `{ op: "prepend", content: […] }` (no anchor = insert at beginning of file)
+-  - `{ op: "append", first: "N#ID", content: […] }` or `{ op: "append", content: […] }` (no anchor = insert at end of file)
+-  - `{ op: "insert", first: "N#ID", last: "N#ID", content: […] }` (between adjacent anchors; safest for blocks)
+-- **File-level controls**
+-  - `{ delete: true, edits: [] }` deletes the file (cannot be combined with `rename`).
+-  - `{ rename: "new/path.ts", edits: […] }` writes result to new path and removes old path.
+-**Atomicity:** all ops validate against the same pre-edit file snapshot; refs are interpreted against last `read`; applicator applies bottom-up.
++Every edit has `op`, `pos`, and `lines`. Range replaces also have `end`. Both `pos` and `end` use `"N#ID"` format (e.g. `"23#XY"`).
++**`pos`** — the anchor line. Meaning depends on `op`:
++- `replace`: start of range (or the single line to replace)
++- `prepend`: insert new lines **before** this line; omit for beginning of file
++- `append`: insert new lines **after** this line; omit for end of file
++**`end`** — range replace only. The last line of the range (inclusive). Omit for single-line replace.
++**`lines`** — the replacement content:
++- `["line1", "line2"]` — replace with these lines (array of strings)
++- `"line1"` — shorthand for `["line1"]` (single-line replace)
++- `[""]` — replace content with a blank line (line preserved, content cleared)
++- `null` or `[]` — **delete** the line(s) entirely
++
++### Line or range replace/delete
++- `{ file: "…", edits: [{ op: "replace", pos: "N#ID", lines: null }] }` — delete one line
++- `{ file: "…", edits: [{ op: "replace", pos: "N#ID", end: "M#ID", lines: null }] }` — delete a range
++- `{ file: "…", edits: [{ op: "replace", pos: "N#ID", lines: […] }] }` — replace one line
++- `{ file: "…", edits: [{ op: "replace", pos: "N#ID", end: "M#ID", lines: […] }] }` — replace a range
++
++### Insert new lines
++- `{ file: "…", edits: [{ op: "prepend", pos: "N#ID", lines: […] }] }` — insert before tagged line
++- `{ file: "…", edits: [{ op: "prepend", lines: […] }] }` — insert at beginning of file (no tag)
++- `{ file: "…", edits: [{ op: "append", pos: "N#ID", lines: […] }] }` — insert after tagged line
++- `{ file: "…", edits: [{ op: "append", lines: […] }] }` — insert at end of file (no tag)
++
++### File-level controls
++- `{ file: "…", delete: true, edits: [] }` — delete the file
++- `{ file: "…", move: "new/path.ts", edits: […] }` — move file to new path (edits applied first)
++**Atomicity:** all ops in one call validate against the same pre-edit snapshot; tags reference the last `read`. Edits are applied bottom-up, so earlier tags stay valid even when later ops add or remove lines.
+ </operations>
+ 
+ <rules>
+-1. **Minimize scope:** You MUST use one logical mutation site per operation.
+-2. **Preserve formatting:** You MUST keep indentation, punctuation, line breaks, trailing commas, brace style.
+-3. **Prefer insertion over neighbor rewrites:** You SHOULD anchor on structural boundaries (`}`, `]`, `},`) not interior property lines.
+-4. **No no-ops:** replacement content MUST differ from current content.
+-5. **Touch only requested code:** You MUST NOT make incidental edits.
+-6. **Use exact current tokens:** You MUST NOT rewrite approximately; mutate the token that exists now.
+-7. **For swaps/moves:** You SHOULD prefer one range operation over multiple single-line operations.
++1. **Minimize scope:** You MUST use one logical mutation per operation.
++2. **No no-ops:** replacement MUST differ from current.
++3. **Prefer insertion over neighbor rewrites:** You SHOULD anchor on structural boundaries (`}`, `]`, `},`), not interior lines.
++4. **For swaps/moves:** You SHOULD prefer one range op over multiple single-line ops.
+ </rules>
+ 
+-<op-choice>
+-- One wrong line → MUST use `set`
+-- Adjacent block changed → MUST use `insert`
+-- Missing line/block → MUST use `append`/`prepend`
+-</op-choice>
+-
+-<tag-choice>
+-- You MUST copy tags exactly from the prefix of the `read` or error output.
+-- You MUST NOT guess tags.
+-- For inserts, you SHOULD prefer `insert` > `append`/`prepend` when both boundaries are known.
+-- You MUST re-read after each successful edit call before issuing another on same file.
+-</tag-choice>
+-
+ <recovery>
+-**Tag mismatch (`>>>`)**
+-- You MUST retry with the updated tags shown in error output.
+-- You MUST re-read only if required tags are missing from error snippet.
+-- If mismatch repeats, you MUST stop and re-read the exact block.
++**Tag mismatch (`>>>`):** You MUST retry using fresh tags from the error snippet. Re-read only if snippet lacks context.
++**No-op (`identical`):** You MUST NOT resubmit. Re-read target lines and adjust the edit.
+ </recovery>
+ 
+-<example name="fix a value or type">
++<example name="single-line replace">
+ ```ts
+ {{hlinefull 23 "  const timeout: number = 5000;"}}
+ ```
+ ```
+-op: "replace"
+-first: "{{hlineref 23 "  const timeout: number = 5000;"}}"
+-content: ["  const timeout: number = 30_000;"]
++{
++  file: "…",
++  edits: [{
++    op: "replace",
++    pos: "{{hlineref 23 "  const timeout: number = 5000;"}}",
++    lines: ["  const timeout: number = 30_000;"]
++  }]
++}
+ ```
+ </example>
+ 
+-<example name="remove a line entirely">
+-```ts
+-{{hlinefull 7 "// @ts-ignore"}}
+-{{hlinefull 8 "const data = fetchSync(url);"}}
++<example name="delete lines">
++Single line — `lines: null` deletes entirely:
+ ```
++{
++  file: "…",
++  edits: [{
++    op: "replace",
++    pos: "{{hlineref 7 "// @ts-ignore"}}",
++    lines: null
++  }]
++}
+ ```
+-op: "replace"
+-first: "{{hlineref 7 "// @ts-ignore"}}"
+-content: null
++Range — add `end`:
++```
++{
++  file: "…",
++  edits: [{
++    op: "replace",
++    pos: "{{hlineref 80 "  // TODO: remove after migration"}}",
++    end: "{{hlineref 83 "  }"}}",
++    lines: null
++  }]
++}
+ ```
+ </example>
+ 
+-<example name="clear content but keep the line break">
++<example name="clear text but keep the line break">
+ ```ts
+ {{hlinefull 14 "  placeholder: \"DO NOT SHIP\","}}
+ ```
+ ```
+-op: "replace"
+-first: "{{hlineref 14 "  placeholder: \"DO NOT SHIP\","}}"
+-content: [""]
++{
++  file: "…",
++  edits: [{
++    op: "replace",
++    pos: "{{hlineref 14 "  placeholder: \"DO NOT SHIP\","}}",
++    lines: [""]
++  }]
++}
+ ```
+ </example>
+ 
+-<example name="rewrite a block of logic">
++<example name="rewrite a block">
+ ```ts
+ {{hlinefull 60 "    } catch (err) {"}}
+ {{hlinefull 61 "      console.error(err);"}}
+@@ -99,117 +117,74 @@ content: [""]
+ {{hlinefull 63 "    }"}}
+ ```
+ ```
+-op: "replace"
+-first: "{{hlineref 60 "    } catch (err) {"}}"
+-last: "{{hlineref 63 "    }"}}"
+-content: ["    } catch (err) {", "      if (isEnoent(err)) return null;", "      throw err;", "    }"]
++{
++  file: "…",
++  edits: [{
++    op: "replace",
++    pos: "{{hlineref 60 "    } catch (err) {"}}",
++    end: "{{hlineref 63 "    }"}}",
++    lines: [
++      "    } catch (err) {",
++      "      if (isEnoent(err)) return null;",
++      "      throw err;",
++      "    }"
++    ]
++  }]
++}
+ ```
+ </example>
+ 
+-<example name="remove a full block">
+-```ts
+-{{hlinefull 80 "  // TODO: remove after migration"}}
+-{{hlinefull 81 "  if (legacy) {"}}
+-{{hlinefull 82 "    legacyHandler(req);"}}
+-{{hlinefull 83 "  }"}}
+-```
+-```
+-op: "replace"
+-first: "{{hlineref 80 "  // TODO: remove after migration"}}"
+-last: "{{hlineref 83 "  }"}}"
+-content: null
+-```
+-</example>
+-
+-<example name="add an import above the first import">
+-```ts
+-{{hlinefull 1 "import * as fs from \"node:fs/promises\";"}}
+-{{hlinefull 2 "import * as path from \"node:path\";"}}
+-```
+-```
+-op: "prepend"
+-last: "{{hlineref 1 "import * as fs from \"node:fs/promises\";"}}"
+-content: ["import * as os from \"node:os\";"]
+-```
+-Use `last` for anchored insertion before a specific line. Omit anchor to prepend at BOF.
+-</example>
+-
+-<example name="append at end of file">
+-```ts
+-{{hlinefull 260 "export { serialize, deserialize };"}}
+-```
+-```
+-op: "append"
+-first: "{{hlineref 260 "export { serialize, deserialize };"}}"
+-content: ["export { validate };"]
+-```
+-Use `first` for anchored insertion after a specific line. Omit anchor to append at EOF.
+-</example>
+-
+-<example name="add an entry between known siblings">
++<example name="insert between siblings">
+ ```ts
+ {{hlinefull 44 "  \"build\": \"bun run compile\","}}
+ {{hlinefull 45 "  \"test\": \"bun test\""}}
+ ```
+ ```
+-op: "insert"
+-first: "{{hlineref 44 "  \"build\": \"bun run compile\","}}"
+-last: "{{hlineref 45 "  \"test\": \"bun test\""}}"
+-content: ["  \"lint\": \"biome check\","]
++{
++  file: "…",
++  edits: [{
++    op: "prepend",
++    pos: "{{hlineref 45 "  \"test\": \"bun test\""}}",
++    lines: ["  \"lint\": \"biome check\","]
++  }]
++}
++```
++Result:
++```ts
++{{hlinefull 44 "  \"build\": \"bun run compile\","}}
++{{hlinefull 45 "  \"lint\": \"biome check\","}}
++{{hlinefull 46 "  \"test\": \"bun test\""}}
+ ```
+-Dual anchors pin the insert to exactly one gap, preventing drift from edits elsewhere in the file. **Always prefer dual anchors when both boundaries are content lines.**
+ </example>
+ 
+-<example name="insert a function before another function">
++<example name="anchor to structure, not whitespace">
++Trailing `""` in `lines` preserves blank-line separators. Anchor to the structural line, not the blank line above — blank lines are ambiguous and shift.
+ ```ts
+-{{hlinefull 100 "  return buf.toString(\"hex\");"}}
+ {{hlinefull 101 "}"}}
+ {{hlinefull 102 ""}}
+ {{hlinefull 103 "export function serialize(data: unknown): string {"}}
+ ```
++Bad — append after "}"
++Good — anchors to structural line:
+ ```
+-op: "insert"
+-last: "{{hlineref 103 "export function serialize(data: unknown): string {"}}"
+-content: ["function validate(data: unknown): boolean {", "  return data != null && typeof data === \"object\";", "}", ""]
+-```
+-The trailing `""` in `content` preserves the blank-line separator. **Anchor to the structural line (`export function …`), not the blank line above it** — blank lines are ambiguous and may be added or removed by other edits.
+-</example>
+-
+-<example name="file delete">
+-```
+-path: "src/deprecated/legacy.ts"
+-delete: true
+-```
+-</example>
+-
+-<example name="file rename with edits">
+-```
+-path: "src/utils.ts"
+-rename: "src/helpers/utils.ts"
+-edits: […]
+-```
+-</example>
+-
+-<example name="anti-pattern: anchoring to whitespace">
+-Bad — tags to a blank line; fragile if blank lines shift:
+-```
+-first: "{{hlineref 102 ""}}"
+-content: ["function validate() {", …, "}"]
+-```
+-
+-Good — anchors to the structural target:
+-
+-```
+-last: "{{hlineref 103 "export function serialize(data: unknown): string {"}}"
+-content: ["function validate() {", …, "}"]
++{
++  file: "…",
++  edits: [{
++    op: "prepend",
++    pos: "{{hlineref 103 "export function serialize(data: unknown): string {"}}",
++    lines: [
++      "function validate(data: unknown): boolean {",
++      "  return data != null && typeof data === \"object\";",
++      "}",
++      ""
++    ]
++  }]
++}
+ ```
+ </example>
+ 
+ <critical>
+-You MUST ensure:
+-- Payload shape is `{ "path": string, "edits": [operation, …], "delete"?: boolean, "rename"?: string }`
+-- Each edit has `op`, optional `first`/`last` anchors, and `content`
+-- Every tag MUST be copied EXACTLY from a tool result as `N#ID`
+-- Scope MUST be minimal and formatting MUST be preserved except targeted token changes
+-</critical>
+-**Final reminder:** tags are immutable references to the last read snapshot. You MUST re-read when state changes, then edit.
+\ No newline at end of file
++- Edit payload: `{ file, edits[] }`. Each entry: `op`, `lines`, optional `pos`/`end`. No extra keys.
++- Every tag MUST be copied exactly from fresh tool result as `N#ID`.
++- You MUST re-read after each edit call before issuing another on same file.
++</critical>
+\ No newline at end of file
+diff --git a/packages/coding-agent/src/prompts/tools/task.md b/packages/coding-agent/src/prompts/tools/task.md
+index 59d6e1605..18b290831 100644
+--- a/packages/coding-agent/src/prompts/tools/task.md
++++ b/packages/coding-agent/src/prompts/tools/task.md
+@@ -172,7 +172,7 @@ Micromanaging (you think, agent types):
+ ```
+ assignment: "In src/api/handler.ts, line 47, change `throw err` to `throw new ApiError(err.message, 500)`.
+ On line 63, wrap fetch call try/catch return 502 on failure.
+-On line 89, add null check before accessing resp.body..."
++On line 89, add null check before accessing resp.body…"
+ ```
+ 
+ Delegating (agent thinks within constraints):
+@@ -226,8 +226,8 @@ Do not touch TS bindings or downstream consumers — separate phase.
+ 
+ ## Change
+ - Implement three N-API exports in grep.rs:
+-  - `search(pattern: JsString, path: JsString, env: Env) -> napi::Result<Vec<Match>>`
+-...
++  - `search(pattern: JsString, path: JsString, env: Env) → napi::Result<Vec<Match>>`
++…
+ 
+ ## Acceptance (task-local)
+ - Three functions exported with correct signatures (caller verifies build after all tasks)
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 53712869f..88c073b21 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -134,6 +134,7 @@ function renderDescription(
+ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
+ 	readonly name = "task";
+ 	readonly label = "Task";
++	readonly strict = true;
+ 	readonly parameters: TaskSchema;
+ 	readonly renderCall = renderCall;
+ 	readonly renderResult = renderResult;
+diff --git a/packages/coding-agent/src/tools/ask.ts b/packages/coding-agent/src/tools/ask.ts
+index 6c1ae98dd..2f76ab437 100644
+--- a/packages/coding-agent/src/tools/ask.ts
++++ b/packages/coding-agent/src/tools/ask.ts
+@@ -246,6 +246,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+ 	readonly label = "Ask";
+ 	readonly description: string;
+ 	readonly parameters = askSchema;
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		this.description = renderPromptTemplate(askDescription);
+diff --git a/packages/coding-agent/src/tools/bash.ts b/packages/coding-agent/src/tools/bash.ts
+index 099f50b30..91486f2de 100644
+--- a/packages/coding-agent/src/tools/bash.ts
++++ b/packages/coding-agent/src/tools/bash.ts
+@@ -91,6 +91,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
+ 	readonly description: string;
+ 	readonly parameters: BashToolSchema;
+ 	readonly concurrency = "exclusive";
++	readonly strict = true;
+ 	readonly #asyncEnabled: boolean;
+ 
+ 	constructor(private readonly session: ToolSession) {
+diff --git a/packages/coding-agent/src/tools/browser.ts b/packages/coding-agent/src/tools/browser.ts
+index 7c9084152..509c66e26 100644
+--- a/packages/coding-agent/src/tools/browser.ts
++++ b/packages/coding-agent/src/tools/browser.ts
+@@ -484,6 +484,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
+ 	readonly label = "Puppeteer";
+ 	readonly description: string;
+ 	readonly parameters = browserSchema;
++	readonly strict = true;
+ 	#browser: Browser | null = null;
+ 	#page: Page | null = null;
+ 	#currentHeadless: boolean | null = null;
+diff --git a/packages/coding-agent/src/tools/calculator.ts b/packages/coding-agent/src/tools/calculator.ts
+index f255ffab3..6c6335769 100644
+--- a/packages/coding-agent/src/tools/calculator.ts
++++ b/packages/coding-agent/src/tools/calculator.ts
+@@ -399,6 +399,7 @@ export class CalculatorTool implements AgentTool<typeof calculatorSchema, Calcul
+ 	readonly label = "Calc";
+ 	readonly description: string;
+ 	readonly parameters = calculatorSchema;
++	readonly strict = true;
+ 
+ 	constructor(_session: ToolSession) {
+ 		this.description = renderPromptTemplate(calculatorDescription);
+diff --git a/packages/coding-agent/src/tools/cancel-job.ts b/packages/coding-agent/src/tools/cancel-job.ts
+index b7636595a..be174ccdd 100644
+--- a/packages/coding-agent/src/tools/cancel-job.ts
++++ b/packages/coding-agent/src/tools/cancel-job.ts
+@@ -20,6 +20,7 @@ export class CancelJobTool implements AgentTool<typeof cancelJobSchema, CancelJo
+ 	readonly label = "CancelJob";
+ 	readonly description: string;
+ 	readonly parameters = cancelJobSchema;
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		this.description = renderPromptTemplate(cancelJobDescription);
+diff --git a/packages/coding-agent/src/tools/exit-plan-mode.ts b/packages/coding-agent/src/tools/exit-plan-mode.ts
+index a7765fda0..e65d99f71 100644
+--- a/packages/coding-agent/src/tools/exit-plan-mode.ts
++++ b/packages/coding-agent/src/tools/exit-plan-mode.ts
+@@ -45,6 +45,7 @@ export class ExitPlanModeTool implements AgentTool<typeof exitPlanModeSchema, Ex
+ 	readonly label = "ExitPlanMode";
+ 	readonly description: string;
+ 	readonly parameters = exitPlanModeSchema;
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		this.description = renderPromptTemplate(exitPlanModeDescription);
+diff --git a/packages/coding-agent/src/tools/fetch.ts b/packages/coding-agent/src/tools/fetch.ts
+index 1b10eca3d..417722d9d 100644
+--- a/packages/coding-agent/src/tools/fetch.ts
++++ b/packages/coding-agent/src/tools/fetch.ts
+@@ -856,6 +856,7 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
+ 	readonly label = "Fetch";
+ 	readonly description: string;
+ 	readonly parameters = fetchSchema;
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		this.description = renderPromptTemplate(fetchDescription);
+diff --git a/packages/coding-agent/src/tools/find.ts b/packages/coding-agent/src/tools/find.ts
+index bf49759f6..9cb3106a0 100644
+--- a/packages/coding-agent/src/tools/find.ts
++++ b/packages/coding-agent/src/tools/find.ts
+@@ -127,6 +127,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
+ 	readonly label = "Find";
+ 	readonly description: string;
+ 	readonly parameters = findSchema;
++	readonly strict = true;
+ 
+ 	readonly #customOps?: FindOperations;
+ 
+diff --git a/packages/coding-agent/src/tools/grep.ts b/packages/coding-agent/src/tools/grep.ts
+index deabefd1f..6e84870f2 100644
+--- a/packages/coding-agent/src/tools/grep.ts
++++ b/packages/coding-agent/src/tools/grep.ts
+@@ -60,6 +60,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
+ 	readonly label = "Grep";
+ 	readonly description: string;
+ 	readonly parameters = grepSchema;
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		const displayMode = resolveFileDisplayMode(session);
+diff --git a/packages/coding-agent/src/tools/notebook.ts b/packages/coding-agent/src/tools/notebook.ts
+index 9fda1faaf..c1c2f079e 100644
+--- a/packages/coding-agent/src/tools/notebook.ts
++++ b/packages/coding-agent/src/tools/notebook.ts
+@@ -65,6 +65,7 @@ export class NotebookTool implements AgentTool<typeof notebookSchema, NotebookTo
+ 	readonly description =
+ 		"Completely replaces the contents of a specific cell in a Jupyter notebook (.ipynb file) with new source. Jupyter notebooks are interactive documents that combine code, text, and visualizations, commonly used for data analysis and scientific computing. The notebook_path parameter must be an absolute path, not a relative path. The cell_number is 0-indexed. Use edit_mode=insert to add a new cell at the index specified by cell_number. Use edit_mode=delete to delete the cell at the index specified by cell_number.";
+ 	readonly parameters = notebookSchema;
++	readonly strict = true;
+ 	readonly concurrency = "exclusive";
+ 
+ 	constructor(private readonly session: ToolSession) {}
+diff --git a/packages/coding-agent/src/tools/plan-mode-guard.ts b/packages/coding-agent/src/tools/plan-mode-guard.ts
+index 854b7a3d5..eeeca435f 100644
+--- a/packages/coding-agent/src/tools/plan-mode-guard.ts
++++ b/packages/coding-agent/src/tools/plan-mode-guard.ts
+@@ -19,7 +19,7 @@ export function resolvePlanPath(session: ToolSession, targetPath: string): strin
+ export function enforcePlanModeWrite(
+ 	session: ToolSession,
+ 	targetPath: string,
+-	options?: { rename?: string; op?: "create" | "update" | "delete" },
++	options?: { move?: string; op?: "create" | "update" | "delete" },
+ ): void {
+ 	const state = session.getPlanModeState?.();
+ 	if (!state?.enabled) return;
+@@ -27,7 +27,7 @@ export function enforcePlanModeWrite(
+ 	const resolvedTarget = resolvePlanPath(session, targetPath);
+ 	const resolvedPlan = resolvePlanPath(session, state.planFilePath);
+ 
+-	if (options?.rename) {
++	if (options?.move) {
+ 		throw new ToolError("Plan mode: renaming files is not allowed.");
+ 	}
+ 
+diff --git a/packages/coding-agent/src/tools/poll-jobs.ts b/packages/coding-agent/src/tools/poll-jobs.ts
+index 155aad8ed..c51b113e5 100644
+--- a/packages/coding-agent/src/tools/poll-jobs.ts
++++ b/packages/coding-agent/src/tools/poll-jobs.ts
+@@ -39,6 +39,7 @@ export class PollJobsTool implements AgentTool<typeof pollJobsSchema, PollJobsTo
+ 	readonly label = "PollJobs";
+ 	readonly description: string;
+ 	readonly parameters = pollJobsSchema;
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		this.description = renderPromptTemplate(pollJobsDescription);
+diff --git a/packages/coding-agent/src/tools/python.ts b/packages/coding-agent/src/tools/python.ts
+index d8c203dc7..4dd37b3c6 100644
+--- a/packages/coding-agent/src/tools/python.ts
++++ b/packages/coding-agent/src/tools/python.ts
+@@ -148,6 +148,7 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
+ 	readonly description: string;
+ 	readonly parameters = pythonSchema;
+ 	readonly concurrency = "exclusive";
++	readonly strict = true;
+ 
+ 	readonly #proxyExecutor?: PythonProxyExecutor;
+ 
+diff --git a/packages/coding-agent/src/tools/read.ts b/packages/coding-agent/src/tools/read.ts
+index 8e8903a8b..af54eac3d 100644
+--- a/packages/coding-agent/src/tools/read.ts
++++ b/packages/coding-agent/src/tools/read.ts
+@@ -558,6 +558,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+ 	readonly description: string;
+ 	readonly parameters = readSchema;
+ 	readonly nonAbortable = true;
++	readonly strict = true;
+ 
+ 	readonly #autoResizeImages: boolean;
+ 
+diff --git a/packages/coding-agent/src/tools/ssh.ts b/packages/coding-agent/src/tools/ssh.ts
+index 34605bd7d..1f3e2c7c6 100644
+--- a/packages/coding-agent/src/tools/ssh.ts
++++ b/packages/coding-agent/src/tools/ssh.ts
+@@ -122,6 +122,7 @@ export class SshTool implements AgentTool<typeof sshSchema, SSHToolDetails> {
+ 	readonly label = "SSH";
+ 	readonly parameters = sshSchema;
+ 	readonly concurrency = "exclusive";
++	readonly strict = true;
+ 
+ 	readonly #allowedHosts: Set<string>;
+ 
+diff --git a/packages/coding-agent/src/tools/submit-result.ts b/packages/coding-agent/src/tools/submit-result.ts
+index d8e64a54b..5bade58b6 100644
+--- a/packages/coding-agent/src/tools/submit-result.ts
++++ b/packages/coding-agent/src/tools/submit-result.ts
+@@ -59,6 +59,7 @@ export class SubmitResultTool implements AgentTool<TObject, SubmitResultDetails>
+ 		"Finish the task with structured JSON output. Call exactly once at the end of the task.\n\n" +
+ 		"If you cannot complete the task, call with status='aborted' and an error message.";
+ 	readonly parameters: TObject;
++	readonly strict = true;
+ 
+ 	readonly #validate?: ValidateFunction;
+ 	readonly #schemaError?: string;
+diff --git a/packages/coding-agent/src/tools/todo-write.ts b/packages/coding-agent/src/tools/todo-write.ts
+index c0bc68758..9d7d0499e 100644
+--- a/packages/coding-agent/src/tools/todo-write.ts
++++ b/packages/coding-agent/src/tools/todo-write.ts
+@@ -289,6 +289,7 @@ export class TodoWriteTool implements AgentTool<typeof todoWriteSchema, TodoWrit
+ 	readonly description: string;
+ 	readonly parameters = todoWriteSchema;
+ 	readonly concurrency = "exclusive";
++	readonly strict = true;
+ 
+ 	constructor(private readonly session: ToolSession) {
+ 		this.description = renderPromptTemplate(todoWriteDescription);
+diff --git a/packages/coding-agent/src/tools/write.ts b/packages/coding-agent/src/tools/write.ts
+index 8c69a1cf0..3f5afcaab 100644
+--- a/packages/coding-agent/src/tools/write.ts
++++ b/packages/coding-agent/src/tools/write.ts
+@@ -75,6 +75,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
+ 	readonly description: string;
+ 	readonly parameters = writeSchema;
+ 	readonly nonAbortable = true;
++	readonly strict = true;
+ 	readonly concurrency = "exclusive";
+ 
+ 	readonly #writethrough: WritethroughCallback;
+diff --git a/packages/coding-agent/src/web/search/index.ts b/packages/coding-agent/src/web/search/index.ts
+index 438d76644..262747c87 100644
+--- a/packages/coding-agent/src/web/search/index.ts
++++ b/packages/coding-agent/src/web/search/index.ts
+@@ -258,6 +258,7 @@ export class SearchTool implements AgentTool<typeof webSearchSchema, SearchRende
+ 	readonly label = "Web Search";
+ 	readonly description: string;
+ 	readonly parameters = webSearchSchema;
++	readonly strict = true;
+ 
+ 	constructor(_session: ToolSession) {
+ 		this.description = renderPromptTemplate(webSearchDescription);
+diff --git a/packages/coding-agent/test/core/hashline.test.ts b/packages/coding-agent/test/core/hashline.test.ts
+index c89478e19..6d350624f 100644
+--- a/packages/coding-agent/test/core/hashline.test.ts
++++ b/packages/coding-agent/test/core/hashline.test.ts
+@@ -4,16 +4,16 @@ import {
+ 	computeLineHash,
+ 	formatHashLines,
+ 	HashlineMismatchError,
+-	hashlineParseContent,
++	hashlineParseText,
+ 	parseTag,
+ 	streamHashLinesFromLines,
+ 	streamHashLinesFromUtf8,
+ 	stripNewLinePrefixes,
+ 	validateLineRef,
+ } from "@oh-my-pi/pi-coding-agent/patch";
+-import { formatLineTag, type HashlineEdit, type LineTag } from "@oh-my-pi/pi-coding-agent/patch/hashline";
++import { type Anchor, formatLineTag, type HashlineEdit } from "@oh-my-pi/pi-coding-agent/patch/hashline";
+ 
+-function makeTag(line: number, content: string): LineTag {
++function makeTag(line: number, content: string): Anchor {
+ 	return parseTag(formatLineTag(line, content));
+ }
+ 
+@@ -43,6 +43,18 @@ describe("computeLineHash", () => {
+ 		const hash = computeLineHash(1, "");
+ 		expect(hash).toMatch(/^[ZPMQVRWSNKTXJBYH]{2}$/);
+ 	});
++
++	it("uses line number for symbol-only lines", () => {
++		const a = computeLineHash(1, "***");
++		const b = computeLineHash(2, "***");
++		expect(a).not.toBe(b);
++	});
++
++	it("does not use line number for alphanumeric lines", () => {
++		const a = computeLineHash(1, "hello");
++		const b = computeLineHash(2, "hello");
++		expect(a).toBe(b);
++	});
+ });
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+@@ -233,49 +245,47 @@ describe("validateLineRef", () => {
+ describe("applyHashlineEdits — replace", () => {
+ 	it("replaces single line", () => {
+ 		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(2, "bbb"), content: ["BBB"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBBB\nccc");
++		expect(result.lines).toBe("aaa\nBBB\nccc");
+ 		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("range replace (shrink)", () => {
+ 		const content = "aaa\nbbb\nccc\nddd";
+-		const edits: HashlineEdit[] = [
+-			{ op: "replace", first: makeTag(2, "bbb"), last: makeTag(3, "ccc"), content: ["ONE"] },
+-		];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), end: makeTag(3, "ccc"), lines: ["ONE"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nONE\nddd");
++		expect(result.lines).toBe("aaa\nONE\nddd");
+ 	});
+ 
+ 	it("range replace (same count)", () => {
+ 		const content = "aaa\nbbb\nccc\nddd";
+ 		const edits: HashlineEdit[] = [
+-			{ op: "replace", first: makeTag(2, "bbb"), last: makeTag(3, "ccc"), content: ["XXX", "YYY"] },
++			{ op: "replace", pos: makeTag(2, "bbb"), end: makeTag(3, "ccc"), lines: ["XXX", "YYY"] },
+ 		];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nXXX\nYYY\nddd");
++		expect(result.lines).toBe("aaa\nXXX\nYYY\nddd");
+ 		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("replaces first line", () => {
+ 		const content = "first\nsecond\nthird";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(1, "first"), content: ["FIRST"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(1, "first"), lines: ["FIRST"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("FIRST\nsecond\nthird");
++		expect(result.lines).toBe("FIRST\nsecond\nthird");
+ 		expect(result.firstChangedLine).toBe(1);
+ 	});
+ 
+ 	it("replaces last line", () => {
+ 		const content = "first\nsecond\nthird";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(3, "third"), content: ["THIRD"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(3, "third"), lines: ["THIRD"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("first\nsecond\nTHIRD");
++		expect(result.lines).toBe("first\nsecond\nTHIRD");
+ 		expect(result.firstChangedLine).toBe(3);
+ 	});
+ });
+@@ -287,192 +297,170 @@ describe("applyHashlineEdits — replace", () => {
+ describe("applyHashlineEdits — delete", () => {
+ 	it("deletes single line", () => {
+ 		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(2, "bbb"), content: [] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), lines: [] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nccc");
++		expect(result.lines).toBe("aaa\nccc");
+ 		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("deletes range of lines", () => {
+ 		const content = "aaa\nbbb\nccc\nddd";
+-		const edits: HashlineEdit[] = [{ op: "replace", first: makeTag(2, "bbb"), last: makeTag(3, "ccc"), content: [] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "bbb"), end: makeTag(3, "ccc"), lines: [] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nddd");
++		expect(result.lines).toBe("aaa\nddd");
+ 	});
+ 
+ 	it("deletes first line", () => {
+ 		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(1, "aaa"), content: [] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(1, "aaa"), lines: [] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("bbb\nccc");
++		expect(result.lines).toBe("bbb\nccc");
+ 	});
+ 
+ 	it("deletes last line", () => {
+ 		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(3, "ccc"), content: [] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(3, "ccc"), lines: [] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nbbb");
++		expect(result.lines).toBe("aaa\nbbb");
+ 	});
+ });
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+-// applyHashlineEdits — insert
++// applyHashlineEdits — append
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+-describe("applyHashlineEdits — insert", () => {
++describe("applyHashlineEdits — append", () => {
+ 	it("inserts after a line", () => {
+ 		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: ["NEW"] }];
++		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: ["NEW"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
++		expect(result.lines).toBe("aaa\nNEW\nbbb\nccc");
+ 		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("inserts multiple lines", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: ["x", "y", "z"] }];
++		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: ["x", "y", "z"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nx\ny\nz\nbbb");
++		expect(result.lines).toBe("aaa\nx\ny\nz\nbbb");
+ 	});
+ 
+ 	it("inserts after last line", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(2, "bbb"), content: ["NEW"] }];
++		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(2, "bbb"), lines: ["NEW"] }];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nbbb\nNEW");
++		expect(result.lines).toBe("aaa\nbbb\nNEW");
+ 	});
+ 
+-	it("insert with empty dst throws", () => {
++	it("insert with empty dst inserts an empty line", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: [] }];
++		const edits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: [] }];
+ 
+-		expect(() => applyHashlineEdits(content, edits)).toThrow();
++		const result = applyHashlineEdits(content, edits);
++		expect(result.lines).toBe("aaa\n\nbbb");
++		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("inserts at EOF without anchors", () => {
+ 		const content = "aaa\nbbb";
+-		const edits = [{ op: "append", content: ["NEW"] }] as unknown as HashlineEdit[];
++		const edits = [{ op: "append", lines: ["NEW"] }] as unknown as HashlineEdit[];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nbbb\nNEW");
++		expect(result.lines).toBe("aaa\nbbb\nNEW");
+ 		expect(result.firstChangedLine).toBe(3);
+ 	});
+ 
+ 	it("inserts at EOF into empty file without anchors", () => {
+ 		const content = "";
+-		const edits = [{ op: "append", content: ["NEW"] }] as unknown as HashlineEdit[];
++		const edits = [{ op: "append", lines: ["NEW"] }] as unknown as HashlineEdit[];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("NEW");
++		expect(result.lines).toBe("NEW");
+ 		expect(result.firstChangedLine).toBe(1);
+ 	});
+ 
+-	it("insert at EOF with empty dst throws", () => {
++	it("insert at EOF with empty dst inserts a trailing empty line", () => {
+ 		const content = "aaa\nbbb";
+-		const edits = [{ op: "append", content: [] }] as unknown as HashlineEdit[];
++		const edits = [{ op: "append", lines: [] }] as unknown as HashlineEdit[];
+ 
+-		expect(() => applyHashlineEdits(content, edits)).toThrow();
++		const result = applyHashlineEdits(content, edits);
++		expect(result.lines).toBe("aaa\nbbb\n");
++		expect(result.firstChangedLine).toBe(3);
+ 	});
+ });
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+-// applyHashlineEdits — insert (before)
++// applyHashlineEdits — prepend
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+-describe("applyHashlineEdits — insert (before)", () => {
++describe("applyHashlineEdits — prepend", () => {
+ 	it("inserts before a line", () => {
+ 		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(2, "bbb"), content: ["NEW"] }];
++		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["NEW"] }];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
++		expect(result.lines).toBe("aaa\nNEW\nbbb\nccc");
+ 		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("inserts multiple lines before", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(2, "bbb"), content: ["x", "y", "z"] }];
++		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["x", "y", "z"] }];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nx\ny\nz\nbbb");
++		expect(result.lines).toBe("aaa\nx\ny\nz\nbbb");
+ 	});
+ 
+ 	it("inserts before first line", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(1, "aaa"), content: ["NEW"] }];
++		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: ["NEW"] }];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("NEW\naaa\nbbb");
++		expect(result.lines).toBe("NEW\naaa\nbbb");
+ 	});
+ 
+ 	it("prepends at BOF without anchor", () => {
+ 		const content = "aaa\nbbb";
+-		const edits = [{ op: "prepend", content: ["NEW"] }] as unknown as HashlineEdit[];
++		const edits = [{ op: "prepend", lines: ["NEW"] }] as unknown as HashlineEdit[];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("NEW\naaa\nbbb");
++		expect(result.lines).toBe("NEW\naaa\nbbb");
+ 		expect(result.firstChangedLine).toBe(1);
+ 	});
+ 
+-	it("insert with before and empty text throws", () => {
++	it("insert with before and empty text inserts an empty line", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(1, "aaa"), content: [] }];
+-		expect(() => applyHashlineEdits(content, edits)).toThrow();
++		const edits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: [] }];
++		const result = applyHashlineEdits(content, edits);
++		expect(result.lines).toBe("\naaa\nbbb");
++		expect(result.firstChangedLine).toBe(1);
+ 	});
+ 
+ 	it("insert before and insert after at same line produce correct order", () => {
+ 		const content = "aaa\nbbb\nccc";
+ 		const edits: HashlineEdit[] = [
+-			{ op: "prepend", before: makeTag(2, "bbb"), content: ["BEFORE"] },
+-			{ op: "append", after: makeTag(2, "bbb"), content: ["AFTER"] },
++			{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["BEFORE"] },
++			{ op: "append", pos: makeTag(2, "bbb"), lines: ["AFTER"] },
+ 		];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBEFORE\nbbb\nAFTER\nccc");
++		expect(result.lines).toBe("aaa\nBEFORE\nbbb\nAFTER\nccc");
+ 	});
+ 
+ 	it("insert before with set at same line", () => {
+ 		const content = "aaa\nbbb\nccc";
+ 		const edits: HashlineEdit[] = [
+-			{ op: "prepend", before: makeTag(2, "bbb"), content: ["BEFORE"] },
+-			{ op: "replace", tag: makeTag(2, "bbb"), content: ["BBB"] },
++			{ op: "prepend", pos: makeTag(2, "bbb"), lines: ["BEFORE"] },
++			{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] },
+ 		];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBEFORE\nBBB\nccc");
++		expect(result.lines).toBe("aaa\nBEFORE\nBBB\nccc");
+ 	});
+ });
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+-// applyHashlineEdits — insert (between)
+-// ═══════════════════════════════════════════════════════════════════════════
+-
+-describe("applyHashlineEdits — insert (between)", () => {
+-	it("inserts between adjacent anchors", () => {
+-		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [
+-			{ op: "insert", after: makeTag(1, "aaa"), before: makeTag(2, "bbb"), content: ["NEW"] },
+-		];
+-		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nNEW\nbbb\nccc");
+-		expect(result.firstChangedLine).toBe(2);
+-	});
+-
+-	it("inserts multiple lines between anchors", () => {
+-		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [
+-			{
+-				op: "insert",
+-				after: makeTag(1, "aaa"),
+-				before: makeTag(2, "bbb"),
+-				content: ["x", "y", "z"],
+-			},
+-		];
+-		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nx\ny\nz\nbbb\nccc");
+-	});
+-});
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+ // applyHashlineEdits — heuristics
+@@ -485,13 +473,13 @@ describe("applyHashlineEdits — heuristics", () => {
+ 		const edits: HashlineEdit[] = [
+ 			{
+ 				op: "replace",
+-				tag: parseTag(`2#${srcHash}export function foo(a, b) {}`), // comma in trailing content
+-				content: ["BBB"],
++				pos: parseTag(`2#${srcHash}export function foo(a, b) {}`), // comma in trailing content
++				lines: ["BBB"],
+ 			},
+ 		];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBBB\nccc");
++		expect(result.lines).toBe("aaa\nBBB\nccc");
+ 	});
+ 
+ 	it("does not override model whitespace choices in replacement content", () => {
+@@ -499,13 +487,13 @@ describe("applyHashlineEdits — heuristics", () => {
+ 		const edits: HashlineEdit[] = [
+ 			{
+ 				op: "replace",
+-				first: makeTag(1, "import { foo } from 'x';"),
+-				last: makeTag(2, "import { bar } from 'y';"),
+-				content: ["import {foo} from 'x';", "import { bar } from 'y';", "// added"],
++				pos: makeTag(1, "import { foo } from 'x';"),
++				end: makeTag(2, "import { bar } from 'y';"),
++				lines: ["import {foo} from 'x';", "import { bar } from 'y';", "// added"],
+ 			},
+ 		];
+ 		const result = applyHashlineEdits(content, edits);
+-		const outLines = result.content.split("\n");
++		const outLines = result.lines.split("\n");
+ 		// Model's whitespace choice is respected -- no longer overridden
+ 		expect(outLines[0]).toBe("import {foo} from 'x';");
+ 		expect(outLines[1]).toBe("import { bar } from 'y';");
+@@ -516,9 +504,9 @@ describe("applyHashlineEdits — heuristics", () => {
+ 	it("treats same-line ranges as single-line replacements", () => {
+ 		const content = "aaa\nbbb\nccc";
+ 		const good = makeTag(2, "bbb");
+-		const edits: HashlineEdit[] = [{ op: "replace", first: good, last: good, content: ["BBB"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: good, end: good, lines: ["BBB"] }];
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBBB\nccc");
++		expect(result.lines).toBe("aaa\nBBB\nccc");
+ 	});
+ });
+ 
+@@ -530,35 +518,35 @@ describe("applyHashlineEdits — multiple edits", () => {
+ 	it("applies two non-overlapping replaces (bottom-up safe)", () => {
+ 		const content = "aaa\nbbb\nccc\nddd\neee";
+ 		const edits: HashlineEdit[] = [
+-			{ op: "replace", tag: makeTag(2, "bbb"), content: ["BBB"] },
+-			{ op: "replace", tag: makeTag(4, "ddd"), content: ["DDD"] },
++			{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] },
++			{ op: "replace", pos: makeTag(4, "ddd"), lines: ["DDD"] },
+ 		];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBBB\nccc\nDDD\neee");
++		expect(result.lines).toBe("aaa\nBBB\nccc\nDDD\neee");
+ 		expect(result.firstChangedLine).toBe(2);
+ 	});
+ 
+ 	it("applies replace + delete in one call", () => {
+ 		const content = "aaa\nbbb\nccc\nddd";
+ 		const edits: HashlineEdit[] = [
+-			{ op: "replace", tag: makeTag(2, "bbb"), content: ["BBB"] },
+-			{ op: "replace", tag: makeTag(4, "ddd"), content: [] },
++			{ op: "replace", pos: makeTag(2, "bbb"), lines: ["BBB"] },
++			{ op: "replace", pos: makeTag(4, "ddd"), lines: [] },
+ 		];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nBBB\nccc");
++		expect(result.lines).toBe("aaa\nBBB\nccc");
+ 	});
+ 
+-	it("applies replace + insert in one call", () => {
++	it("applies replace + append in one call", () => {
+ 		const content = "aaa\nbbb\nccc";
+ 		const edits: HashlineEdit[] = [
+-			{ op: "replace", tag: makeTag(3, "ccc"), content: ["CCC"] },
+-			{ op: "append", after: makeTag(1, "aaa"), content: ["INSERTED"] },
++			{ op: "replace", pos: makeTag(3, "ccc"), lines: ["CCC"] },
++			{ op: "append", pos: makeTag(1, "aaa"), lines: ["INSERTED"] },
+ 		];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nINSERTED\nbbb\nCCC");
++		expect(result.lines).toBe("aaa\nINSERTED\nbbb\nCCC");
+ 	});
+ 
+ 	it("applies non-overlapping edits against original anchors when line counts change", () => {
+@@ -566,21 +554,21 @@ describe("applyHashlineEdits — multiple edits", () => {
+ 		const edits: HashlineEdit[] = [
+ 			{
+ 				op: "replace",
+-				first: makeTag(2, "two"),
+-				last: makeTag(3, "three"),
+-				content: ["TWO_THREE"],
++				pos: makeTag(2, "two"),
++				end: makeTag(3, "three"),
++				lines: ["TWO_THREE"],
+ 			},
+-			{ op: "replace", tag: makeTag(6, "six"), content: ["SIX"] },
++			{ op: "replace", pos: makeTag(6, "six"), lines: ["SIX"] },
+ 		];
+ 
+ 		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("one\nTWO_THREE\nfour\nfive\nSIX");
++		expect(result.lines).toBe("one\nTWO_THREE\nfour\nfive\nSIX");
+ 	});
+ 
+ 	it("empty edits array is a no-op", () => {
+ 		const content = "aaa\nbbb";
+ 		const result = applyHashlineEdits(content, []);
+-		expect(result.content).toBe(content);
++		expect(result.lines).toBe(content);
+ 		expect(result.firstChangedLine).toBeUndefined();
+ 	});
+ });
+@@ -593,13 +581,13 @@ describe("applyHashlineEdits — errors", () => {
+ 	it("rejects stale hash", () => {
+ 		const content = "aaa\nbbb\nccc";
+ 		// Use a hash that doesn't match any line (avoid 00 — ccc hashes to 00)
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: parseTag("2#QQ"), content: ["BBB"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: parseTag("2#QQ"), lines: ["BBB"] }];
+ 		expect(() => applyHashlineEdits(content, edits)).toThrow(HashlineMismatchError);
+ 	});
+ 
+ 	it("stale hash error shows >>> markers with correct hashes", () => {
+ 		const content = "aaa\nbbb\nccc\nddd\neee";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: parseTag("2#QQ"), content: ["BBB"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: parseTag("2#QQ"), lines: ["BBB"] }];
+ 
+ 		try {
+ 			applyHashlineEdits(content, edits);
+@@ -623,8 +611,8 @@ describe("applyHashlineEdits — errors", () => {
+ 		const content = "aaa\nbbb\nccc\nddd\neee";
+ 		// Use hashes that don't match any line (avoid 00 — ccc hashes to 00)
+ 		const edits: HashlineEdit[] = [
+-			{ op: "replace", tag: parseTag("2#ZZ"), content: ["BBB"] },
+-			{ op: "replace", tag: parseTag("4#ZZ"), content: ["DDD"] },
++			{ op: "replace", pos: parseTag("2#ZZ"), lines: ["BBB"] },
++			{ op: "replace", pos: parseTag("4#ZZ"), lines: ["DDD"] },
+ 		];
+ 
+ 		try {
+@@ -645,7 +633,7 @@ describe("applyHashlineEdits — errors", () => {
+ 	it("does not relocate stale line refs even when hash uniquely matches another line", () => {
+ 		const content = "aaa\nbbb\nccc";
+ 		const staleButUnique = parseTag(`2#${computeLineHash(1, "ccc")}`);
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: staleButUnique, content: ["CCC"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: staleButUnique, lines: ["CCC"] }];
+ 		try {
+ 			applyHashlineEdits(content, edits);
+ 			expect.unreachable("should have thrown");
+@@ -659,62 +647,32 @@ describe("applyHashlineEdits — errors", () => {
+ 	it("does not relocate when expected hash is non-unique", () => {
+ 		const content = "dup\nmid\ndup";
+ 		const staleDuplicate = parseTag(`2#${computeLineHash(1, "dup")}`);
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: staleDuplicate, content: ["DUP"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: staleDuplicate, lines: ["DUP"] }];
+ 
+ 		expect(() => applyHashlineEdits(content, edits)).toThrow(HashlineMismatchError);
+ 	});
+ 
+ 	it("rejects out-of-range line", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: parseTag("10#ZZ"), content: ["X"] }];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: parseTag("10#ZZ"), lines: ["X"] }];
+ 
+ 		expect(() => applyHashlineEdits(content, edits)).toThrow(/does not exist/);
+ 	});
+ 
+ 	it("rejects range with start > end", () => {
+ 		const content = "aaa\nbbb\nccc\nddd\neee";
+-		const edits: HashlineEdit[] = [
+-			{ op: "replace", first: makeTag(5, "eee"), last: makeTag(2, "bbb"), content: ["X"] },
+-		];
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(5, "eee"), end: makeTag(2, "bbb"), lines: ["X"] }];
+ 
+ 		expect(() => applyHashlineEdits(content, edits)).toThrow();
+ 	});
+ 
+-	it("rejects insert with after and empty text", () => {
++	it("accepts append/prepend with empty text by inserting empty lines", () => {
+ 		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "append", after: makeTag(1, "aaa"), content: [] }];
++		const appendEdits: HashlineEdit[] = [{ op: "append", pos: makeTag(1, "aaa"), lines: [] }];
++		expect(applyHashlineEdits(content, appendEdits).lines).toBe("aaa\n\nbbb");
+ 
+-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+-	});
+-
+-	it("rejects insert with before and empty text", () => {
+-		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [{ op: "prepend", before: makeTag(1, "aaa"), content: [] }];
+-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+-	});
+-
+-	it("rejects insert with both anchors and empty text", () => {
+-		const content = "aaa\nbbb";
+-		const edits: HashlineEdit[] = [
+-			{ op: "insert", after: makeTag(1, "aaa"), before: makeTag(2, "bbb"), content: [] },
+-		];
+-		expect(() => applyHashlineEdits(content, edits)).toThrow();
+-	});
+-
+-	it("inserts with non-adjacent anchors (before the 'before' anchor)", () => {
+-		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [
+-			{ op: "insert", after: makeTag(1, "aaa"), before: makeTag(3, "ccc"), content: ["NEW"] },
+-		];
+-		const result = applyHashlineEdits(content, edits);
+-		expect(result.content).toBe("aaa\nbbb\nNEW\nccc");
+-	});
+-	it("rejects insert with reversed anchors (before <= after)", () => {
+-		const content = "aaa\nbbb\nccc";
+-		const edits: HashlineEdit[] = [
+-			{ op: "insert", after: makeTag(3, "ccc"), before: makeTag(1, "aaa"), content: ["NEW"] },
+-		];
+-		expect(() => applyHashlineEdits(content, edits)).toThrow(/after.*<.*before/);
++		const prependEdits: HashlineEdit[] = [{ op: "prepend", pos: makeTag(1, "aaa"), lines: [] }];
++		expect(applyHashlineEdits(content, prependEdits).lines).toBe("\naaa\nbbb");
+ 	});
+ });
+ 
+@@ -760,21 +718,21 @@ describe("stripNewLinePrefixes", () => {
+ 
+ describe("hashlineParseContent", () => {
+ 	it("returns empty array for null", () => {
+-		expect(hashlineParseContent(null)).toEqual([]);
++		expect(hashlineParseText(null)).toEqual([]);
+ 	});
+ 
+ 	it("returns array as-is (bypasses stripNewLinePrefixes)", () => {
+ 		const input = ["- [x] done", "- [ ] todo"];
+-		expect(hashlineParseContent(input)).toBe(input);
++		expect(hashlineParseText(input)).toBe(input);
+ 	});
+ 
+ 	it("splits string on newline and preserves Markdown list '-' prefix", () => {
+-		const result = hashlineParseContent("- item one\n- item two\n- item three");
++		const result = hashlineParseText("- item one\n- item two\n- item three");
+ 		expect(result).toEqual(["- item one", "- item two", "- item three"]);
+ 	});
+ 
+ 	it("strips '+' diff markers from string input", () => {
+-		const result = hashlineParseContent("+line one\n+line two");
++		const result = hashlineParseText("+line one\n+line two");
+ 		expect(result).toEqual(["line one", "line two"]);
+ 	});
+ 
+@@ -785,20 +743,20 @@ describe("hashlineParseContent", () => {
+ 		const edits: HashlineEdit[] = [
+ 			{
+ 				op: "replace",
+-				tag: makeTag(2, "- old item"),
+-				content: hashlineParseContent("- [x] new item"),
++				pos: makeTag(2, "- old item"),
++				lines: hashlineParseText("- [x] new item"),
+ 			},
+ 		];
+ 		const result = applyHashlineEdits(fileContent, edits);
+-		expect(result.content).toBe("# Title\n- [x] new item\n- old item 2\nfooter");
++		expect(result.lines).toBe("# Title\n- [x] new item\n- old item 2\nfooter");
+ 	});
+ 
+ 	it("regression: set op replacing multiple list items preserves all '-' prefixes", () => {
+ 		// All replacement lines start with '- ', triggering the 50% heuristic when '-' matched.
+ 		const fileContent = "- [x] done\n- [ ] pending\n- [ ] also pending";
+-		const newContent = hashlineParseContent("- [x] done");
+-		const edits: HashlineEdit[] = [{ op: "replace", tag: makeTag(2, "- [ ] pending"), content: newContent }];
++		const newContent = hashlineParseText("- [x] done");
++		const edits: HashlineEdit[] = [{ op: "replace", pos: makeTag(2, "- [ ] pending"), lines: newContent }];
+ 		const result = applyHashlineEdits(fileContent, edits);
+-		expect(result.content).toBe("- [x] done\n- [x] done\n- [ ] also pending");
++		expect(result.lines).toBe("- [x] done\n- [x] done\n- [ ] also pending");
+ 	});
+ });
+diff --git a/packages/coding-agent/test/tools.test.ts b/packages/coding-agent/test/tools.test.ts
+index a4494fba1..3344e17f4 100644
+--- a/packages/coding-agent/test/tools.test.ts
++++ b/packages/coding-agent/test/tools.test.ts
+@@ -272,7 +272,7 @@ describe("Coding Agent Tools", () => {
+ 			fs.writeFileSync(testFile, originalContent);
+ 
+ 			const result = await editTool.execute("test-call-5", {
+-				path: testFile,
++				file: testFile,
+ 				old_text: "world",
+ 				new_text: "testing",
+ 			});
+@@ -291,7 +291,7 @@ describe("Coding Agent Tools", () => {
+ 
+ 			await expect(
+ 				editTool.execute("test-call-6", {
+-					path: testFile,
++					file: testFile,
+ 					old_text: "nonexistent",
+ 					new_text: "testing",
+ 				}),
+@@ -305,7 +305,7 @@ describe("Coding Agent Tools", () => {
+ 
+ 			await expect(
+ 				editTool.execute("test-call-7", {
+-					path: testFile,
++					file: testFile,
+ 					old_text: "foo",
+ 					new_text: "bar",
+ 				}),
+@@ -317,7 +317,7 @@ describe("Coding Agent Tools", () => {
+ 			fs.writeFileSync(testFile, "foo bar foo baz foo");
+ 
+ 			const result = await editTool.execute("test-all-1", {
+-				path: testFile,
++				file: testFile,
+ 				old_text: "foo",
+ 				new_text: "qux",
+ 				all: true,
+@@ -349,7 +349,7 @@ function b() {
+ 			// With multiple fuzzy matches, the tool rejects for safety to avoid ambiguous replacements
+ 			await expect(
+ 				editTool.execute("test-all-fuzzy", {
+-					path: testFile,
++					file: testFile,
+ 					old_text: "if (x) {\n  doThing();\n}",
+ 					new_text: "if (y) {\n  doOther();\n}",
+ 					all: true,
+@@ -363,7 +363,7 @@ function b() {
+ 
+ 			await expect(
+ 				editTool.execute("test-all-nomatch", {
+-					path: testFile,
++					file: testFile,
+ 					old_text: "nonexistent",
+ 					new_text: "bar",
+ 					all: true,
+@@ -376,7 +376,7 @@ function b() {
+ 			fs.writeFileSync(testFile, "start\nfoo\nbar\nend\nstart\nfoo\nbar\nend");
+ 
+ 			const result = await editTool.execute("test-all-multiline", {
+-				path: testFile,
++				file: testFile,
+ 				old_text: "foo\nbar",
+ 				new_text: "replaced",
+ 				all: true,
+@@ -392,7 +392,7 @@ function b() {
+ 			fs.writeFileSync(testFile, "hello world");
+ 
+ 			const result = await editTool.execute("test-all-single", {
+-				path: testFile,
++				file: testFile,
+ 				old_text: "world",
+ 				new_text: "universe",
+ 				all: true,
+@@ -690,7 +690,7 @@ describe("edit tool CRLF handling", () => {
+ 		fs.writeFileSync(testFile, "line one\r\nline two\r\nline three\r\n");
+ 
+ 		const result = await editTool.execute("test-crlf-1", {
+-			path: testFile,
++			file: testFile,
+ 			old_text: "line two\n",
+ 			new_text: "replaced line\n",
+ 		});
+@@ -703,7 +703,7 @@ describe("edit tool CRLF handling", () => {
+ 		fs.writeFileSync(testFile, "first\r\nsecond\r\nthird\r\n");
+ 
+ 		await editTool.execute("test-crlf-2", {
+-			path: testFile,
++			file: testFile,
+ 			old_text: "second\n",
+ 			new_text: "REPLACED\n",
+ 		});
+@@ -717,7 +717,7 @@ describe("edit tool CRLF handling", () => {
+ 		fs.writeFileSync(testFile, "first\nsecond\nthird\n");
+ 
+ 		await editTool.execute("test-lf-1", {
+-			path: testFile,
++			file: testFile,
+ 			old_text: "second\n",
+ 			new_text: "REPLACED\n",
+ 		});
+@@ -733,7 +733,7 @@ describe("edit tool CRLF handling", () => {
+ 
+ 		await expect(
+ 			editTool.execute("test-crlf-dup", {
+-				path: testFile,
++				file: testFile,
+ 				old_text: "hello\nworld\n",
+ 				new_text: "replaced\n",
+ 			}),
+@@ -753,7 +753,7 @@ describe("edit tool CRLF handling", () => {
+ 			const session = createTestToolSession(hashDir);
+ 			const hashlineEditTool = new EditTool(session);
+ 			const result = await hashlineEditTool.execute("hashline-delete-1", {
+-				path: testFile,
++				file: testFile,
+ 				edits: [],
+ 				delete: true,
+ 			});
+@@ -781,12 +781,12 @@ describe("edit tool CRLF handling", () => {
+ 			const session = createTestToolSession(hashDir);
+ 			const hashlineEditTool = new EditTool(session);
+ 			const result = await hashlineEditTool.execute("hashline-rename-1", {
+-				path: sourceFile,
++				file: sourceFile,
+ 				edits: [],
+-				rename: targetFile,
++				move: targetFile,
+ 			});
+ 
+-			expect(getTextOutput(result)).toContain("Updated and moved");
++			expect(getTextOutput(result)).toContain("Moved");
+ 			expect(fs.existsSync(sourceFile)).toBe(false);
+ 			expect(fs.existsSync(targetFile)).toBe(true);
+ 			expect(await Bun.file(targetFile).text()).toBe("unchanged content\n");
+@@ -803,7 +803,7 @@ describe("edit tool CRLF handling", () => {
+ 		fs.writeFileSync(testFile, "\uFEFFfirst\r\nsecond\r\nthird\r\n");
+ 
+ 		await editTool.execute("test-bom", {
+-			path: testFile,
++			file: testFile,
+ 			old_text: "second\n",
+ 			new_text: "REPLACED\n",
+ 		});
+diff --git a/packages/react-edit-benchmark/runs/grok-4-1-fast_hashline_2026-02-22T22-18-11.md b/packages/react-edit-benchmark/runs/grok-4-1-fast_hashline_2026-02-22T22-18-11.md
+new file mode 100644
+index 000000000..65eb9cda7
+--- /dev/null
++++ b/packages/react-edit-benchmark/runs/grok-4-1-fast_hashline_2026-02-22T22-18-11.md
+@@ -0,0 +1,906 @@
++# Edit Benchmark Report
++
++## Configuration
++
++| Setting | Value |
++|---------|-------|
++| Date | 2026-02-22T22:15:04.016Z |
++| Model | xai/xai/grok-4-1-fast |
++| Thinking Level | low |
++| Runs per task | 1 |
++| Edit Variant | hashline |
++| Edit Fuzzy | auto |
++| Edit Fuzzy Threshold | auto |
++| Guided Mode | no |
++| Max Attempts | 1 |
++| Max Turns | 10 |
++| No-op Retry Limit | 2 |
++| Mutation Scope Window | 20 |
++| Require Edit Tool | no |
++| Require Read Tool | no |
++| No-Edit Baseline | no |
++
++## Summary
++
++| Metric | Value |
++|--------|-------|
++| Total Tasks | 80 |
++| Total Runs | 80 |
++| Successful Runs | 63 |
++| **Task Success Rate** | **78.8% (63/80)** |
++| Verified Rate | 78.8% (63/80) |
++| Edit Tool Usage Rate | 100.0% (80/80) |
++| **Edit Success Rate** | **98.8%** |
++| Timeout Runs | 0 |
++| Mutation Intent Match Rate | 80.0% |
++| Patch Failure Rate | 1.2% (1/82) |
++| Tasks All Passing | 63 |
++| Tasks Flaky/Failing | 17 |
++
++### Tool Calls
++
++| Tool | Total | Avg/Run |
++|------|-------|---------|
++| Read | 168 | 2.1 |
++| Edit | 82 | 1.0 |
++| Write | 0 | 0.0 |
++| **Tool Input Chars** | 20,345 | 254 |
++
++### Tokens & Time
++
++| Metric | Total | Avg/Run |
++|--------|-------|---------|
++| Input Tokens | 575,177 | 7,190 |
++| Output Tokens | 284,473 | 3,556 |
++| Total Tokens | 3,474,377 | 43,430 |
++| Duration | 41m35s | 31.2s |
++| **Avg Indent Score** | — | **0.09** |
++
++## Task Results
++
++| Task | File | Success | Edit Hit | R/E/W | Tokens (In/Out) | Time | Indent |
++|------|------|---------|----------|-------|-----------------|------|--------|
++| Access Remove Optional Chain 001 | registerDevToolsEventLogger.js | 1/1 ✅ | 100.0% | 2/1/0 | 8,796/3,772 | 42.9s | 0.00 |
++| Access Remove Optional Chain 002 | index.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/8,367 | 1m1s | 0.00 |
++| Access Remove Optional Chain 003 | canvas.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/8,269 | 51.7s | 0.00 |
++| Access Remove Optional Chain 004 | index.js | 1/1 ✅ | 100.0% | 2/1/0 | 10,819/2,829 | 23.4s | 0.00 |
++| Call Swap Call Args 001 | FallbackCompositionState.js | 1/1 ✅ | 100.0% | 2/1/0 | 813/2,242 | 29.9s | 0.00 |
++| Call Swap Call Args 002 | ReactFlightDOMClientBrowser.js | 1/1 ✅ | 100.0% | 3/1/0 | 21,146/12,618 | 1m53s | 0.00 |
++| Call Swap Call Args 003 | ReactDOMEventListener.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,386 | 17.8s | 0.00 |
++| Call Swap Call Args 004 | ReactFlightDOMServerEdge.js | 1/1 ✅ | 100.0% | 2/1/0 | 18,746/1,889 | 16.7s | 0.00 |
++| Duplicate Duplicate Line Flip 001 | ReactFlightClientDevToolsHook.js | 1/1 ✅ | 100.0% | 2/1/0 | 15,114/3,673 | 29.5s | 0.00 |
++| Duplicate Duplicate Line Flip 002 | ReactFizzConfigMarkup.js | 1/1 ✅ | 100.0% | 2/1/0 | 8,618/1,798 | 18.7s | 0.00 |
++| Duplicate Duplicate Line Flip 003 | ActivityList.js | 1/1 ✅ | 100.0% | 1/1/0 | 10,394/1,921 | 16.0s | 0.00 |
++| Duplicate Duplicate Line Flip 004 | RunReactCompiler.ts | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,645 | 18.6s | 0.00 |
++| Identifier Identifier Multi Edit 001 | ReactDOMUpdatePriority.js | 1/1 ✅ | 100.0% | 2/1/0 | 7,127/1,170 | 14.9s | 0.00 |
++| Identifier Identifier Multi Edit 002 | ReactDOMSelect.js | 1/1 ✅ | 100.0% | 2/1/0 | 10,806/2,148 | 19.2s | 0.00 |
++| Identifier Identifier Multi Edit 003 | ReactFlightDOMClientEdge.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,727 | 12.8s | 0.00 |
++| Identifier Identifier Multi Edit 004 | ErrorBoundary.js | 1/1 ✅ | 100.0% | 2/1/0 | 10,695/1,826 | 17.6s | 0.00 |
++| Import Swap Named Imports 001 | SettingsModal.js | 1/1 ✅ | 100.0% | 1/1/0 | 0/2,101 | 24.3s | 0.00 |
++| Import Swap Named Imports 002 | index.js | 0/1 ❌ | 100.0% | 6/1/0 | 11,772/5,441 | 50.5s | 0.00 |
++| Import Swap Named Imports 003 | ReactDOMInput.js | 1/1 ✅ | 100.0% | 9/1/0 | 0/7,130 | 44.2s | 0.00 |
++| Import Swap Named Imports 004 | Element.js | 1/1 ✅ | 100.0% | 4/1/0 | 29,014/8,787 | 1m13s | 0.00 |
++| Literal Flip Boolean 001 | DevToolsFeatureFlags.core-fb.js | 1/1 ✅ | 100.0% | 2/1/0 | 5,976/1,199 | 13.5s | 0.00 |
++| Literal Flip Boolean 002 | ReactDOMSelection.js | 1/1 ✅ | 100.0% | 2/1/0 | 8,634/1,919 | 18.9s | 0.00 |
++| Literal Flip Boolean 003 | DOMPropertyOperations.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/6,028 | 57.8s | 0.00 |
++| Literal Flip Boolean 004 | SuspenseRects.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/7,988 | 45.6s | 0.00 |
++| Literal Off By One 001 | AutoSizeInput.js | 1/1 ✅ | 100.0% | 2/1/0 | 7,838/1,235 | 16.5s | 0.00 |
++| Literal Off By One 002 | ReactFlightDOMClientNode.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,378 | 13.9s | 0.00 |
++| Literal Off By One 003 | simulateBrowserEventDispatch.js | 1/1 ✅ | 100.0% | 2/1/0 | 16,565/6,808 | 1m1s | 0.00 |
++| Literal Off By One 004 | ReactFlightDOMClientBrowser.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,425 | 18.3s | 0.00 |
++| Operator Remove Negation 001 | InspectedElementStateTree.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/2,140 | 15.8s | 0.00 |
++| Operator Remove Negation 002 | messageHandlers.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,624 | 18.1s | 0.00 |
++| Operator Remove Negation 003 | BeforeInputEventPlugin.js | 1/1 ✅ | 100.0% | 2/1/0 | 14,093/2,760 | 22.9s | 0.00 |
++| Operator Remove Negation 004 | ReactFiberComponentStack.js | 1/1 ✅ | 100.0% | 3/1/0 | 0/6,387 | 1m15s | 0.00 |
++| Operator Swap Arithmetic 001 | id-generator.js | 1/1 ✅ | 100.0% | 2/1/0 | 6,006/1,251 | 14.9s | 0.00 |
++| Operator Swap Arithmetic 002 | ReactCompiler.ts | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,036 | 12.1s | 0.00 |
++| Operator Swap Arithmetic 003 | ReactFlightDOMServerEdge.js | 1/1 ✅ | 100.0% | 2/1/0 | 9,235/1,471 | 17.7s | 0.00 |
++| Operator Swap Arithmetic 004 | ReactFlightPerformanceTrack.js | 1/1 ✅ | 100.0% | 1/1/0 | 15,645/2,962 | 26.2s | 0.00 |
++| Operator Swap Comparison 001 | useSmartTooltip.js | 1/1 ✅ | 100.0% | 2/1/0 | 6,932/1,774 | 19.6s | 0.00 |
++| Operator Swap Comparison 002 | ReactFlightHooks.js | 1/1 ✅ | 100.0% | 2/1/0 | 7,945/1,905 | 18.0s | 0.00 |
++| Operator Swap Comparison 003 | ReactFlightDOMServerBrowser.js | 1/1 ✅ | 100.0% | 2/1/0 | 14,316/5,326 | 45.6s | 2.00 |
++| Operator Swap Comparison 004 | ReactDOMInput.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/5,250 | 33.4s | 0.00 |
++| Operator Swap Equality 001 | backend.js | 1/1 ✅ | 100.0% | 2/1/0 | 5,823/1,020 | 12.3s | 0.00 |
++| Operator Swap Equality 002 | SnapshotSelector.js | 1/1 ✅ | 100.0% | 1/1/0 | 0/1,122 | 9.8s | 0.00 |
++| Operator Swap Equality 003 | ReactFiberTransition.js | 1/1 ✅ | 100.0% | 2/1/0 | 12,379/2,283 | 21.0s | 0.00 |
++| Operator Swap Equality 004 | ReactFlightDOMClientEdge.js | 1/1 ✅ | 100.0% | 1/1/0 | 9,836/1,775 | 17.1s | 0.00 |
++| Operator Swap Increment Decrement 001 | ReactFlightClientConfigTargetTurbopackServer.js | 1/1 ✅ | 100.0% | 2/1/0 | 5,931/1,469 | 19.4s | 0.00 |
++| Operator Swap Increment Decrement 002 | ReactFlightWebpackNodeRegister.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,339 | 22.1s | 0.00 |
++| Operator Swap Increment Decrement 003 | ReactChildren.js | 1/1 ✅ | 100.0% | 2/1/0 | 12,330/1,214 | 14.5s | 0.00 |
++| Operator Swap Increment Decrement 004 | ReactFlightClientConfigBundlerWebpack.js | 1/1 ✅ | 100.0% | 2/1/0 | 11,019/1,944 | 19.8s | 0.00 |
++| Operator Swap Logical 001 | withPermissionsCheck.js | 1/1 ✅ | 100.0% | 2/1/0 | 7,987/1,368 | 15.7s | 0.00 |
++| Operator Swap Logical 002 | ReactFlightClientConfigBundlerWebpackBrowser.js | 1/1 ✅ | 100.0% | 1/1/0 | 0/1,377 | 9.3s | 0.00 |
++| Operator Swap Logical 003 | ReactFlightDOMClientBrowser.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/2,003 | 19.5s | 0.00 |
++| Operator Swap Logical 004 | ReactFlightDOMServerEdge.js | 1/1 ✅ | 100.0% | 3/2/0 | 12,901/5,097 | 45.5s | 0.00 |
++| Operator Swap Nullish 001 | colors.js | 1/1 ✅ | 100.0% | 2/1/0 | 9,938/2,369 | 30.8s | 0.00 |
++| Operator Swap Nullish 002 | ReactFlightServerConfigTurbopackBundler.js | 1/1 ✅ | 100.0% | 2/1/0 | 15,746/3,067 | 29.4s | 0.00 |
++| Operator Swap Nullish 003 | hookNamesCache.js | 1/1 ✅ | 100.0% | 3/1/0 | 12,107/5,203 | 43.8s | 0.00 |
++| Operator Swap Nullish 004 | RunReactCompiler.ts | 1/1 ✅ | 100.0% | 1/1/0 | 1,224/1,745 | 18.9s | 0.00 |
++| Regex Swap Regex Quantifier 001 | SimpleValues.js | 1/1 ✅ | 100.0% | 2/1/0 | 13,955/1,504 | 20.1s | 0.00 |
++| Regex Swap Regex Quantifier 002 | utils.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,454 | 19.8s | 0.00 |
++| Regex Swap Regex Quantifier 003 | ReactFlightStackConfigV8.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/8,388 | 1m6s | 0.00 |
++| Regex Swap Regex Quantifier 004 | ReactChildren.js | 1/1 ✅ | 100.0% | 2/1/0 | 16,753/7,655 | 1m13s | 0.00 |
++| Structural Delete Statement 001 | geometry.js | 1/1 ✅ | 100.0% | 2/1/0 | 16,887/1,314 | 14.3s | 0.00 |
++| Structural Delete Statement 002 | SidebarEventInfo.js | 0/1 ❌ | 100.0% | 1/1/0 | 0/3,622 | 21.7s | 0.00 |
++| Structural Delete Statement 003 | ReactFlightDOMServerEdge.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/5,160 | 42.1s | 0.00 |
++| Structural Delete Statement 004 | ReactFlightDOMServerNode.js | 0/1 ❌ | 100.0% | 2/1/0 | 17,148/3,594 | 33.1s | 0.00 |
++| Structural Remove Early Return 001 | formatWithStyles.js | 0/1 ❌ | 50.0% | 3/2/0 | 0/4,934 | 56.1s | 0.00 |
++| Structural Remove Early Return 002 | ReactFlightClientConfigBundlerWebpackBrowser.js | 0/1 ❌ | 100.0% | 2/1/0 | 24,989/5,403 | 48.5s | 0.00 |
++| Structural Remove Early Return 003 | standalone.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/7,978 | 54.9s | 2.00 |
++| Structural Remove Early Return 004 | backend.js | 0/1 ❌ | 100.0% | 2/1/0 | 15,476/7,045 | 45.1s | 0.00 |
++| Structural Swap Adjacent Lines 001 | ReactSuspenseTestUtils.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,220 | 13.4s | 0.00 |
++| Structural Swap Adjacent Lines 002 | NativeEventsView.js | 1/1 ✅ | 100.0% | 2/1/0 | 11,036/2,321 | 21.4s | 0.00 |
++| Structural Swap Adjacent Lines 003 | SyntheticEvent.js | 0/1 ❌ | 100.0% | 2/1/0 | 28,441/15,338 | 1m46s | 0.00 |
++| Structural Swap Adjacent Lines 004 | ReactDOMComponentTree.js | 0/1 ❌ | 100.0% | 2/1/0 | 0/4,217 | 22.1s | 3.33 |
++| Structural Swap If Else 001 | resolveBoxStyle.js | 0/1 ❌ | 100.0% | 2/1/0 | 10,553/3,486 | 31.8s | 0.00 |
++| Structural Swap If Else 002 | ReactCacheImpl.js | 1/1 ✅ | 100.0% | 2/1/0 | 2,571/2,972 | 27.0s | 0.00 |
++| Structural Swap If Else 003 | CSSPropertyOperations.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/6,043 | 42.0s | 0.00 |
++| Structural Swap If Else 004 | ResponderTouchHistoryStore.js | 0/1 ❌ | 100.0% | 1/1/0 | 9,553/3,075 | 24.5s | 0.00 |
++| Unicode Unicode Hyphen 001 | ReactFlightClientConfig.dom-bun.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/856 | 11.7s | 0.00 |
++| Unicode Unicode Hyphen 002 | backendManager.js | 1/1 ✅ | 100.0% | 1/1/0 | 0/1,309 | 13.7s | 0.00 |
++| Unicode Unicode Hyphen 003 | ReactFlightDOMClientBrowser.js | 1/1 ✅ | 100.0% | 2/1/0 | 0/1,537 | 13.1s | 0.00 |
++| Unicode Unicode Hyphen 004 | ReactFlightActionServer.js | 0/1 ❌ | 100.0% | 2/1/0 | 13,549/7,048 | 1m | 0.00 |
++
++## Category Summary
++
++| Category | Runs | Verified | Edit Used | Success | Min/Avg/Max Difficulty |
++|----------|------|----------|-----------|---------|------------------------|
++| access | 4 | 50.0% (2/4) | 100.0% (4/4) | 50.0% (2/4) | 6 / 8.0 / 10 |
++| call | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) | 5 / 9.3 / 15 |
++| duplicate | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) | 9 / 12.0 / 16 |
++| identifier | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) | 8 / 9.0 / 10 |
++| import | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) | 2 / 4.3 / 8 |
++| literal | 8 | 87.5% (7/8) | 100.0% (8/8) | 87.5% (7/8) | 4 / 8.8 / 12 |
++| operator | 28 | 96.4% (27/28) | 100.0% (28/28) | 96.4% (27/28) | 2 / 7.9 / 14 |
++| regex | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) | 2 / 6.3 / 8 |
++| structural | 16 | 31.3% (5/16) | 100.0% (16/16) | 31.3% (5/16) | 4 / 7.9 / 13 |
++| unicode | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) | 4 / 7.0 / 8 |
++
++## Mutation Summary
++
++| Mutation | Category | Runs | Verified | Edit Used | Success |
++|----------|----------|------|----------|-----------|---------|
++| delete-statement | structural | 4 | 25.0% (1/4) | 100.0% (4/4) | 25.0% (1/4) |
++| duplicate-line-flip | duplicate | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| flip-boolean | literal | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) |
++| identifier-multi-edit | identifier | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| off-by-one | literal | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| remove-early-return | structural | 4 | 0.0% (0/4) | 100.0% (4/4) | 0.0% (0/4) |
++| remove-negation | operator | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| remove-optional-chain | access | 4 | 50.0% (2/4) | 100.0% (4/4) | 50.0% (2/4) |
++| swap-adjacent-lines | structural | 4 | 50.0% (2/4) | 100.0% (4/4) | 50.0% (2/4) |
++| swap-arithmetic | operator | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| swap-call-args | call | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| swap-comparison | operator | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) |
++| swap-equality | operator | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| swap-if-else | structural | 4 | 50.0% (2/4) | 100.0% (4/4) | 50.0% (2/4) |
++| swap-increment-decrement | operator | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| swap-logical | operator | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| swap-named-imports | import | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) |
++| swap-nullish | operator | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| swap-regex-quantifier | regex | 4 | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
++| unicode-hyphen | unicode | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) |
++
++## Difficulty Summary
++
++| Difficulty Score | Runs | Verified | Edit Used | Success |
++|------------------|------|----------|-----------|---------|
++| 0-2 | 4 | 75.0% (3/4) | 100.0% (4/4) | 75.0% (3/4) |
++| 3-5 | 17 | 82.4% (14/17) | 100.0% (17/17) | 82.4% (14/17) |
++| 6-8 | 26 | 80.8% (21/26) | 100.0% (26/26) | 80.8% (21/26) |
++| 9+ | 33 | 75.8% (25/33) | 100.0% (33/33) | 75.8% (25/33) |
++
++## Edit Tool Errors
++
++Failures where the edit tool returned an error or failed to apply the patch.
++
++### Structural Remove Early Return 001 (formatWithStyles.js)
++
++#### Run 1
++
++##### Attempt 1
++
++- Path: —
++- Operation: —
++
++**Tool error**
++
++```
++1 line has changed since last read. Use the updated LINE#ID references shown below (>>> marks changed lines).
++
++    33#WQ:  // Matches any of %(o|O|d|i|s|f), but not %%(o|O|d|i|s|f)
++    34#WN:  const REGEXP = /([^%]|^)((%%)*)(%([oOdisf]))/g;
++>>> 35#MP:  if (typeof inputArgs[0] === 'string' && inputArgs[0].match(REGEXP)) {
++    36#QX:    return [`%c${inputArgs[0]}`, style, ...inputArgs.slice(1)];
++    37#QM:  } else {
++```
++
++**Patch args**
++
++```diff
++{
++  "file": "formatWithStyles.js",
++  "edits": [
++    {
++      "op": "prepend",
++      "pos": "35#QX",
++      "lines": [
++        "  if (typeof inputArgs[0] === 'string' && inputArgs[0].indexOf('%c') !== -1) {",
++        "    return inputArgs;",
++        "  }"
++      ]
++    }
++  ]
++}
++```
++
++## Failed Tasks (0% passing)
++
++### Access Remove Optional Chain 002 (index.js) — 0/1
++
++**All runs failed with same error:** File mismatch for index.js
++
++**Sample agent response (run 1):**
++```
++**index.js** line 192: restored `?.` before `postMessage`.
++
++**Commands run:**
++- `read index.js` → full file loaded
++- `edit index.js` → replaced line 192#MX with `ports[registeredTabId].extension?.postMessage({ event })` → passed
++- `read index.js` (offset 185, limit 15) → confirmed change isolated to line 192 (now #YS), no other modifications
++
++Change verified: only intended token restored, structure/formatting preserved.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -163 @@
++ }
++ 
++ chrome.runtime.onMessage.addListener((message, sender) => {
++-  switch (message?.source) {
+++  switch (message.source) {
++     case 'devtools-page': {
++       handleDevToolsPageMessage(message);
++       break;
++@@ -189 @@
++       const event =
++         activeTabId === numericRegisteredTabId ? 'resumeElementPolling' : 'pauseElementPolling';
++ 
++-      ports[registeredTabId].extension.postMessage({ event });
+++      ports[registeredTabId].extension?.postMessage({ event });
++     }
++   }
++ });
++```
++
++### Access Remove Optional Chain 003 (canvas.js) — 0/1
++
++**All runs failed with same error:** File mismatch for canvas.js
++
++**Sample agent response (run 1):**
++```
++**canvas.js** line 205: Restored optional chaining in `if (canvas?.parentNode != null)`.
++
++**Verification:**
++- Initial read: Confirmed bug at 205#XR `canvas.parentNode`.
++- Edit applied successfully.
++- Re-read 200–219: Confirmed `205#VJ:    if (canvas?.parentNode != null) {`, no other changes.
++
++**Commands:**
++- `read canvas.js` → Passed.
++- `edit canvas.js` → Passed.
++- `read canvas.js offset=200 limit=20` → Passed.
++
++No TODOs.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -101 @@
++     if (!rect) return;
++     const key = `${rect.left},${rect.top}`;
++     if (!positionGroups.has(key)) positionGroups.set(key, []);
++-    positionGroups.get(key)?.push({ rect, color, displayName, count });
+++    positionGroups.get(key).push({ rect, color, displayName, count });
++   });
++ 
++   return Array.from(positionGroups.values()).sort((groupA, groupB) => {
++@@ -202 @@
++     }
++ 
++     // $FlowFixMe[incompatible-use]: Flow doesn't recognize Popover API and loses canvas nullability tracking
++-    if (canvas.parentNode != null) {
+++    if (canvas?.parentNode != null) {
++       // $FlowFixMe[incompatible-call]: Flow doesn't track that canvas is non-null here
++       canvas.parentNode.removeChild(canvas);
++     }
++```
++
++### Import Swap Named Imports 002 (index.js) — 0/1
++
++**All runs failed with same error:** File mismatch for index.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++- index.js L12: Swapped `buttonType` and `buttonsType` in the named import from './constants'.
++
++**Verification**
++
++- Confirmed via re-read: Only targeted line mutated (`12#NB:import { buttonsType, buttonType } from './constants';`); unchanged lines retain original tags/content.
++- Minimum change: Single token swap, formatting preserved.
++
++**Commands run**
++- `read index.js`
++- `read ./constants.js` (not found)
++- `read ./domEnvironment.js` (not found)
++- `read ./testHelpers.js` (not found…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -9 @@
++ 
++ 'use strict';
++ 
++-import { buttonType, buttonsType } from './constants';
+++import { buttonsType, buttonType } from './constants';
++ import * as domEvents from './domEvents';
++ import * as domEventSequences from './domEventSequences';
++ import * as domEvents from './domEvents';
++ import * as domEventSequences from './domEventSequences';
++-import { hasPointerEvent, setPointerEvent, platform } from './domEnvironment';
+++import { setPointerEvent, hasPointerEvent, platform } from './domEnvironment';
++ import { describeWithPointerEvent, testWithPointerType } from './testHelpers';
++ 
++ const createEventTarget = (node) => ({
++```
++
++### Literal Flip Boolean 004 (SuspenseRects.js) — 0/1
++
++**All runs failed with same error:** File mismatch for SuspenseRects.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++SuspenseRects.js lines 62–63  
++Replaced absolute `1px` shrink with relative `calc(100% / viewBox.width)` (width) and `calc(100% / viewBox.height)` (height) to shrink by 1 DOM pixel after scaling.
++
++**Verification**  
++- Initial `read` (full file): success  
++- `edit`: success  
++- Confirm `read` (lines 55–69): new lines match intent, no side effects  
++
++Bug fixed: inner rects (`adjust=true`) now shrink correctly by 1 DOM pixel regardless of scale.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -59 @@
++       data-hovered={hovered}
++       style={{
++         // Shrink one pixel so that the bottom outline will line up with the top outline of the next one.
++-        width: adjust ? 'calc(' + width + ' - 1px)' : width,
++-        height: adjust ? 'calc(' + height + ' - 1px)' : height,
+++        width: adjust ? 'calc(' + width + ' - calc(100% / ' + viewBox.width + '))' : width,
+++        height: adjust ? 'calc(' + height + ' - calc(100% / ' + viewBox.height + '))' : height,
++         top: y,
++         left: x,
++       }}
++@@ -558 @@
++                 styles.SuspenseRectOutline + ' ' + getClassNameForEnvironment(selectedEnvironment)
++               }
++               rect={selectedBoundingBox}
++-              adjust={true}
+++              adjust={false}
++             />
++           ) : null}
++         </div>
++```
++
++### Operator Swap Comparison 004 (ReactDOMInput.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ReactDOMInput.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++`ReactDOMInput.js`
++
++- Line 292: Added `  node.name = '';` before `const checkedOrDefault` in `initInput` (insert via `prepend` to `"292#TN"` before edit).
++
++Confirmed via re-read (lines 280-299): insertion clean, no other mutations, structure preserved. Disconnects radio group before checked handling, restores at end (line 336). Matches `updateInput` pattern, fulfills line 290 comment.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -289 @@
++   // Reference: https://bugs.chromium.org/p/chromium/issues/detail?id=608416
++   // We need to temporarily unset name to avoid disrupting radio button groups.
++ 
+++  node.name = '';
++   const checkedOrDefault = checked != null ? checked : defaultChecked;
++   // TODO: This 'function' or 'symbol' check isn't replicated in other places
++   // so this semantic is inconsistent.
++@@ -408 @@
++         '"][type="radio"]',
++     );
++ 
++-    for (let i = 0; i < group.length; i++) {
+++    for (let i = 0; i <= group.length; i++) {
++       const otherNode = ((group[i]: any): HTMLInputElement);
++       if (otherNode === rootNode || otherNode.form !== rootNode.form) {
++         continue;
++```
++
++### Structural Delete Statement 002 (SidebarEventInfo.js) — 0/1
++
++**All runs failed with same error:** File mismatch for SidebarEventInfo.js
++
++**Sample agent response (run 1):**
++```
++**Commands run:**
++- `read SidebarEventInfo.js`
++- `edit SidebarEventInfo.js`
++
++**Changes:**
++- `SidebarEventInfo.js` 57#JM: replaced `const componentStack = eventInfo.componentStack || null;` with `const { timestamp, componentName, componentStack = null } = eventInfo;` restoring the destructuring that defines `timestamp` and `componentName`.
++
++Verified: re-read confirms only line 57 changed; `timestamp`, `componentName`, and `componentStack` now defined from `eventInfo`; structure and formatting pr…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -54 @@
++ };
++ 
++ function SchedulingEventInfo({ eventInfo }: SchedulingEventProps) {
++-  const { componentName, timestamp } = eventInfo;
++-  const componentStack = eventInfo.componentStack || null;
+++  const { timestamp, componentName, componentStack = null } = eventInfo;
++ 
++   return (
++     <>
++```
++
++### Structural Delete Statement 003 (ReactFlightDOMServerEdge.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ReactFlightDOMServerEdge.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++- `ReactFlightDOMServerEdge.js`: Inserted `const messages = stringBuffer.split('\n');` (new line 82#YP) before the `for` loop (former 82#PP, now 83#PP) in `progress` function of `startReadingFromDebugChannelReadableStream`. Fixes undeclared `messages` used in loop and assignment.
++
++**Commands run**
++- `read ReactFlightDOMServerEdge.js` → full file
++- `edit ReactFlightDOMServerEdge.js` → insert line → passed
++- `read ReactFlightDOMServerEdge.js` (offset=70, limit=30) → verified insertio…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -78 @@
++     stringBuffer += done
++       ? readFinalStringChunk(stringDecoder, new Uint8Array(0))
++       : readPartialStringChunk(stringDecoder, buffer);
+++
++     const messages = stringBuffer.split('\n');
++     for (let i = 0; i < messages.length - 1; i++) {
++       resolveDebugMessage(request, messages[i]);
++```
++
++### Structural Delete Statement 004 (ReactFlightDOMServerNode.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ReactFlightDOMServerNode.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++- `ReactFlightDOMServerNode.js` line 514: Replaced `abort(request, reason);` with `abort(request, (signal: any).reason);` fixing ReferenceError from undefined `reason`.
++
++**Verification**
++
++- Confirmed via re-read: only line 514 changed as intended.
++- Commands: read (full), edit (514#BY), read (500-529). All passed.
++
++No TODOs.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -511 @@
++     if (options && options.signal) {
++       const signal = options.signal;
++       if (signal.aborted) {
++-        const reason = (signal: any).reason;
++-        abort(request, reason);
+++        abort(request, (signal: any).reason);
++       } else {
++         const listener = () => {
++           const reason = (signal: any).reason;
++```
++
++### Structural Remove Early Return 001 (formatWithStyles.js) — 0/1
++
++**All runs failed with same error:** File mismatch for formatWithStyles.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++`formatWithStyles.js`: Inserted guard clause before formatting check (new lines 35#BQ–37#YH):
++
++```
++35#BQ:  if (typeof inputArgs[0] === 'string' && inputArgs[0].indexOf('%c') !== -1) {
++36#YY:    return inputArgs;
++37#YH:  }
++```
++
++**Verification**
++
++- Read: original file.
++- Edit: first attempt (tag refresh).
++- Read: confirmed no content change.
++- Edit: inserted guard at old 35 (now 38#MP).
++- Read (25–44): confirmed insertion only, structure preserved, lines now 60 total.
++
++No other files…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -30 @@
++   inputArgs: $ReadOnlyArray<any>,
++   style?: string,
++ ): $ReadOnlyArray<any> {
++-  if (
++-    inputArgs === undefined ||
++-    inputArgs === null ||
++-    inputArgs.length === 0 ||
++-    // Matches any of %c but not %%c
++-    (typeof inputArgs[0] === 'string' && inputArgs[0].match(/([^%]|^)(%c)/g)) ||
++-    style === undefined
++-  ) {
++-    return inputArgs;
++-  }
++-
++   // Matches any of %(o|O|d|i|s|f), but not %%(o|O|d|i|s|f)
++   const REGEXP = /([^%]|^)((%%)*)(%([oOdisf]))/g;
++   // Matches any of %(o|O|d|i|s|f), but not %%(o|O|d|i|s|f)
++   const REGEXP = /([^%]|^)((%%)*)(%([oOdisf]))/g;
+++  if (typeof inputArgs[0] === 'string' && inputArgs[0].indexOf('%c') !== -1) {
+++    return inputArgs;
+++  }
++   if (typeof inputArgs[0] === 'string' && inputArgs[0].match(REGEXP)) {
++     return [`%c${inputArgs[0]}`, style, ...inputArgs.slice(1)];
++   } else {
++```
++
++### Structural Remove Early Return 002 (ReactFlightClientConfigBundlerWebpackBrowser.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ReactFlightClientConfigBundlerWebpackBrowser.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++`ReactFlightClientConfigBundlerWebpackBrowser.js`
++- Lines 22–24 (new): Restored guard clause `if (flightChunk !== undefined) { return flightChunk; }` before fallback `return webpackGetChunkFilename(chunkId);` (now line 25).
++
++**Verification**
++- Confirmed via re-read (offset 15, limit 20): exact insertion, indentation preserved, blank line 21 intact, no other modifications.
++- Commands: read (full), edit, read (region). All succeeded.
++
++**Status**: Fix complete, minimal mutation only i…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -18 @@
++ const webpackGetChunkFilename = __webpack_require__.u;
++ __webpack_require__.u = function (chunkId: string) {
++   const flightChunk = chunkMap.get(chunkId);
+++
++   if (flightChunk !== undefined) {
++     return flightChunk;
++   }
++```
++
++### Structural Remove Early Return 003 (standalone.js) — 0/1
++
++**All runs failed with same error:** File mismatch for standalone.js
++
++**Sample agent response (run 1):**
++```
++**standalone.js** lines 99–101 (post-edit): Added guard `if (node == null) { return; }` before `node.innerHTML = '';` in `reload()`.
++
++**Commands:**
++- `read standalone.js` → full content
++- `edit standalone.js` prepend before old 99#NZ → success
++- `read standalone.js` offset=90 limit=30 → verified insertion (new tags 99#TT–101#YK), structure preserved
++
++No TODOs. Other unguarded `node` accesses (onDisconnected:160, onError:169/180) remain; add identical guards if scope expands.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -96 @@
++ function reload() {
++   safeUnmount();
++ 
+++  if (node == null) {
+++    return;
+++  }
++   node.innerHTML = '';
++ 
++   setTimeout(() => {
++@@ -121 @@
++ // Browser extension is doing this via exchanging messages
++ // between devtools_page and dedicated content script for it, see `fetchFileWithCaching.js`.
++ async function fetchFileWithCaching(url: string) {
++-  if (resourceCache.has(url)) {
++-    return Promise.resolve(resourceCache.get(url));
++-  }
++-
++   return fetch(url)
++     .then((data) => data.text())
++     .then((content) => {
++@@ -178 @@
++         <div class="box-content">
++           Only one copy of DevTools can be used at a time.
++         </div>
++-      </div>
+++        </div>
++     `;
++   } else {
++     node.innerHTML = `
++@@ -189 @@
++         <div class="box-content">
++           ${message}
++         </div>
++-      </div>
+++        </div>
++     `;
++   }
++ }
++```
++
++### Structural Remove Early Return 004 (backend.js) — 0/1
++
++**All runs failed with same error:** File mismatch for backend.js
++
++**Sample agent response (run 1):**
++```
++**Changes**
++
++- `./backend.js` line 269: Fixed structural syntax error by changing `event: MessageEvent<>` to `event: MessageEvent`.
++
++**Verification**
++
++- Confirmed via re-read (lines 265–274): `function handleMessage(event: MessageEvent) {`
++- Minimal single-token change; no other lines modified.
++- Original structure, indentation, and surrounding code preserved.
++
++**Commands executed**
++- `read ./backend.js` → Full file loaded.
++- `edit ./backend.js` → Replace at `269#YP` → Success.
++- `read ./backen…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -78 @@
++ 
++ export function connectToDevTools(options: ?ConnectOptions) {
++   const hook: ?DevToolsHook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
++-  if (hook == null) {
++-    // DevTools didn't get injected into this page (maybe b'c of the contentType).
++-    return;
++-  }
++ 
++   const {
++     host = 'localhost',
++@@ -270 @@
++     scheduleRetry();
++   }
++ 
++-  function handleMessage(event: MessageEvent<>) {
+++  function handleMessage(event: MessageEvent) {
++     let data;
++     try {
++       if (typeof event.data === 'string') {
++```
++
++### Structural Swap Adjacent Lines 003 (SyntheticEvent.js) — 0/1
++
++**All runs failed with same error:** File mismatch for SyntheticEvent.js
++
++**Sample agent response (run 1):**
++```
++**SyntheticEvent.js** edited: Added `updateMouseMovementPolyfillState(event);` before `return lastMovementY;` (new lines 226-227).
++
++**Verification:** Re-read lines 210-239; movementY now mirrors movementX polyfill logic (calls update if no native `movementY`). No other changes.
++
++**Commands:**
++- `read SyntheticEvent.js` → full content
++- `edit SyntheticEvent.js` → inserted line (prepend "226#ZQ")
++- `read SyntheticEvent.js` (offset 210, limit 30) → confirmed insertion only
++
++Fix complete: Resolves …
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -11 @@
++ 
++ import type { Fiber } from 'react-reconciler/src/ReactInternalTypes';
++ 
++-import assign from 'shared/assign';
++ import getEventCharCode from './getEventCharCode';
++ import getEventCharCode from './getEventCharCode';
+++import assign from 'shared/assign';
++ 
++ type EventInterfaceType = {
++   [propName: string]: 0 | ((event: { [propName: string]: mixed, ... }) => mixed),
++@@ -223 @@
++     // Don't need to call updateMouseMovementPolyfillState() here
++     // because it's guaranteed to have already run when movementX
++     // was copied.
+++    updateMouseMovementPolyfillState(event);
++     return lastMovementY;
++   },
++ };
++```
++
++### Structural Swap Adjacent Lines 004 (ReactDOMComponentTree.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ReactDOMComponentTree.js
++
++**Sample agent response (run 1):**
++```
++**ReactDOMComponentTree.js**
++
++- Fixed missing Flow type cast in `isOwnedInstance`: line 361 now uses `internalInstanceMap.has(((node: any): InstanceUnion))` matching pattern elsewhere (e.g., lines 127, 150, 217).
++
++**Verification**
++- Read original file.
++- Edited line 361#WS → 361#ZX.
++- Re-read lines 355–365: confirmed single-line change, no side effects.
++
++All tools passed. Change correct and minimal.
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -67 @@
++     internalInstanceMap.delete(node);
++     internalPropsMap.delete(node);
++     delete (node: any)[internalEventHandlersKey];
++-    delete (node: any)[internalEventHandlerListenersKey];
++     delete (node: any)[internalEventHandlesSetKey];
++     delete (node: any)[internalEventHandlesSetKey];
+++    delete (node: any)[internalEventHandlerListenersKey];
++     delete (node: any)[internalRootNodeResourcesKey];
++     if (__DEV__) {
++       delete (node: any)[internalInstanceKey];
++@@ -358 @@
++ 
++ export function isOwnedInstance(node: Node): boolean {
++   if (enableInternalInstanceMap) {
++-    return !!((node: any)[internalHoistableMarker] || internalInstanceMap.has((node: any)));
+++    return !!(
+++      (node: any)[internalHoistableMarker] || internalInstanceMap.has(((node: any): InstanceUnion))
+++    );
++   }
++   return !!((node: any)[internalHoistableMarker] || (node: any)[internalInstanceKey]);
++ }
++```
++
++### Structural Swap If Else 001 (resolveBoxStyle.js) — 0/1
++
++**All runs failed with same error:** File mismatch for resolveBoxStyle.js
++
++**Sample agent response (run 1):**
++```
++**resolveBoxStyle.js** lines 72–86 (formerly): Swapped `if` (individual `top`/`bottom`) and `else` (`styleForVertical` for both) bodies to correct logic matching horizontal pattern.
++
++**Verification:** Re-read lines 65–90 confirms `if (styleForVertical != null)` now sets both to `styleForVertical`; `else` handles individuals. No other changes.
++
++**Commands:**  
++`read resolveBoxStyle.js` (1–3000) → full context.  
++`edit resolveBoxStyle.js` → applied swap.  
++`read resolveBoxStyle.js` (65–30) → veri…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -78 @@
++       result.bottom = styleForBottom;
++       hasParts = true;
++     }
++-
++     const styleForTop = style[prefix + 'Top'];
++     if (styleForTop != null) {
++       result.top = styleForTop;
++```
++
++### Structural Swap If Else 004 (ResponderTouchHistoryStore.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ResponderTouchHistoryStore.js
++
++**Sample agent response (run 1):**
++```
++**Commands run:**
++- `read ResponderTouchHistoryStore.js` → success, full content retrieved.
++- `edit ResponderTouchHistoryStore.js` → success, confirmed update.
++
++**Changes:**
++- ResponderTouchHistoryStore.js:115#TM: `if (touchRecord)` → `if (!touchRecord)` (inverts condition in `recordTouchStart`; now creates new TouchRecord if absent, resets existing if present).
++
++**Verification:**
++Re-read confirms single-line change only; logic now correctly handles missing/existing records without passing `und…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -112 @@
++ function recordTouchStart(touch: Touch): void {
++   const identifier = getTouchIdentifier(touch);
++   const touchRecord = touchBank[identifier];
++-  if (touchRecord) {
++-    resetTouchRecord(touchRecord, touch);
++-  } else {
+++  if (!touchRecord) {
++     touchBank[identifier] = createTouchRecord(touch);
++     touchBank[identifier] = createTouchRecord(touch);
+++  } else {
+++    resetTouchRecord(touchRecord, touch);
++   }
++   touchHistory.mostRecentTimeStamp = timestampForTouch(touch);
++ }
++```
++
++### Unicode Unicode Hyphen 004 (ReactFlightActionServer.js) — 0/1
++
++**All runs failed with same error:** File mismatch for ReactFlightActionServer.js
++
++**Sample agent response (run 1):**
++```
++**ReactFlightActionServer.js**
++
++Appended `"      return;"` (line 172#QM post-edit) inside `decodeFormState` `forEach`, after `metaData = decodeBoundActionMetaData(...)` (171#VJ).
++
++**Verification**
++
++- First `read` retrieved full file; identified mismatch where `decodeFormState` overwrites `metaData` on every `$ACTION_REF_` (last wins) vs `decodeAction` early `return` (first wins).
++- `edit` applied single-line append: confirmed success.
++- Second `read` (offset 165, limit 20) shows insertion only:…
++```
++
++**Diff (expected vs actual):**
++```diff
++@@ -18 @@
++   resolveServerReference,
++   preloadModule,
++   requireModule,
++-} from 'react-client/src/ReactFlightClientConfig';
+++} from 'react\u2013client/src/ReactFlightClientConfig';
++ 
++ import { createResponse, close, getRoot, MAX_BOUND_ARGS } from './ReactFlightReplyServer';
++ 
++@@ -169 @@
++     if (key.startsWith('$ACTION_REF_')) {
++       const formFieldPrefix = '$ACTION_' + key.slice(12) + ':';
++       metaData = decodeBoundActionMetaData(body, serverManifest, formFieldPrefix);
+++      return;
++     }
++     // We don't check for the simple $ACTION_ID_ case because form state actions
++     // are always bound to the state argument.
++```

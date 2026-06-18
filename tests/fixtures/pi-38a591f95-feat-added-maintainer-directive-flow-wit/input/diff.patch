@@ -1,0 +1,5017 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index c0c292d62..b5f6d3e7c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -57,7 +57,7 @@ just cleanup owner/repo#N  # force workspace removal + state=abandoned
+ 
+ HTTP/sqlite inspection: `just healthz`, `just readyz`, `just events [N]`, `just issues [N]`, `just sqlite`, `just sql "<SQL>"`, `just tool-calls owner/repo#N`, `just stuck`. Webhook smoke: `just ping`. Danger: `just wipe-workspaces`, `just nuke-data`, `just reset`.
+ 
+-No lint/format tooling is wired up. Don't add one without explicit ask.
++Lint + format via `ruff` (config in `pyproject.toml`): `just lint` to check, `just fix` to auto-fix and reformat. Run before committing non-trivial changes; CI is not yet wired up.
+ 
+ ## Code Conventions & Common Patterns
+ 
+diff --git a/justfile b/justfile
+index 771d51d39..e1ee8d0ba 100644
+--- a/justfile
++++ b/justfile
+@@ -147,6 +147,18 @@ test-integration *ARGS:
+ test-file FILE *ARGS:
+     pytest -x '{{FILE}}' {{ARGS}}
+ 
++[group('dev')]
++[doc('ruff check (no edits) + ruff format --check')]
++lint:
++    ruff check src tests
++    ruff format --check src tests
++
++[group('dev')]
++[doc('ruff check --fix + ruff format (apply both)')]
++fix:
++    ruff check --fix src tests
++    ruff format src tests
++
+ [group('dev')]
+ [doc('run robomp serve on the host (skips docker)')]
+ serve:
+diff --git a/pyproject.toml b/pyproject.toml
+index 9837ef346..6606ab61d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -25,6 +25,7 @@ dev = [
+   "pytest>=8.0",
+   "pytest-asyncio>=0.23",
+   "respx>=0.21",
++  "ruff>=0.13",
+ ]
+ 
+ [project.scripts]
+@@ -45,3 +46,33 @@ asyncio_mode = "auto"
+ filterwarnings = [
+   "ignore::DeprecationWarning",
+ ]
++
++[tool.ruff]
++line-length = 120
++target-version = "py311"
++src = ["src", "tests"]
++extend-exclude = [".pi-context", "data"]
++
++[tool.ruff.lint]
++select = [
++  "E", "W",  # pycodestyle
++  "F",       # pyflakes
++  "I",       # isort
++  "UP",      # pyupgrade
++  "B",       # flake8-bugbear
++  "C4",      # comprehensions
++  "PIE",     # misc lints
++]
++ignore = [
++  "E501",  # long lines (embedded HTML/SQL/prompts); formatter handles real cases
++  "B008",  # FastAPI/Click rely on call-in-defaults (Depends, Option)
++]
++
++[tool.ruff.lint.per-file-ignores]
++"tests/*" = ["B011"]  # assert False is fine in tests
++
++[tool.ruff.lint.isort]
++known-first-party = ["robomp"]
++
++[tool.ruff.format]
++quote-style = "double"
+diff --git a/src/robomp/cli.py b/src/robomp/cli.py
+index 33e9e6aad..033e28a37 100644
+--- a/src/robomp/cli.py
++++ b/src/robomp/cli.py
+@@ -10,10 +10,10 @@ import click
+ import uvicorn
+ 
+ from robomp.config import Settings, get_settings
+-from robomp.db import get_database
++from robomp.db import INACTIVE_EVENT_STATES, get_database
+ from robomp.github_client import GitHubClient
+ from robomp.logging_config import configure_logging
+-from robomp.manual_triage import InvalidIssueRef, enqueue_manual_triage, parse_issue_ref
++from robomp.manual_triage import InvalidIssueRef, ManualTriageError, enqueue_manual_triage, parse_issue_ref
+ from robomp.queue import WorkerPool
+ from robomp.sandbox import SandboxManager
+ from robomp.server import create_app
+@@ -64,9 +64,16 @@ def triage(issue_ref: str) -> None:
+     async def _go() -> None:
+         github = GitHubClient(cfg.github_token.get_secret_value())
+         db = get_database(cfg.sqlite_path)
+-        delivery = await enqueue_manual_triage(
+-            db=db, github=github, repo_full=repo_full, number=number,
+-        )
++        try:
++            delivery = await enqueue_manual_triage(
++                db=db,
++                github=github,
++                repo_full=repo_full,
++                number=number,
++            )
++        except ManualTriageError as exc:
++            click.echo(f"refusing: {exc}", err=True)
++            sys.exit(2)
+         sandbox = SandboxManager(cfg.workspace_root)
+         pool = WorkerPool(settings=cfg, db=db, github=github, sandbox=sandbox)
+         await pool.start()
+@@ -93,10 +100,13 @@ def replay(delivery_id: str) -> None:
+     configure_logging(cfg.log_dir)
+     cfg.ensure_paths()
+     db = get_database(cfg.sqlite_path)
+-    if db.get_event(delivery_id) is None:
++    row = db.get_event(delivery_id)
++    if row is None:
+         click.echo(f"unknown delivery: {delivery_id}", err=True)
+         sys.exit(2)
+-    db.requeue_event(delivery_id)
++    if not db.requeue_event(delivery_id, from_states=INACTIVE_EVENT_STATES):
++        click.echo(f"delivery {delivery_id} is {row.state}; only inactive events can be replayed", err=True)
++        sys.exit(2)
+ 
+     async def _drain() -> None:
+         github = GitHubClient(cfg.github_token.get_secret_value())
+diff --git a/src/robomp/config.py b/src/robomp/config.py
+index c28f7b6c0..bb7555351 100644
+--- a/src/robomp/config.py
++++ b/src/robomp/config.py
+@@ -67,6 +67,10 @@ class Settings(BaseSettings):
+     rate_limit_default: int = Field(3, alias="ROBOMP_RATE_LIMIT_DEFAULT")
+     rate_limit_contributor: int = Field(10, alias="ROBOMP_RATE_LIMIT_CONTRIBUTOR")
+     rate_limit_unlimited_raw: str = Field("", alias="ROBOMP_RATE_LIMIT_UNLIMITED")
++    # Logins (comma-separated, `@` prefix optional) whose `@bot_login`
++    # mentions are treated as authoritative directives. These accounts also
++    # bypass rate limiting regardless of `author_association`.
++    maintainer_logins_raw: str = Field("", alias="ROBOMP_MAINTAINER_LOGINS")
+ 
+     @field_validator("bot_login", mode="after")
+     @classmethod
+@@ -122,6 +126,22 @@ class Settings(BaseSettings):
+         items = [piece.strip().lstrip("@").lower() for piece in self.rate_limit_unlimited_raw.split(",")]
+         return frozenset(item for item in items if item)
+ 
++    @field_validator("maintainer_logins_raw", mode="before")
++    @classmethod
++    def _coerce_maintainers(cls, v: object) -> str:
++        if v is None:
++            return ""
++        if isinstance(v, str):
++            return v
++        if isinstance(v, (list, tuple)):
++            return ",".join(str(item) for item in v)
++        return str(v)
++
++    @property
++    def maintainer_logins(self) -> frozenset[str]:
++        items = [piece.strip().lstrip("@").lower() for piece in self.maintainer_logins_raw.split(",")]
++        return frozenset(item for item in items if item)
++
+     def allows(self, full_name: str) -> bool:
+         return full_name.lower() in self.repo_allowlist
+ 
+diff --git a/src/robomp/db.py b/src/robomp/db.py
+index b09ff1d42..663427423 100644
+--- a/src/robomp/db.py
++++ b/src/robomp/db.py
+@@ -5,14 +5,16 @@ from __future__ import annotations
+ import json
+ import sqlite3
+ import threading
+-import time
++from collections.abc import Iterator, Mapping
+ from contextlib import contextmanager
+ from dataclasses import dataclass
+-from datetime import datetime, timedelta, timezone
++from datetime import UTC, datetime, timedelta
+ from pathlib import Path
+-from typing import Any, Iterator, Literal, Mapping
++from typing import Any, Literal
+ 
+ EventState = Literal["queued", "running", "done", "failed", "skipped"]
++INACTIVE_EVENT_STATES: tuple[EventState, ...] = ("done", "failed", "skipped")
++
+ IssueState = Literal[
+     "new",
+     "reproducing",
+@@ -80,12 +82,12 @@ CREATE INDEX IF NOT EXISTS submissions_login_ts ON submissions(login, ts);
+ 
+ 
+ def _utcnow() -> str:
+-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
++    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+ 
+ 
+ def iso_seconds_ago(seconds: float) -> str:
+     """ISO-UTC timestamp for `seconds` ago, matching the format `_utcnow` writes."""
+-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
++    return (datetime.now(UTC) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+ 
+ 
+ @dataclass(slots=True, frozen=True)
+@@ -114,6 +116,13 @@ class IssueRow:
+     classification: str | None = None
+ 
+ 
++@dataclass(slots=True, frozen=True)
++class SubmissionAdmission:
++    accepted: bool
++    duplicate: bool
++    used: int
++
++
+ def issue_key(repo: str, number: int) -> str:
+     return f"{repo}#{number}"
+ 
+@@ -269,6 +278,46 @@ class Database:
+         with self._lock:
+             self._conn.execute("DELETE FROM events WHERE delivery_id=?", (delivery_id,))
+ 
++    def replace_event_if_state_in(
++        self,
++        *,
++        delivery_id: str,
++        event_type: str,
++        repo: str | None,
++        issue_key: str | None,
++        payload: Mapping[str, Any],
++        state: EventState = "queued",
++        allowed_existing_states: tuple[EventState, ...],
++    ) -> bool:
++        """Replace an existing event only when its current state is permitted."""
++        now = _utcnow()
++        with self._txn() as conn:
++            row = conn.execute(
++                "SELECT state FROM events WHERE delivery_id = ?",
++                (delivery_id,),
++            ).fetchone()
++            if row is not None:
++                if row["state"] not in allowed_existing_states:
++                    return False
++                conn.execute("DELETE FROM events WHERE delivery_id = ?", (delivery_id,))
++            conn.execute(
++                """
++                INSERT INTO events
++                  (delivery_id, event_type, repo, issue_key, payload_json, received_at, state)
++                VALUES (?, ?, ?, ?, ?, ?, ?)
++                """,
++                (
++                    delivery_id,
++                    event_type,
++                    repo,
++                    issue_key,
++                    json.dumps(payload, separators=(",", ":")),
++                    now,
++                    state,
++                ),
++            )
++            return True
++
+     def latest_event_for_issue(self, key: str) -> EventRow | None:
+         """Return the most recent event whose issue_key matches, or None."""
+         with self._lock:
+@@ -300,10 +349,8 @@ class Database:
+     def event_state_counts(self) -> dict[str, int]:
+         """Return current row counts per event state, including states with zero rows."""
+         with self._lock:
+-            rows = self._conn.execute(
+-                "SELECT state, COUNT(*) AS n FROM events GROUP BY state"
+-            ).fetchall()
+-        counts: dict[str, int] = {s: 0 for s in ("queued", "running", "done", "failed", "skipped")}
++            rows = self._conn.execute("SELECT state, COUNT(*) AS n FROM events GROUP BY state").fetchall()
++        counts: dict[str, int] = dict.fromkeys(("queued", "running", "done", "failed", "skipped"), 0)
+         for row in rows:
+             counts[row["state"]] = int(row["n"])
+         return counts
+@@ -357,16 +404,34 @@ class Database:
+             last_error=row["last_error"],
+         )
+ 
+-    def requeue_event(self, delivery_id: str) -> None:
++    def requeue_event(
++        self,
++        delivery_id: str,
++        *,
++        from_states: tuple[EventState, ...] | None = None,
++    ) -> bool:
+         """Move an event back to queued without clobbering last_error.
+ 
+-        The prior failure text stays visible until a new attempt overwrites it.
++        Returns True only when a row was actually transitioned. `from_states`
++        restricts which current states may be requeued; callers use this to
++        keep public retries from mutating queued/running rows while preserving
++        internal recovery of a just-claimed running event.
+         """
+         with self._lock:
+-            self._conn.execute(
+-                "UPDATE events SET state='queued' WHERE delivery_id=?",
+-                (delivery_id,),
+-            )
++            if from_states is None:
++                cur = self._conn.execute(
++                    "UPDATE events SET state='queued' WHERE delivery_id=?",
++                    (delivery_id,),
++                )
++            elif not from_states:
++                return False
++            else:
++                placeholders = ",".join("?" for _ in from_states)
++                cur = self._conn.execute(
++                    f"UPDATE events SET state='queued' WHERE delivery_id=? AND state IN ({placeholders})",
++                    (delivery_id, *from_states),
++                )
++            return cur.rowcount > 0
+ 
+     # ---- issues ----
+     def upsert_issue(
+@@ -506,6 +571,53 @@ class Database:
+             return int(cur.lastrowid or 0)
+ 
+     # ---- submissions (per-user rate limiting) ----
++    def admit_submission(
++        self,
++        *,
++        delivery_id: str,
++        login: str,
++        repo: str | None,
++        since: str,
++        cap: int | None,
++    ) -> SubmissionAdmission:
++        """Atomically check a submitter's rolling cap and record this delivery.
++
++        Duplicate delivery ids are accepted without inserting a second row, so a
++        webhook retry remains idempotent even after the submitter reaches the cap.
++        `used` is the matching submission count after acceptance, or the count
++        that caused rejection when `accepted` is False.
++        """
++        normalized_login = login.lower()
++        with self._txn() as conn:
++            existing = conn.execute(
++                "SELECT 1 FROM submissions WHERE delivery_id=?",
++                (delivery_id,),
++            ).fetchone()
++            if existing is not None:
++                row = conn.execute(
++                    "SELECT COUNT(*) AS n FROM submissions WHERE login=? AND ts>=?",
++                    (normalized_login, since),
++                ).fetchone()
++                return SubmissionAdmission(
++                    accepted=True,
++                    duplicate=True,
++                    used=int(row["n"]) if row is not None else 0,
++                )
++
++            row = conn.execute(
++                "SELECT COUNT(*) AS n FROM submissions WHERE login=? AND ts>=?",
++                (normalized_login, since),
++            ).fetchone()
++            used = int(row["n"]) if row is not None else 0
++            if cap is not None and used >= cap:
++                return SubmissionAdmission(accepted=False, duplicate=False, used=used)
++
++            conn.execute(
++                "INSERT INTO submissions (delivery_id, login, repo, ts) VALUES (?, ?, ?, ?)",
++                (delivery_id, normalized_login, repo, _utcnow()),
++            )
++            return SubmissionAdmission(accepted=True, duplicate=False, used=used + 1)
++
+     def record_submission(
+         self,
+         *,
+diff --git a/src/robomp/github_client.py b/src/robomp/github_client.py
+index 4f1901d53..3550ac53e 100644
+--- a/src/robomp/github_client.py
++++ b/src/robomp/github_client.py
+@@ -2,11 +2,11 @@
+ 
+ from __future__ import annotations
+ 
+-import asyncio
+ import logging
+ import time
++from collections.abc import Mapping
+ from dataclasses import dataclass
+-from typing import Any, Mapping
++from typing import Any
+ 
+ import httpx
+ 
+@@ -68,6 +68,7 @@ class PullRequestInfo:
+ @dataclass(slots=True, frozen=True)
+ class IssueSummary:
+     """Lightweight projection of an issue for list views (no body)."""
++
+     repo: str
+     number: int
+     title: str
+@@ -149,14 +150,16 @@ class GitHubClient:
+             return None
+         return resp.json()
+ 
+-    def request_sync(self, method: str, path: str, *, json: Mapping[str, Any] | None = None,
+-                     params: Mapping[str, Any] | None = None) -> Any:
++    def request_sync(
++        self, method: str, path: str, *, json: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None
++    ) -> Any:
+         with self._client() as client:
+             resp = client.request(method, path, json=json, params=params)
+             return self._check(resp)
+ 
+-    async def request(self, method: str, path: str, *, json: Mapping[str, Any] | None = None,
+-                      params: Mapping[str, Any] | None = None) -> Any:
++    async def request(
++        self, method: str, path: str, *, json: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None
++    ) -> Any:
+         async with self._async_client() as client:
+             resp = await client.request(method, path, json=json, params=params)
+             return self._check(resp)
+@@ -197,21 +200,20 @@ class GitHubClient:
+                 continue  # GitHub's /issues endpoint also returns PRs; skip them.
+             user = item.get("user") or {}
+             labels_raw = item.get("labels") or []
+-            out.append(IssueSummary(
+-                repo=repo,
+-                number=int(item["number"]),
+-                title=str(item.get("title") or ""),
+-                state=str(item.get("state") or "open"),
+-                author=str(user.get("login") or ""),
+-                labels=tuple(
+-                    str(lbl["name"]) if isinstance(lbl, dict) else str(lbl)
+-                    for lbl in labels_raw
+-                ),
+-                comments=int(item.get("comments") or 0),
+-                updated_at=str(item.get("updated_at") or ""),
+-                created_at=str(item.get("created_at") or ""),
+-                html_url=str(item.get("html_url") or ""),
+-            ))
++            out.append(
++                IssueSummary(
++                    repo=repo,
++                    number=int(item["number"]),
++                    title=str(item.get("title") or ""),
++                    state=str(item.get("state") or "open"),
++                    author=str(user.get("login") or ""),
++                    labels=tuple(str(lbl["name"]) if isinstance(lbl, dict) else str(lbl) for lbl in labels_raw),
++                    comments=int(item.get("comments") or 0),
++                    updated_at=str(item.get("updated_at") or ""),
++                    created_at=str(item.get("created_at") or ""),
++                    html_url=str(item.get("html_url") or ""),
++                )
++            )
+         return out
+ 
+     async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
+@@ -292,10 +294,7 @@ class GitHubClient:
+             f"/repos/{repo}/issues/{number}/labels",
+             json={"labels": labels},
+         )
+-        return tuple(
+-            str(lbl["name"]) if isinstance(lbl, dict) else str(lbl)
+-            for lbl in (data or [])
+-        )
++        return tuple(str(lbl["name"]) if isinstance(lbl, dict) else str(lbl) for lbl in (data or []))
+ 
+     async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None:
+         if not assignees:
+@@ -322,10 +321,7 @@ def _repo_from_payload(data: Mapping[str, Any]) -> RepoInfo:
+ 
+ def _issue_from_payload(repo: str, data: Mapping[str, Any]) -> IssueInfo:
+     labels_raw = data.get("labels") or []
+-    labels = tuple(
+-        str(lbl["name"]) if isinstance(lbl, dict) else str(lbl)
+-        for lbl in labels_raw
+-    )
++    labels = tuple(str(lbl["name"]) if isinstance(lbl, dict) else str(lbl) for lbl in labels_raw)
+     user = data.get("user") or {}
+     return IssueInfo(
+         repo=repo,
+diff --git a/src/robomp/github_events.py b/src/robomp/github_events.py
+index ebadeea04..59277c465 100644
+--- a/src/robomp/github_events.py
++++ b/src/robomp/github_events.py
+@@ -5,8 +5,10 @@ from __future__ import annotations
+ import hashlib
+ import hmac
+ import logging
++import re
++from collections.abc import Callable, Mapping
+ from dataclasses import dataclass
+-from typing import Any, Callable, Literal, Mapping
++from typing import Any, Literal
+ 
+ from robomp.db import issue_key
+ 
+@@ -24,6 +26,9 @@ class RouteDecision:
+     reason: str
+     submitter: str | None = None
+     association: str | None = None
++    directive: bool = False
++    directive_body: str | None = None
++    directive_author: str | None = None
+ 
+     @property
+     def should_queue(self) -> bool:
+@@ -80,20 +85,60 @@ def _submitter_info(obj: Mapping[str, Any] | None) -> tuple[str | None, str | No
+     return login, (str(assoc) if isinstance(assoc, str) and assoc else None)
+ 
+ 
++def extract_mention(body: str | None, bot_login: str) -> str | None:
++    """Return `body` with `@<bot_login>` mentions stripped, or None if no mention.
++
++    Match is case-insensitive and word-boundary aware (hyphens in logins are
++    part of the token, so `@robomp-bot` does NOT match `@robomp-bot-extra`).
++    """
++    if not isinstance(body, str) or not body:
++        return None
++    login = bot_login.strip()
++    if not login:
++        return None
++    pattern = re.compile(
++        rf"(?<![A-Za-z0-9_-])@{re.escape(login)}(?![A-Za-z0-9_-])",
++        re.IGNORECASE,
++    )
++    if not pattern.search(body):
++        return None
++    stripped = pattern.sub("", body)
++    # Collapse the whitespace the strip leaves behind without mangling the rest.
++    stripped = re.sub(r"[ \t]+", " ", stripped)
++    stripped = re.sub(r"\n[ \t]+", "\n", stripped)
++    return stripped.strip()
++
++
++def is_maintainer(
++    login: str | None,
++    association: str | None,
++    *,
++    maintainers: frozenset[str],
++) -> bool:
++    """A maintainer is anyone in `maintainers` or with a trusted association."""
++    if isinstance(login, str) and login and login.lower() in maintainers:
++        return True
++    if isinstance(association, str) and association.upper() in TRUSTED_ASSOCIATIONS:
++        return True
++    return False
++
++
+ def route(
+     event_type: str,
+     payload: Mapping[str, Any],
+     *,
+     allowlist: frozenset[str],
+     bot_login: str,
++    maintainers: frozenset[str] = frozenset(),
+     resolve_issue_from_pr: PrIssueResolver = None,
+ ) -> RouteDecision:
+     """Decide whether and how to handle a webhook event.
+ 
+     `resolve_issue_from_pr(repo, pr_number)` maps a PR number back to its
+-    originating-issue key (e.g. `octo/widget#42`). Used so PR-derived events
+-    serialize on the *same* inflight key as the issue's own events. When the
+-    mapping is unknown (no DB row yet), we fall back to a PR-scoped key.
++    originating-issue key (e.g. `octo/widget#42`). User comments on PRs are
++    only actionable when that mapping exists, so they serialize on the same
++    inflight key as the issue's own events. PR lifecycle cleanup may still
++    fall back to a PR-scoped key when the origin row is gone.
+     """
+     repo = _repo_full_name(payload)
+     if repo is None or repo.lower() not in allowlist:
+@@ -108,6 +153,20 @@ def route(
+                 return resolved
+         return f"{repo}#pr-{pr_number}"
+ 
++    def _resolve_origin_issue_key(pr_number: int) -> str | None:
++        if resolve_issue_from_pr is None:
++            return None
++        return resolve_issue_from_pr(repo, pr_number)  # type: ignore[arg-type]
++
++    def _directive_kwargs(body: str | None, login: str | None, assoc: str | None) -> dict[str, Any]:
++        """Decide whether this comment is a maintainer directive."""
++        if not is_maintainer(login, assoc, maintainers=maintainers):
++            return {}
++        stripped = extract_mention(body, bot_login)
++        if stripped is None:
++            return {}
++        return {"directive": True, "directive_body": stripped, "directive_author": login}
++
+     if event_type == "issues":
+         issue = payload.get("issue") or {}
+         if "pull_request" in issue:
+@@ -118,8 +177,9 @@ def route(
+         key = issue_key(repo, number)
+         if action == "opened":
+             login, assoc = _submitter_info(issue)
+-            return RouteDecision("queue", "triage_issue", repo, key, "issues.opened",
+-                                 submitter=login, association=assoc)
++            return RouteDecision(
++                "queue", "triage_issue", repo, key, "issues.opened", submitter=login, association=assoc
++            )
+         if action == "closed":
+             # Cleanup is a lifecycle event, not a user submission; no rate-limit subject.
+             return RouteDecision("queue", "cleanup_workspace", repo, key, "issues.closed")
+@@ -135,17 +195,36 @@ def route(
+             return RouteDecision("skip", None, repo, None, "comment missing issue number")
+         if "pull_request" in issue:
+             # Conversation comment on a PR. The PR number lives at issue.number
+-            # on this payload type; the *originating-issue* key is whatever
+-            # the resolver returns. Serialize on the issue, not the PR.
+-            key = _resolve_pr_key(number)
++            # on this payload type. Only mapped bot PR follow-ups are
++            # actionable; unknown PRs must not consume per-user quota.
++            key = _resolve_origin_issue_key(number)
++            if key is None:
++                return RouteDecision("skip", None, repo, None, f"PR #{number} is not mapped to an issue")
+             login, assoc = _submitter_info(comment)
+-            return RouteDecision("queue", "handle_pr_conversation", repo, key,
+-                                 f"issue_comment.created on PR #{number}",
+-                                 submitter=login, association=assoc)
++            body = str(comment.get("body") or "")
++            return RouteDecision(
++                "queue",
++                "handle_pr_conversation",
++                repo,
++                key,
++                f"issue_comment.created on PR #{number}",
++                submitter=login,
++                association=assoc,
++                **_directive_kwargs(body, login, assoc),
++            )
+         key = issue_key(repo, number)
+         login, assoc = _submitter_info(comment)
+-        return RouteDecision("queue", "handle_comment", repo, key, "issue_comment.created",
+-                             submitter=login, association=assoc)
++        body = str(comment.get("body") or "")
++        return RouteDecision(
++            "queue",
++            "handle_comment",
++            repo,
++            key,
++            "issue_comment.created",
++            submitter=login,
++            association=assoc,
++            **_directive_kwargs(body, login, assoc),
++        )
+ 
+     if event_type == "pull_request_review_comment" and action == "created":
+         comment = payload.get("comment") or {}
+@@ -158,10 +237,21 @@ def route(
+         number = pr.get("number")
+         if not isinstance(number, int):
+             return RouteDecision("skip", None, repo, None, "PR missing number")
++        key = _resolve_origin_issue_key(number)
++        if key is None:
++            return RouteDecision("skip", None, repo, None, f"PR #{number} is not mapped to an issue")
+         login, assoc = _submitter_info(comment)
+-        return RouteDecision("queue", "handle_review", repo, _resolve_pr_key(number),
+-                             "pull_request_review_comment.created",
+-                             submitter=login, association=assoc)
++        body = str(comment.get("body") or "")
++        return RouteDecision(
++            "queue",
++            "handle_review",
++            repo,
++            key,
++            "pull_request_review_comment.created",
++            submitter=login,
++            association=assoc,
++            **_directive_kwargs(body, login, assoc),
++        )
+ 
+     if event_type == "pull_request" and action == "closed":
+         pr = payload.get("pull_request") or {}
+@@ -173,8 +263,7 @@ def route(
+         number = pr.get("number")
+         if not isinstance(number, int):
+             return RouteDecision("skip", None, repo, None, "PR missing number")
+-        return RouteDecision("queue", "cleanup_workspace", repo, _resolve_pr_key(number),
+-                             "pull_request.merged")
++        return RouteDecision("queue", "cleanup_workspace", repo, _resolve_pr_key(number), "pull_request.merged")
+ 
+     return RouteDecision("skip", None, repo, None, f"{event_type}.{action} not handled")
+ 
+@@ -211,6 +300,8 @@ __all__ = [
+     "Decision",
+     "RouteDecision",
+     "TRUSTED_ASSOCIATIONS",
++    "extract_mention",
++    "is_maintainer",
+     "rate_limit_cap",
+     "route",
+     "verify_signature",
+diff --git a/src/robomp/host_tools.py b/src/robomp/host_tools.py
+index 0efa8982c..b4ffb540b 100644
+--- a/src/robomp/host_tools.py
++++ b/src/robomp/host_tools.py
+@@ -9,17 +9,15 @@ from __future__ import annotations
+ import asyncio
+ import json
+ import logging
+-import shlex
+ import subprocess
+-import threading
+ import time
++from collections.abc import Mapping
+ from dataclasses import dataclass
+-from typing import Any, Mapping
++from typing import Any
+ 
+ from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
+ 
+ from robomp import persona
+-
+ from robomp.db import Database, issue_key
+ from robomp.github_client import GitHubClient, GitHubError, IssueInfo, RepoInfo
+ from robomp.sandbox import Workspace
+@@ -51,8 +49,9 @@ def _run_coro(loop: asyncio.AbstractEventLoop, coro: Any) -> Any:
+     return future.result()
+ 
+ 
+-def _audit(bindings: ToolBindings, name: str, args: Mapping[str, Any], result: Any | None = None,
+-           error: str | None = None) -> None:
++def _audit(
++    bindings: ToolBindings, name: str, args: Mapping[str, Any], result: Any | None = None, error: str | None = None
++) -> None:
+     bindings.db.log_tool_call(
+         issue_key=bindings.issue_key,
+         tool=name,
+@@ -92,7 +91,10 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+         parameters={
+             "type": "object",
+             "properties": {
+-                "body": {"type": "string", "description": persona.host_tool_parameter_description("gh_post_comment", "body")},
++                "body": {
++                    "type": "string",
++                    "description": persona.host_tool_parameter_description("gh_post_comment", "body"),
++                },
+                 "number": {
+                     "type": "integer",
+                     "description": persona.host_tool_parameter_description("gh_post_comment", "number"),
+@@ -105,99 +107,120 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+     )
+ 
+ 
++def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_name: str, branch: str) -> str:
++    if branch != bindings.workspace.branch:
++        _raise_command(
++            f"refusing to push: branch={branch!r} does not match workspace branch {bindings.workspace.branch!r}."
++        )
++    repo_dir = str(bindings.workspace.repo_dir)
++    # Re-pin the configured identity right before push (cheap; idempotent).
++    subprocess.run(
++        ["git", "config", "user.email", bindings.author_email],
++        cwd=repo_dir,
++        check=False,
++        capture_output=True,
++        text=True,
++    )
++    subprocess.run(
++        ["git", "config", "user.name", bindings.author_name],
++        cwd=repo_dir,
++        check=False,
++        capture_output=True,
++        text=True,
++    )
++    # Verify there's at least one commit on the branch.
++    rev = subprocess.run(
++        ["git", "rev-parse", "HEAD"],
++        cwd=repo_dir,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if rev.returncode != 0:
++        _audit(bindings, tool_name, args, error=rev.stderr.strip())
++        _raise_command(f"git rev-parse failed: {rev.stderr.strip()}")
++
++    # Identity gate: every commit between the base branch and HEAD must
++    # carry the configured author. Refuse to push otherwise so the agent
++    # fixes it (`git commit --amend --reset-author --no-edit`).
++    base = bindings.repo.default_branch
++    identities = subprocess.run(
++        ["git", "log", "--format=%H%x09%ae%x09%an", f"origin/{base}..HEAD"],
++        cwd=repo_dir,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if identities.returncode != 0:
++        err = (identities.stderr or identities.stdout).strip()
++        msg = f"refusing to push: could not inspect commit authors for origin/{base}..HEAD: {err}"
++        _audit(bindings, tool_name, args, error=msg)
++        _raise_command(msg)
++    offending: list[str] = []
++    for line in (identities.stdout or "").strip().splitlines():
++        parts = line.split("\t")
++        if len(parts) < 3:
++            continue
++        sha, email, name = parts[0], parts[1], parts[2]
++        if email != bindings.author_email or name != bindings.author_name:
++            offending.append(f"{sha[:12]} {name} <{email}>")
++    if offending:
++        details = "\n  ".join(offending)
++        msg = (
++            "refusing to push: commit author identity mismatch. "
++            f"Expected `{bindings.author_name} <{bindings.author_email}>`. "
++            f"Offending commits:\n  {details}\n"
++            "Amend each commit with `git commit --amend --reset-author --no-edit` "
++            "(or rebase with `git rebase -i origin/" + base + " --exec "
++            "'git commit --amend --reset-author --no-edit'`) and try again."
++        )
++        _audit(bindings, tool_name, args, error=msg)
++        _raise_command(msg)
++
++    # Working-tree cleanliness gate. Any uncommitted change (edits the agent
++    # forgot to `git add && git commit`, files dropped by package managers, etc.)
++    # would silently land in the PR review delta but not in the commit history.
++    # Reject so the agent either commits or stashes them.
++    status = subprocess.run(
++        ["git", "status", "--porcelain", "--untracked-files=normal"],
++        cwd=repo_dir,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if status.stdout.strip():
++        dirty = "\n  ".join(status.stdout.strip().splitlines())
++        msg = (
++            "refusing to push: working tree is dirty.\n  "
++            f"{dirty}\n"
++            "Commit (or `git stash`) every change before pushing — anything in the "
++            "worktree that isn't in a commit won't appear in the PR."
++        )
++        _audit(bindings, tool_name, args, error=msg)
++        _raise_command(msg)
++
++    proc = subprocess.run(
++        ["git", "push", "--set-upstream", "origin", branch],
++        cwd=repo_dir,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if proc.returncode != 0:
++        err = (proc.stderr or proc.stdout).strip()
++        _audit(bindings, tool_name, args, error=err)
++        _raise_command(f"git push failed: {err}")
++    head = rev.stdout.strip()
++    _audit(bindings, tool_name, args, result={"head": head, "branch": branch})
++    return head
++
++
+ # ---------- gh_push_branch ----------
+ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
+     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+         branch = str(args.get("branch") or bindings.workspace.branch)
+-        if branch != bindings.workspace.branch:
+-            _raise_command(
+-                f"refusing to push: branch={branch!r} does not match workspace branch "
+-                f"{bindings.workspace.branch!r}."
+-            )
+-        repo_dir = str(bindings.workspace.repo_dir)
+-        # Re-pin the configured identity right before push (cheap; idempotent).
+-        subprocess.run(
+-            ["git", "config", "user.email", bindings.author_email],
+-            cwd=repo_dir, check=False, capture_output=True, text=True,
+-        )
+-        subprocess.run(
+-            ["git", "config", "user.name", bindings.author_name],
+-            cwd=repo_dir, check=False, capture_output=True, text=True,
+-        )
+-        # Verify there's at least one commit on the branch.
+-        rev = subprocess.run(
+-            ["git", "rev-parse", "HEAD"],
+-            cwd=repo_dir, capture_output=True, text=True, check=False,
+-        )
+-        if rev.returncode != 0:
+-            _audit(bindings, "gh_push_branch", args, error=rev.stderr.strip())
+-            _raise_command(f"git rev-parse failed: {rev.stderr.strip()}")
+-
+-        # Identity gate: every commit between the base branch and HEAD must
+-        # carry the configured author. Refuse to push otherwise so the agent
+-        # fixes it (`git commit --amend --reset-author --no-edit`).
+-        base = bindings.repo.default_branch
+-        identities = subprocess.run(
+-            ["git", "log", "--format=%H%x09%ae%x09%an", f"origin/{base}..HEAD"],
+-            cwd=repo_dir, capture_output=True, text=True, check=False,
+-        )
+-        if identities.returncode != 0:
+-            err = (identities.stderr or identities.stdout).strip()
+-            msg = f"refusing to push: could not inspect commit authors for origin/{base}..HEAD: {err}"
+-            _audit(bindings, "gh_push_branch", args, error=msg)
+-            _raise_command(msg)
+-        offending: list[str] = []
+-        for line in (identities.stdout or "").strip().splitlines():
+-            parts = line.split("\t")
+-            if len(parts) < 3:
+-                continue
+-            sha, email, name = parts[0], parts[1], parts[2]
+-            if email != bindings.author_email or name != bindings.author_name:
+-                offending.append(f"{sha[:12]} {name} <{email}>")
+-        if offending:
+-            details = "\n  ".join(offending)
+-            msg = (
+-                "refusing to push: commit author identity mismatch. "
+-                f"Expected `{bindings.author_name} <{bindings.author_email}>`. "
+-                f"Offending commits:\n  {details}\n"
+-                "Amend each commit with `git commit --amend --reset-author --no-edit` "
+-                "(or rebase with `git rebase -i origin/" + base + " --exec "
+-                "'git commit --amend --reset-author --no-edit'`) and try again."
+-            )
+-            _audit(bindings, "gh_push_branch", args, error=msg)
+-            _raise_command(msg)
+-        # Working-tree cleanliness gate. Any uncommitted change (edits the agent
+-        # forgot to `git add && git commit`, files dropped by `bun install`, etc.)
+-        # would silently land in the PR review delta but not in the commit history.
+-        # Reject so the agent either commits or stashes them.
+-        status = subprocess.run(
+-            ["git", "status", "--porcelain", "--untracked-files=normal"],
+-            cwd=repo_dir, capture_output=True, text=True, check=False,
+-        )
+-        if status.stdout.strip():
+-            dirty = "\n  ".join(status.stdout.strip().splitlines())
+-            msg = (
+-                "refusing to push: working tree is dirty.\n  "
+-                f"{dirty}\n"
+-                "Commit (or `git stash`) every change before pushing — anything in the "
+-                "worktree that isn't in a commit won't appear in the PR."
+-            )
+-            _audit(bindings, "gh_push_branch", args, error=msg)
+-            _raise_command(msg)
+-
+-        proc = subprocess.run(
+-            ["git", "push", "--set-upstream", "origin", branch],
+-            cwd=repo_dir, capture_output=True, text=True, check=False,
+-        )
+-        if proc.returncode != 0:
+-            err = (proc.stderr or proc.stdout).strip()
+-            _audit(bindings, "gh_push_branch", args, error=err)
+-            _raise_command(f"git push failed: {err}")
+-        _audit(bindings, "gh_push_branch", args, result={"head": rev.stdout.strip(), "branch": branch})
+-        return (
+-            f"pushed {branch} at {rev.stdout.strip()[:12]} "
+-            f"as {bindings.author_name} <{bindings.author_email}>"
+-        )
++        head = _guarded_push_branch(bindings, args, "gh_push_branch", branch)
++        return f"pushed {branch} at {head[:12]} as {bindings.author_name} <{bindings.author_email}>"
+ 
+     return host_tool(
+         name="gh_push_branch",
+@@ -241,18 +264,8 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
+                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
+                 "Verification section per the template."
+             )
+-        # Make sure the branch is pushed (idempotent).
+-        push_proc = subprocess.run(
+-            ["git", "push", "--set-upstream", "origin", bindings.workspace.branch],
+-            cwd=str(bindings.workspace.repo_dir),
+-            capture_output=True,
+-            text=True,
+-            check=False,
+-        )
+-        if push_proc.returncode != 0:
+-            err = (push_proc.stderr or push_proc.stdout).strip()
+-            _audit(bindings, "gh_open_pr", args, error=err)
+-            _raise_command(f"branch push failed: {err}")
++        # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
++        _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
+         base = args.get("base") or bindings.repo.default_branch
+         try:
+             pr = _run_coro(
+@@ -299,7 +312,10 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
+                     "type": "string",
+                     "description": persona.host_tool_parameter_description("gh_open_pr", "body"),
+                 },
+-                "base": {"type": "string", "description": persona.host_tool_parameter_description("gh_open_pr", "base")},
++                "base": {
++                    "type": "string",
++                    "description": persona.host_tool_parameter_description("gh_open_pr", "base"),
++                },
+                 "draft": {"type": "boolean", "default": False},
+             },
+             "required": ["title", "body"],
+@@ -400,7 +416,10 @@ def _build_repro_record(bindings: ToolBindings) -> HostTool[Any, Any]:
+                 "command": {"type": "string"},
+                 "output": {"type": "string"},
+                 "exit_code": {"type": "integer"},
+-                "reproduced": {"type": "boolean", "description": persona.host_tool_parameter_description("repro_record", "reproduced")},
++                "reproduced": {
++                    "type": "boolean",
++                    "description": persona.host_tool_parameter_description("repro_record", "reproduced"),
++                },
+             },
+             "required": ["title", "command", "output", "exit_code"],
+             "additionalProperties": False,
+@@ -502,11 +521,12 @@ _PLATFORMS = ("platform:linux", "platform:macos", "platform:windows", "platform:
+ 
+ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
+     """Append labels to the originating issue (or PR)."""
++
+     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+         labels = args.get("labels")
+         if not isinstance(labels, list) or not labels:
+             _raise_command("set_issue_labels requires a non-empty 'labels' array.")
+-        cleaned = [str(l).strip() for l in labels if isinstance(l, str) and l.strip()]
++        cleaned = [str(lbl).strip() for lbl in labels if isinstance(lbl, str) and lbl.strip()]
+         if not cleaned:
+             _raise_command("set_issue_labels requires at least one non-empty label.")
+         target_number = bindings.issue.number
+@@ -530,7 +550,10 @@ def _build_set_issue_labels(bindings: ToolBindings) -> HostTool[Any, Any]:
+             "type": "object",
+             "properties": {
+                 "labels": {"type": "array", "items": {"type": "string"}},
+-                "number": {"type": "integer", "description": persona.host_tool_parameter_description("set_issue_labels", "number")},
++                "number": {
++                    "type": "integer",
++                    "description": persona.host_tool_parameter_description("set_issue_labels", "number"),
++                },
+             },
+             "required": ["labels"],
+             "additionalProperties": False,
+@@ -543,18 +566,15 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
+     """Triage step. Pick a primary type, optional priority/functional/provider/platform,
+     apply labels on GitHub, persist the primary type in sqlite, and signal which workflow
+     branch the agent should follow."""
++
+     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+         primary = args.get("primary")
+         if primary not in _PRIMARY_TYPES:
+-            _raise_command(
+-                f"classify_issue 'primary' must be one of {_PRIMARY_TYPES}; got {primary!r}."
+-            )
++            _raise_command(f"classify_issue 'primary' must be one of {_PRIMARY_TYPES}; got {primary!r}.")
+         priority = args.get("priority")
+         if primary == "bug":
+             if priority not in _PRIORITIES:
+-                _raise_command(
+-                    f"classify_issue requires 'priority' in {_PRIORITIES} when primary=='bug'."
+-                )
++                _raise_command(f"classify_issue requires 'priority' in {_PRIORITIES} when primary=='bug'.")
+         elif priority is not None and priority != "":
+             _raise_command("classify_issue 'priority' is only valid when primary=='bug'.")
+         rationale = args.get("rationale")
+@@ -584,7 +604,9 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
+             applied = _run_coro(
+                 bindings.loop,
+                 bindings.github.add_issue_labels(
+-                    bindings.repo.full_name, bindings.issue.number, labels,
++                    bindings.repo.full_name,
++                    bindings.issue.number,
++                    labels,
+                 ),
+             )
+         except GitHubError as exc:
+@@ -593,7 +615,9 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
+ 
+         bindings.db.set_issue_classification(bindings.issue_key, primary)
+         _audit(
+-            bindings, "classify_issue", args,
++            bindings,
++            "classify_issue",
++            args,
+             result={"primary": primary, "labels": list(applied), "rationale": rationale},
+         )
+         # Echo back the workflow the agent should now follow. The persona prompt
+@@ -631,7 +655,10 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
+                     "enum": list(_PLATFORMS),
+                     "description": persona.host_tool_parameter_description("classify_issue", "platform"),
+                 },
+-                "rationale": {"type": "string", "description": persona.host_tool_parameter_description("classify_issue", "rationale")},
++                "rationale": {
++                    "type": "string",
++                    "description": persona.host_tool_parameter_description("classify_issue", "rationale"),
++                },
+             },
+             "required": ["primary", "rationale"],
+             "additionalProperties": False,
+diff --git a/src/robomp/logging_config.py b/src/robomp/logging_config.py
+index 0be0c5d0c..52d1355b8 100644
+--- a/src/robomp/logging_config.py
++++ b/src/robomp/logging_config.py
+@@ -5,7 +5,6 @@ from __future__ import annotations
+ import json
+ import logging
+ import logging.handlers
+-import os
+ import sys
+ import time
+ from pathlib import Path
+diff --git a/src/robomp/manual_triage.py b/src/robomp/manual_triage.py
+index c4d783f01..9d9914835 100644
+--- a/src/robomp/manual_triage.py
++++ b/src/robomp/manual_triage.py
+@@ -8,7 +8,7 @@ from __future__ import annotations
+ import re
+ from typing import Any
+ 
+-from robomp.db import Database, issue_key
++from robomp.db import INACTIVE_EVENT_STATES, Database, issue_key
+ from robomp.github_client import GitHubClient
+ 
+ _ISSUE_REF = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^#\s]+)#(?P<number>\d+)$")
+@@ -18,6 +18,19 @@ class InvalidIssueRef(ValueError):
+     """Raised when the user-supplied issue reference can't be parsed."""
+ 
+ 
++class ManualTriageError(ValueError):
++    """Raised when a live GitHub issue cannot be manually triaged."""
++
++
++class ManualTriageConflict(RuntimeError):
++    """Raised when a stable manual delivery id is already active."""
++
++    def __init__(self, delivery_id: str, state: str) -> None:
++        self.delivery_id = delivery_id
++        self.state = state
++        super().__init__(f"{delivery_id} is already {state}")
++
++
+ def parse_issue_ref(ref: str) -> tuple[str, int]:
+     """Parse `owner/repo#NN` into `("owner/repo", NN)`."""
+     match = _ISSUE_REF.match(ref.strip())
+@@ -31,11 +44,11 @@ def manual_delivery_id(repo_full: str, number: int) -> str:
+     return f"manual-{repo_full.replace('/', '__')}-{number}"
+ 
+ 
+-async def build_issues_opened_payload(
+-    github: GitHubClient, repo_full: str, number: int
+-) -> dict[str, Any]:
++async def build_issues_opened_payload(github: GitHubClient, repo_full: str, number: int) -> dict[str, Any]:
+     """Fetch the issue + repo metadata and synthesize an `issues.opened` payload."""
+     issue = await github.get_issue(repo_full, number)
++    if issue.is_pull_request:
++        raise ManualTriageError(f"{repo_full}#{number} is a pull request, not an issue")
+     repo = await github.get_repo(repo_full)
+     return {
+         "action": "opened",
+@@ -56,30 +69,39 @@ async def build_issues_opened_payload(
+     }
+ 
+ 
+-async def enqueue_manual_triage(
+-    *, db: Database, github: GitHubClient, repo_full: str, number: int
+-) -> str:
++async def enqueue_manual_triage(*, db: Database, github: GitHubClient, repo_full: str, number: int) -> str:
+     """Fetch the issue from GitHub and queue it for the worker pool.
+ 
+     Returns the delivery_id. A row may already exist from a previous manual
+-    triage; we drop it so the fresh payload (and reset attempt counter) wins.
++    triage; inactive rows are replaced so the fresh payload (and reset attempt
++    counter) wins. Active rows are left intact.
+     """
+-    payload = await build_issues_opened_payload(github, repo_full, number)
+     delivery = manual_delivery_id(repo_full, number)
+-    db.remove_event(delivery)
+-    db.record_event(
++    existing = db.get_event(delivery)
++    if existing is not None and existing.state in ("queued", "running"):
++        raise ManualTriageConflict(delivery, existing.state)
++
++    payload = await build_issues_opened_payload(github, repo_full, number)
++    replaced = db.replace_event_if_state_in(
+         delivery_id=delivery,
+         event_type="issues",
+         repo=repo_full,
+         issue_key=issue_key(repo_full, number),
+         payload=payload,
+         state="queued",
++        allowed_existing_states=INACTIVE_EVENT_STATES,
+     )
++    if not replaced:
++        current = db.get_event(delivery)
++        state = current.state if current is not None else "active"
++        raise ManualTriageConflict(delivery, state)
+     return delivery
+ 
+ 
+ __all__ = [
+     "InvalidIssueRef",
++    "ManualTriageError",
++    "ManualTriageConflict",
+     "build_issues_opened_payload",
+     "enqueue_manual_triage",
+     "manual_delivery_id",
+diff --git a/src/robomp/persona.py b/src/robomp/persona.py
+index 65b42165f..7838e5acb 100644
+--- a/src/robomp/persona.py
++++ b/src/robomp/persona.py
+@@ -135,6 +135,30 @@ def kickoff(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> str:
+     return render(_load("kickoff_issue.md"), {"repo": repo, "issue": issue, "workspace": workspace})
+ 
+ 
++def kickoff_directive(
++    *,
++    repo: RepoInfo,
++    issue: IssueInfo,
++    workspace: Workspace,
++    directive: Any,
++) -> str:
++    """Kickoff for an untriaged issue that arrived via a maintainer mention.
++
++    `directive` is duck-typed to anything with `body` and `author` string
++    attributes (see `worker.DirectiveInfo`). Imported lazily to avoid a
++    persona → worker circular dependency.
++    """
++    return render(
++        _load("kickoff_directive.md"),
++        {
++            "repo": repo,
++            "issue": issue,
++            "workspace": workspace,
++            "directive": {"body": directive.body, "author": directive.author},
++        },
++    )
++
++
+ def followup_comment(
+     *,
+     repo: RepoInfo,
+@@ -155,6 +179,29 @@ def followup_comment(
+     )
+ 
+ 
++def directive(
++    *,
++    repo: RepoInfo,
++    issue: IssueInfo,
++    comment: CommentInfo,
++    workspace: Workspace,
++    directive: Any,
++    pr_status: str,
++) -> str:
++    """Follow-up flavor for a comment that is a maintainer directive."""
++    return render(
++        _load("directive.md"),
++        {
++            "repo": repo,
++            "issue": issue,
++            "workspace": workspace,
++            "comment": comment,
++            "directive": {"body": directive.body, "author": directive.author},
++            "state": {"pr_status": pr_status},
++        },
++    )
++
++
+ def followup_review(
+     *,
+     repo: RepoInfo,
+@@ -180,6 +227,7 @@ def followup_review(
+         },
+     )
+ 
++
+ def unable_to_reproduce_comment(*, diagnosis: str, info_needed: str) -> str:
+     return render(
+         _load("unable_to_reproduce_comment.md"),
+@@ -195,9 +243,9 @@ def finalized_pr_comment() -> str:
+     return _load("finalized_pr_comment.md").strip()
+ 
+ 
+-
+ __all__ = [
+     "classify_next_step",
++    "directive",
+     "finalized_issue_comment",
+     "finalized_pr_comment",
+     "followup_comment",
+@@ -205,6 +253,7 @@ __all__ = [
+     "host_tool_description",
+     "host_tool_parameter_description",
+     "kickoff",
++    "kickoff_directive",
+     "render",
+     "seed_phases",
+     "system_append",
+diff --git a/src/robomp/prompts/directive.md b/src/robomp/prompts/directive.md
+new file mode 100644
+index 000000000..5be28beb7
+--- /dev/null
++++ b/src/robomp/prompts/directive.md
+@@ -0,0 +1,32 @@
++# Maintainer directive on {{repo.full_name}}#{{issue.number}}
++
++Maintainer **@{{directive.author}}** tagged you on this issue/PR. Current PR
++state: `{{state.pr_status}}`. The directive is authoritative — follow it
++even if it deviates from the prior plan.
++
++## Directive from @{{directive.author}} ({{comment.created_at}})
++
++{{directive.body}}
++
++---
++
++## What to do
++
++- **Code change requested** → commit on `{{workspace.branch}}` (do NOT open
++  a second PR — push to this branch). Run the project formatter before each
++  commit. After pushing, reply with a single `gh_post_comment` summarizing
++  what changed in one line per concrete fix.
++- **Question / clarification** → answer with a single `gh_post_comment`. No
++  code change.
++- **Explicit "stop" / "drop this"** → reply once acknowledging, then halt.
++- **Ambiguous request** → reply with exactly one clarifying question and
++  stop. Do not guess.
++
++If the issue had a prior plan or seed todos, the directive overrides them.
++You may amend or replace prior commits as long as the final state on
++`{{workspace.branch}}` matches what the maintainer asked for.
++
++All side effects go through the `gh_*` / `classify_issue` / `set_issue_labels`
++host tools. NEVER shell out to `gh` or `git push`.
++
++Terse. Technical. No emoji.
+diff --git a/src/robomp/prompts/kickoff_directive.md b/src/robomp/prompts/kickoff_directive.md
+new file mode 100644
+index 000000000..8612531ef
+--- /dev/null
++++ b/src/robomp/prompts/kickoff_directive.md
+@@ -0,0 +1,51 @@
++# Maintainer directive on {{repo.full_name}}#{{issue.number}}
++
++**Title:** {{issue.title}}
++**Issue author:** @{{issue.author}}
++**Labels (current):** {{issue.labels}}
++**Default branch:** `{{repo.default_branch}}`
++**Working branch (already checked out at cwd):** `{{workspace.branch}}`
++
++Maintainer **@{{directive.author}}** tagged you on this issue. Their directive
++is authoritative — it overrides the default classification stop rules. For
++example, if you classify as `enhancement` you would normally wait for an
++`accepted` label, but a maintainer directive lets you proceed.
++
++---
++
++## Issue body
++
++{{issue.body}}
++
++---
++
++## Directive from @{{directive.author}}
++
++{{directive.body}}
++
++---
++
++## What to do
++
++1. **Classify first.** Call
++   `classify_issue(primary=..., priority=..., functional=[...], rationale=...)`
++   so the issue is labeled. Do this even if the directive tells you the
++   answer — the labels are how everyone else sees the triage.
++
++2. **Execute the directive** in the same session, on this worktree:
++   - Code change → commit on `{{workspace.branch}}`, run the project formatter
++     before each commit, `gh_push_branch`, `gh_open_pr` with the standard
++     `## Repro / ## Cause / ## Fix / ## Verification` body. Reply with a
++     single `gh_post_comment` linking the PR.
++   - Question / clarification → one `gh_post_comment` answering it. No
++     branch, no PR.
++   - Explicit "stop" / "ignore" → one `gh_post_comment` acknowledging,
++     then halt.
++
++3. If the directive is ambiguous, reply asking exactly one clarifying
++   question and stop. Don't guess.
++
++All side effects go through the `gh_*` / `classify_issue` / `set_issue_labels`
++host tools. NEVER shell out to `gh` or `git push`.
++
++Terse. Technical. No emoji.
+diff --git a/src/robomp/queue.py b/src/robomp/queue.py
+index 5e0a98f68..377d327f6 100644
+--- a/src/robomp/queue.py
++++ b/src/robomp/queue.py
+@@ -6,7 +6,6 @@ import asyncio
+ import logging
+ import traceback
+ from contextlib import suppress
+-from typing import Mapping
+ 
+ from robomp import tasks
+ from robomp.config import Settings
+@@ -74,7 +73,7 @@ class WorkerPool:
+                     self._wakeup.clear()
+                     try:
+                         await asyncio.wait_for(self._wakeup.wait(), timeout=10.0)
+-                    except asyncio.TimeoutError:
++                    except TimeoutError:
+                         pass
+                     continue
+                 # Schedule the task; the semaphore caps concurrent execution.
+@@ -95,7 +94,7 @@ class WorkerPool:
+             key = row.issue_key or row.delivery_id
+             if key in self._inflight:
+                 # Put it back; another in-flight task is touching the same issue.
+-                await asyncio.to_thread(self.db.requeue_event, row.delivery_id)
++                await asyncio.to_thread(self.db.requeue_event, row.delivery_id, from_states=("running",))
+                 # Sleep briefly so we don't spin.
+                 await asyncio.sleep(0.5)
+                 return None
+@@ -128,35 +127,53 @@ class WorkerPool:
+         )
+         if event == "issues" and action == "opened":
+             await tasks.triage_issue(
+-                settings=self.settings, db=self.db, github=self.github,
+-                sandbox=self.sandbox, payload=row.payload,
++                settings=self.settings,
++                db=self.db,
++                github=self.github,
++                sandbox=self.sandbox,
++                payload=row.payload,
+             )
+         elif event == "issue_comment" and action == "created":
+             issue = row.payload.get("issue") or {}
+             if "pull_request" in issue:
+                 await tasks.handle_pr_conversation(
+-                    settings=self.settings, db=self.db, github=self.github,
+-                    sandbox=self.sandbox, payload=row.payload,
++                    settings=self.settings,
++                    db=self.db,
++                    github=self.github,
++                    sandbox=self.sandbox,
++                    payload=row.payload,
+                 )
+             else:
+                 await tasks.handle_comment(
+-                    settings=self.settings, db=self.db, github=self.github,
+-                    sandbox=self.sandbox, payload=row.payload,
++                    settings=self.settings,
++                    db=self.db,
++                    github=self.github,
++                    sandbox=self.sandbox,
++                    payload=row.payload,
+                 )
+         elif event == "pull_request_review_comment" and action == "created":
+             await tasks.handle_review(
+-                settings=self.settings, db=self.db, github=self.github,
+-                sandbox=self.sandbox, payload=row.payload,
++                settings=self.settings,
++                db=self.db,
++                github=self.github,
++                sandbox=self.sandbox,
++                payload=row.payload,
+             )
+         elif event == "issues" and action == "closed":
+             await tasks.cleanup_workspace(
+-                settings=self.settings, db=self.db, sandbox=self.sandbox,
+-                payload=row.payload, target_state="closed",
++                settings=self.settings,
++                db=self.db,
++                sandbox=self.sandbox,
++                payload=row.payload,
++                target_state="closed",
+             )
+         elif event == "pull_request" and action == "closed":
+             await tasks.cleanup_workspace(
+-                settings=self.settings, db=self.db, sandbox=self.sandbox,
+-                payload=row.payload, target_state="merged",
++                settings=self.settings,
++                db=self.db,
++                sandbox=self.sandbox,
++                payload=row.payload,
++                target_state="merged",
+             )
+         else:
+             log.info("no-op dispatch", extra={"event": event, "action": action})
+diff --git a/src/robomp/sandbox.py b/src/robomp/sandbox.py
+index 3836d706d..8313cc100 100644
+--- a/src/robomp/sandbox.py
++++ b/src/robomp/sandbox.py
+@@ -7,9 +7,9 @@ import re
+ import secrets
+ import shutil
+ import subprocess
++from collections.abc import Mapping
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import Mapping
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -81,7 +81,9 @@ class GitCommandError(RuntimeError):
+         super().__init__(f"git {' '.join(self.cmd[1:])} failed: {msg}")
+ 
+ 
+-def _run(cmd: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
++def _run(
++    cmd: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | None = None
++) -> subprocess.CompletedProcess[str]:
+     log.debug("git", extra={"cmd": _redacted_cmd(cmd), "cwd": str(cwd) if cwd else None})
+     proc = subprocess.run(
+         cmd,
+@@ -138,16 +140,18 @@ class SandboxManager:
+             _safe_run(["git", "fetch", "--prune", "origin"], cwd=target)
+             return target
+         target.mkdir(parents=True, exist_ok=True)
+-        _run([
+-            "git",
+-            "clone",
+-            "--filter=blob:none",
+-            "--no-tags",
+-            "--branch",
+-            default_branch,
+-            clone_url,
+-            str(target),
+-        ])
++        _run(
++            [
++                "git",
++                "clone",
++                "--filter=blob:none",
++                "--no-tags",
++                "--branch",
++                default_branch,
++                clone_url,
++                str(target),
++            ]
++        )
+         return target
+ 
+     # ---- per-issue workspace ----
+@@ -190,10 +194,18 @@ class SandboxManager:
+             if check.returncode == 0:
+                 _run(["git", "worktree", "add", str(repo_dir), branch], cwd=pool)
+             else:
+-                _run([
+-                    "git", "worktree", "add", "-b", branch, str(repo_dir),
+-                    f"origin/{default_branch}",
+-                ], cwd=pool)
++                _run(
++                    [
++                        "git",
++                        "worktree",
++                        "add",
++                        "-b",
++                        branch,
++                        str(repo_dir),
++                        f"origin/{default_branch}",
++                    ],
++                    cwd=pool,
++                )
+         # Re-set the credentialed origin URL + identity unconditionally so a
+         # rotated PAT, changed bot login, or pre-existing worktree all use the
+         # current credentials and author config.
+diff --git a/src/robomp/server.py b/src/robomp/server.py
+index 77a00ac53..51acadf4c 100644
+--- a/src/robomp/server.py
++++ b/src/robomp/server.py
+@@ -5,25 +5,35 @@ from __future__ import annotations
+ import asyncio
+ import logging
+ import time
++from collections.abc import AsyncIterator
+ from contextlib import asynccontextmanager
+-from typing import Any, AsyncIterator
++from typing import Any
+ 
+-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
++from fastapi import Body, FastAPI, Header, HTTPException, Request, status
+ from fastapi.responses import HTMLResponse, JSONResponse
+ 
+ from robomp import github_events
+ from robomp.config import Settings, get_settings
+-from robomp.db import Database, get_database, iso_seconds_ago, issue_key as make_issue_key
+-from robomp.github_client import GitHubClient
+-from robomp.queue import WorkerPool
+-from robomp.sandbox import SandboxManager
+ from robomp.dashboard import INDEX_HTML, tail_jsonl
+-from robomp.github_client import GitHubError
++from robomp.db import (
++    INACTIVE_EVENT_STATES,
++    Database,
++    get_database,
++    iso_seconds_ago,
++)
++from robomp.db import (
++    issue_key as make_issue_key,
++)
++from robomp.github_client import GitHubClient, GitHubError
+ from robomp.manual_triage import (
+     InvalidIssueRef,
++    ManualTriageConflict,
++    ManualTriageError,
+     enqueue_manual_triage,
+     parse_issue_ref,
+ )
++from robomp.queue import WorkerPool
++from robomp.sandbox import SandboxManager
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -84,7 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         try:
+             payload = await request.json()
+         except Exception as exc:
+-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid json: {exc}")
++            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid json: {exc}") from exc
+ 
+         db: Database = bag["db"]
+ 
+@@ -97,9 +107,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+             payload,
+             allowlist=cfg.repo_allowlist,
+             bot_login=cfg.bot_login,
++            maintainers=cfg.maintainer_logins,
+             resolve_issue_from_pr=_resolve,
+         )
+ 
++        # Persist directive metadata on the stored payload so the durable
++        # queue (and any replay) carries the maintainer signal forward.
++        if decision.directive:
++            payload = dict(payload)
++            payload["_robomp_directive"] = {
++                "body": decision.directive_body,
++                "author": decision.directive_author,
++            }
++
+         if not decision.should_queue:
+             log.info("skip", extra={"event": x_github_event, "reason": decision.reason})
+             db.record_event(
+@@ -114,55 +134,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+             return JSONResponse({"delivery": x_github_delivery, "state": "skipped"}, status_code=202)
+ 
+         # Per-user rate limiting. Lifecycle events (cleanup) carry no submitter
+-        # and are not gated. For everything user-driven, count accepted
+-        # submissions in the rolling window against the tier cap.
++        # and are not gated. For everything user-driven, atomically record the
++        # accepted delivery while checking the rolling window against the tier cap.
+         submitter = decision.submitter
+         if submitter:
+             cap = github_events.rate_limit_cap(
+                 submitter,
+                 decision.association,
+-                unlimited=cfg.rate_limit_unlimited,
++                unlimited=cfg.rate_limit_unlimited | cfg.maintainer_logins,
+                 default=cfg.rate_limit_default,
+                 contributor=cfg.rate_limit_contributor,
+             )
+-            if cap is not None:
+-                since = iso_seconds_ago(cfg.rate_limit_window_seconds)
+-                used = db.count_submissions_since(submitter, since)
+-                if used >= cap:
+-                    window = int(cfg.rate_limit_window_seconds)
+-                    reason = (
+-                        f"rate limit: @{submitter} has used {used}/{cap} submissions"
+-                        f" in the last {window}s"
+-                    )
+-                    log.info(
+-                        "rate_limited",
+-                        extra={
+-                            "event": x_github_event,
+-                            "delivery": x_github_delivery,
+-                            "login": submitter,
+-                            "association": decision.association,
+-                            "used": used,
+-                            "cap": cap,
+-                        },
+-                    )
+-                    db.record_event(
+-                        delivery_id=x_github_delivery,
+-                        event_type=x_github_event,
+-                        repo=decision.repo,
+-                        issue_key=decision.issue_key,
+-                        payload=payload,
+-                        state="skipped",
+-                        last_error=reason,
+-                    )
+-                    return JSONResponse(
+-                        {"delivery": x_github_delivery, "state": "skipped", "reason": "rate_limited"},
+-                        status_code=202,
+-                    )
+-            db.record_submission(
++            since = iso_seconds_ago(cfg.rate_limit_window_seconds)
++            admission = db.admit_submission(
+                 delivery_id=x_github_delivery,
+                 login=submitter,
+                 repo=decision.repo,
++                since=since,
++                cap=cap,
+             )
++            if not admission.accepted:
++                window = int(cfg.rate_limit_window_seconds)
++                reason = f"rate limit: @{submitter} has used {admission.used}/{cap} submissions in the last {window}s"
++                log.info(
++                    "rate_limited",
++                    extra={
++                        "event": x_github_event,
++                        "delivery": x_github_delivery,
++                        "login": submitter,
++                        "association": decision.association,
++                        "used": admission.used,
++                        "cap": cap,
++                    },
++                )
++                db.record_event(
++                    delivery_id=x_github_delivery,
++                    event_type=x_github_event,
++                    repo=decision.repo,
++                    issue_key=decision.issue_key,
++                    payload=payload,
++                    state="skipped",
++                    last_error=reason,
++                )
++                return JSONResponse(
++                    {"delivery": x_github_delivery, "state": "skipped", "reason": "rate_limited"},
++                    status_code=202,
++                )
+ 
+         inserted = db.record_event(
+             delivery_id=x_github_delivery,
+@@ -175,7 +192,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         if inserted:
+             pool: WorkerPool = bag["pool"]
+             pool.wake()
+-            log.info("queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key})
++            log.info(
++                "queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key}
++            )
+         else:
+             log.info("duplicate", extra={"event": x_github_event, "delivery": x_github_delivery})
+         return JSONResponse({"delivery": x_github_delivery, "state": "queued"}, status_code=202)
+@@ -196,7 +215,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         row = db.get_event(delivery_id)
+         if row is None:
+             raise HTTPException(404, "unknown delivery")
+-        db.requeue_event(delivery_id)
++        if not db.requeue_event(delivery_id, from_states=INACTIVE_EVENT_STATES):
++            raise HTTPException(409, f"delivery {delivery_id} is {row.state}; only inactive events can be replayed")
+         bag["pool"].wake()
+         return JSONResponse({"delivery": delivery_id, "state": "queued"})
+ 
+@@ -301,19 +321,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+             try:
+                 repo_full, number = parse_issue_ref(issue_ref)
+             except InvalidIssueRef as exc:
+-                raise HTTPException(400, str(exc))
++                raise HTTPException(400, str(exc)) from exc
+             if not cfg.allows(repo_full):
+                 raise HTTPException(403, f"{repo_full} not in ROBOMP_REPO_ALLOWLIST")
+             try:
+                 delivery = await enqueue_manual_triage(
+-                    db=db, github=github, repo_full=repo_full, number=number,
++                    db=db,
++                    github=github,
++                    repo_full=repo_full,
++                    number=number,
+                 )
++            except ManualTriageConflict as exc:
++                raise HTTPException(409, str(exc)) from exc
++            except ManualTriageError as exc:
++                raise HTTPException(400, str(exc)) from exc
+             except GitHubError as exc:
+-                raise HTTPException(502, f"github error: {exc.status} {exc.message}")
++                raise HTTPException(502, f"github error: {exc.status} {exc.message}") from exc
+             pool.wake()
+             log.info("manual triage", extra={"delivery": delivery, "issue": f"{repo_full}#{number}"})
+             return JSONResponse(
+-                {"delivery": delivery, "state": "queued", "mode": "triage"}, status_code=202,
++                {"delivery": delivery, "state": "queued", "mode": "triage"},
++                status_code=202,
+             )
+ 
+         # mode == "retry"
+@@ -323,7 +351,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+             try:
+                 repo_full, number = parse_issue_ref(issue_ref)
+             except InvalidIssueRef as exc:
+-                raise HTTPException(400, str(exc))
++                raise HTTPException(400, str(exc)) from exc
++            if not cfg.allows(repo_full):
++                raise HTTPException(403, f"{repo_full} not in ROBOMP_REPO_ALLOWLIST")
+             row = db.latest_event_for_issue(make_issue_key(repo_full, number))
+             if row is None:
+                 raise HTTPException(404, f"no stored event for {repo_full}#{number}")
+@@ -331,13 +361,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         else:
+             raise HTTPException(400, "retry requires 'delivery_id' or 'issue'")
+ 
+-        if db.get_event(target) is None:
++        event = db.get_event(target)
++        if event is None:
+             raise HTTPException(404, f"unknown delivery {target}")
+-        db.requeue_event(target)
++        if not db.requeue_event(target, from_states=INACTIVE_EVENT_STATES):
++            raise HTTPException(409, f"delivery {target} is {event.state}; only inactive events can be retried")
+         pool.wake()
+         log.info("manual retry", extra={"delivery": target})
+         return JSONResponse(
+-            {"delivery": target, "state": "queued", "mode": "retry"}, status_code=202,
++            {"delivery": target, "state": "queued", "mode": "retry"},
++            status_code=202,
+         )
+ 
+     @app.get("/events")
+@@ -378,7 +411,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+             ]
+         }
+ 
+-
+     @app.get("/", response_class=HTMLResponse)
+     async def index() -> HTMLResponse:
+         return HTMLResponse(INDEX_HTML)
+diff --git a/src/robomp/tasks.py b/src/robomp/tasks.py
+index f14ae5e93..d75eb1587 100644
+--- a/src/robomp/tasks.py
++++ b/src/robomp/tasks.py
+@@ -3,10 +3,10 @@
+ from __future__ import annotations
+ 
+ import logging
+-from typing import Any, Mapping
++from collections.abc import Mapping
++from typing import Any
+ from urllib.parse import urlparse
+ 
+-
+ from robomp import persona
+ from robomp.config import Settings
+ from robomp.db import Database, IssueRow, IssueState, issue_key
+@@ -19,7 +19,7 @@ from robomp.github_client import (
+     parse_issue_payload,
+ )
+ from robomp.sandbox import SandboxManager
+-from robomp.worker import TaskInputs, run_task
++from robomp.worker import DirectiveInfo, TaskInputs, run_task
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -43,6 +43,20 @@ def _comment_from_payload(payload: Mapping[str, Any]) -> CommentInfo:
+     )
+ 
+ 
++def _directive_from_payload(payload: Mapping[str, Any]) -> DirectiveInfo | None:
++    """Extract the maintainer directive the webhook handler stashed, if any."""
++    raw = payload.get("_robomp_directive")
++    if not isinstance(raw, Mapping):
++        return None
++    body = raw.get("body")
++    author = raw.get("author")
++    if not isinstance(body, str) or not body.strip():
++        return None
++    if not isinstance(author, str) or not author.strip():
++        return None
++    return DirectiveInfo(body=body, author=author)
++
++
+ async def _resolve_repo_and_issue(
+     github: GitHubClient,
+     payload: Mapping[str, Any],
+@@ -77,14 +91,14 @@ async def triage_issue(
+         settings.bot_login,
+     )
+     workspace = sandbox.ensure_workspace(
+-            repo=repo.full_name,
+-            number=issue.number,
+-            title=issue.title,
+-            clone_url=clone_url,
+-            default_branch=repo.default_branch,
+-            author_name=settings.resolved_author_name,
+-            author_email=settings.git_author_email,
+-        )
++        repo=repo.full_name,
++        number=issue.number,
++        title=issue.title,
++        clone_url=clone_url,
++        default_branch=repo.default_branch,
++        author_name=settings.resolved_author_name,
++        author_email=settings.git_author_email,
++    )
+     db.upsert_issue(
+         key=key,
+         repo=repo.full_name,
+@@ -115,35 +129,106 @@ async def handle_comment(
+     repo, issue = await _resolve_repo_and_issue(github, payload)
+     key = issue_key(repo.full_name, issue.number)
+     existing = db.get_issue(key)
+-    if existing is None:
+-        log.info("skip: comment on unknown issue", extra={"key": key})
+-        return
+-    if existing.state in ("merged", "closed", "abandoned"):
+-        log.info("skip: comment on finalized issue", extra={"key": key, "state": existing.state})
+-        try:
+-            await github.post_comment(
+-                repo.full_name, issue.number,
+-                persona.finalized_issue_comment(),
+-            )
+-        except GitHubError as exc:
+-            log.warning("ack comment failed", extra={"err": str(exc)})
+-        return
++    directive = _directive_from_payload(payload)
+     comment = _comment_from_payload(payload)
+     clone_url = _credentialed_clone_url(
+         repo.clone_url,
+         settings.github_token.get_secret_value(),
+         settings.bot_login,
+     )
+-    workspace = sandbox.ensure_workspace(
++
++    if existing is None:
++        if directive is None:
++            log.info("skip: comment on unknown issue", extra={"key": key})
++            return
++        # Maintainer summon on an untriaged issue: bootstrap a row + workspace,
++        # then route through triage-with-directive so the agent classifies
++        # first and executes the directive in the same RPC turn.
++        log.info("directive bootstrap", extra={"key": key, "author": directive.author})
++        db.upsert_issue(key=key, repo=repo.full_name, number=issue.number, state="reproducing")
++        workspace = sandbox.ensure_workspace(
+             repo=repo.full_name,
+             number=issue.number,
+             title=issue.title,
+             clone_url=clone_url,
+             default_branch=repo.default_branch,
+-            existing_branch=existing.branch,
+             author_name=settings.resolved_author_name,
+             author_email=settings.git_author_email,
+         )
++        db.upsert_issue(
++            key=key,
++            repo=repo.full_name,
++            number=issue.number,
++            state="reproducing",
++            branch=workspace.branch,
++            session_dir=str(workspace.session_dir),
++        )
++        inputs = TaskInputs(
++            settings=settings,
++            db=db,
++            github=github,
++            repo=repo,
++            issue=issue,
++            workspace=workspace,
++        )
++        await run_task(task_kind="triage_issue", inputs=inputs, directive=directive)
++        return
++
++    if existing.state in ("merged", "closed", "abandoned"):
++        if directive is None:
++            log.info("skip: comment on finalized issue", extra={"key": key, "state": existing.state})
++            try:
++                await github.post_comment(
++                    repo.full_name,
++                    issue.number,
++                    persona.finalized_issue_comment(),
++                )
++            except GitHubError as exc:
++                log.warning("ack comment failed", extra={"err": str(exc)})
++            return
++        # Maintainer reopen: tear down stale workspace, reset state, branch
++        # afresh from default. The old branch may have been merged/deleted.
++        log.info("directive reopen", extra={"key": key, "from_state": existing.state, "author": directive.author})
++        sandbox.remove_workspace(repo=repo.full_name, number=issue.number)
++        db.upsert_issue(key=key, repo=repo.full_name, number=issue.number, state="reproducing")
++        workspace = sandbox.ensure_workspace(
++            repo=repo.full_name,
++            number=issue.number,
++            title=issue.title,
++            clone_url=clone_url,
++            default_branch=repo.default_branch,
++            author_name=settings.resolved_author_name,
++            author_email=settings.git_author_email,
++        )
++        db.upsert_issue(
++            key=key,
++            repo=repo.full_name,
++            number=issue.number,
++            state="reproducing",
++            branch=workspace.branch,
++            session_dir=str(workspace.session_dir),
++        )
++        inputs = TaskInputs(
++            settings=settings,
++            db=db,
++            github=github,
++            repo=repo,
++            issue=issue,
++            workspace=workspace,
++        )
++        await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
++        return
++
++    workspace = sandbox.ensure_workspace(
++        repo=repo.full_name,
++        number=issue.number,
++        title=issue.title,
++        clone_url=clone_url,
++        default_branch=repo.default_branch,
++        existing_branch=existing.branch,
++        author_name=settings.resolved_author_name,
++        author_email=settings.git_author_email,
++    )
+     inputs = TaskInputs(
+         settings=settings,
+         db=db,
+@@ -152,7 +237,7 @@ async def handle_comment(
+         issue=issue,
+         workspace=workspace,
+     )
+-    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment)
++    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+ 
+ 
+ async def handle_review(
+@@ -190,15 +275,15 @@ async def handle_review(
+         settings.bot_login,
+     )
+     workspace = sandbox.ensure_workspace(
+-            repo=repo.full_name,
+-            number=issue.number,
+-            title=issue.title,
+-            clone_url=clone_url,
+-            default_branch=repo.default_branch,
+-            existing_branch=issue_row.branch,
+-            author_name=settings.resolved_author_name,
+-            author_email=settings.git_author_email,
+-        )
++        repo=repo.full_name,
++        number=issue.number,
++        title=issue.title,
++        clone_url=clone_url,
++        default_branch=repo.default_branch,
++        existing_branch=issue_row.branch,
++        author_name=settings.resolved_author_name,
++        author_email=settings.git_author_email,
++    )
+     comment = payload.get("comment") or {}
+     user = comment.get("user") or {}
+     review_payload = {
+@@ -250,17 +335,30 @@ async def handle_pr_conversation(
+     if issue_row is None:
+         log.info("skip: pr-conversation on unknown PR", extra={"repo": repo_full, "pr": pr_number})
+         return
++    directive = _directive_from_payload(payload)
+     if issue_row.state in ("merged", "closed", "abandoned"):
+-        log.info("skip: pr-conversation on finalized issue", extra={"key": issue_row.key, "state": issue_row.state})
+-        # Still acknowledge so the reporter knows the bot saw it.
+-        try:
+-            await github.post_comment(
+-                repo_full, pr_number,
+-                persona.finalized_pr_comment(),
+-            )
+-        except GitHubError as exc:
+-            log.warning("ack comment failed", extra={"err": str(exc)})
+-        return
++        if directive is None:
++            log.info("skip: pr-conversation on finalized issue", extra={"key": issue_row.key, "state": issue_row.state})
++            # Still acknowledge so the reporter knows the bot saw it.
++            try:
++                await github.post_comment(
++                    repo_full,
++                    pr_number,
++                    persona.finalized_pr_comment(),
++                )
++            except GitHubError as exc:
++                log.warning("ack comment failed", extra={"err": str(exc)})
++            return
++        # Maintainer reopen on a finalized PR: tear down stale workspace and
++        # branch afresh on the originating issue. The agent will open a new
++        # PR if code changes ship.
++        log.info(
++            "directive reopen (pr)",
++            extra={"key": issue_row.key, "from_state": issue_row.state, "author": directive.author},
++        )
++        sandbox.remove_workspace(repo=issue_row.repo, number=issue_row.number)
++        db.upsert_issue(key=issue_row.key, repo=issue_row.repo, number=issue_row.number, state="reproducing")
++        issue_row = db.get_issue(issue_row.key) or issue_row
+     try:
+         repo = await github.get_repo(repo_full)
+         issue = await github.get_issue(repo_full, issue_row.number)
+@@ -272,22 +370,40 @@ async def handle_pr_conversation(
+         settings.github_token.get_secret_value(),
+         settings.bot_login,
+     )
++    # On a reopen the prior branch is stale (merged/deleted), so branch from
++    # default; otherwise reuse the existing branch.
++    existing_branch = (
++        None if directive and issue_row.state == "reproducing" and issue_row.branch is None else issue_row.branch
++    )
+     workspace = sandbox.ensure_workspace(
+-            repo=repo.full_name,
+-            number=issue.number,
+-            title=issue.title,
+-            clone_url=clone_url,
+-            default_branch=repo.default_branch,
+-            existing_branch=issue_row.branch,
+-            author_name=settings.resolved_author_name,
+-            author_email=settings.git_author_email,
++        repo=repo.full_name,
++        number=issue.number,
++        title=issue.title,
++        clone_url=clone_url,
++        default_branch=repo.default_branch,
++        existing_branch=existing_branch,
++        author_name=settings.resolved_author_name,
++        author_email=settings.git_author_email,
++    )
++    if directive is not None and (issue_row.branch is None or issue_row.branch != workspace.branch):
++        db.upsert_issue(
++            key=issue_row.key,
++            repo=issue_row.repo,
++            number=issue_row.number,
++            state="reproducing",
++            branch=workspace.branch,
++            session_dir=str(workspace.session_dir),
+         )
+     comment = _comment_from_payload(payload)
+     inputs = TaskInputs(
+-        settings=settings, db=db, github=github,
+-        repo=repo, issue=issue, workspace=workspace,
++        settings=settings,
++        db=db,
++        github=github,
++        repo=repo,
++        issue=issue,
++        workspace=workspace,
+     )
+-    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, pr_number=pr_number)
++    await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, pr_number=pr_number, directive=directive)
+ 
+ 
+ async def cleanup_workspace(
+diff --git a/src/robomp/worker.py b/src/robomp/worker.py
+index 6ba797039..2d6b941dc 100644
+--- a/src/robomp/worker.py
++++ b/src/robomp/worker.py
+@@ -14,7 +14,6 @@ from __future__ import annotations
+ 
+ import asyncio
+ import logging
+-import os
+ from dataclasses import dataclass
+ from typing import Any
+ 
+@@ -47,17 +46,37 @@ class TaskInputs:
+     workspace: Workspace
+ 
+ 
++@dataclass(slots=True, frozen=True)
++class DirectiveInfo:
++    """A maintainer's `@bot` mention captured as an authoritative instruction."""
++
++    body: str
++    author: str
++
++
+ def _build_extra_env(settings: Settings) -> dict[str, str]:
+     """Pass the GitHub token to subprocesses that need it (git push uses the credentialed remote)."""
+     env: dict[str, str] = {}
+     return env
+ 
+ 
+-
+-
+-def _build_prompt(task_kind: str, inputs: TaskInputs, *, comment: CommentInfo | None,
+-                  pr_number: int | None, review_payload: dict[str, Any] | None) -> str:
++def _build_prompt(
++    task_kind: str,
++    inputs: TaskInputs,
++    *,
++    comment: CommentInfo | None,
++    pr_number: int | None,
++    review_payload: dict[str, Any] | None,
++    directive: DirectiveInfo | None = None,
++) -> str:
+     if task_kind == "triage_issue":
++        if directive is not None:
++            return persona.kickoff_directive(
++                repo=inputs.repo,
++                issue=inputs.issue,
++                workspace=inputs.workspace,
++                directive=directive,
++            )
+         return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+     if task_kind == "handle_comment":
+         assert comment is not None
+@@ -72,6 +91,15 @@ def _build_prompt(task_kind: str, inputs: TaskInputs, *, comment: CommentInfo |
+             pr_status = f"PR #{issue_row.pr_number} was closed without merge"
+         else:
+             pr_status = f"PR #{issue_row.pr_number} is open"
++        if directive is not None:
++            return persona.directive(
++                repo=inputs.repo,
++                issue=inputs.issue,
++                workspace=inputs.workspace,
++                comment=comment,
++                directive=directive,
++                pr_status=pr_status,
++            )
+         return persona.followup_comment(
+             repo=inputs.repo,
+             issue=inputs.issue,
+@@ -155,9 +183,7 @@ def _run_rpc_blocking(
+         model=chosen_model,
+         provider=settings.provider,
+         thinking=settings.thinking_level if settings.thinking_level != "off" else None,
+-        append_system_prompt=persona.system_append(
+-            repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace
+-        ),
++        append_system_prompt=persona.system_append(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace),
+         custom_tools=host_tools.build(bindings),
+         request_timeout=settings.request_timeout_seconds,
+         startup_timeout=60.0,
+@@ -183,8 +209,13 @@ def _run_rpc_blocking(
+                             "id": p.id,
+                             "name": p.name,
+                             "tasks": [
+-                                {"id": t.id, "content": t.content, "status": t.status,
+-                                 "notes": t.notes, "details": t.details}
++                                {
++                                    "id": t.id,
++                                    "content": t.content,
++                                    "status": t.status,
++                                    "notes": t.notes,
++                                    "details": t.details,
++                                }
+                                 for t in p.tasks
+                             ],
+                         }
+@@ -218,6 +249,7 @@ async def run_task(
+     comment: CommentInfo | None = None,
+     pr_number: int | None = None,
+     review_payload: dict[str, Any] | None = None,
++    directive: DirectiveInfo | None = None,
+ ) -> str | None:
+     """Async wrapper that runs the synchronous RPC driver on a worker thread."""
+     loop = asyncio.get_running_loop()
+@@ -231,7 +263,9 @@ async def run_task(
+         author_name=inputs.settings.resolved_author_name,
+         author_email=inputs.settings.git_author_email,
+     )
+-    prompt = _build_prompt(task_kind, inputs, comment=comment, pr_number=pr_number, review_payload=review_payload)
++    prompt = _build_prompt(
++        task_kind, inputs, comment=comment, pr_number=pr_number, review_payload=review_payload, directive=directive
++    )
+     return await asyncio.to_thread(
+         _run_rpc_blocking,
+         inputs,
+@@ -242,4 +276,4 @@ async def run_task(
+     )
+ 
+ 
+-__all__ = ["TaskInputs", "run_task"]
++__all__ = ["DirectiveInfo", "TaskInputs", "run_task"]
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 2652ce964..f1ccde3c8 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -2,7 +2,6 @@
+ 
+ from __future__ import annotations
+ 
+-import os
+ from pathlib import Path
+ 
+ import pytest
+diff --git a/tests/test_config.py b/tests/test_config.py
+index a652f7668..1b0fce058 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import pytest
++from pydantic import ValidationError
+ 
+ from robomp.config import Settings, reset_settings_cache
+ 
+@@ -24,7 +25,7 @@ def test_settings_missing_required(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
+     ):
+         monkeypatch.delenv(key, raising=False)
+     reset_settings_cache()
+-    with pytest.raises(Exception):
++    with pytest.raises(ValidationError):
+         Settings()  # type: ignore[call-arg]
+ 
+ 
+@@ -60,7 +61,7 @@ def test_real_replay_token_preserved(monkeypatch: pytest.MonkeyPatch, env: dict[
+ def test_blank_bot_login_rejected(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+     monkeypatch.setenv("ROBOMP_BOT_LOGIN", "   ")
+     reset_settings_cache()
+-    with pytest.raises(Exception):
++    with pytest.raises(ValidationError):
+         Settings()  # type: ignore[call-arg]
+ 
+ 
+diff --git a/tests/test_db.py b/tests/test_db.py
+index 14d1c71bd..14e9fd796 100644
+--- a/tests/test_db.py
++++ b/tests/test_db.py
+@@ -4,8 +4,6 @@ import threading
+ from concurrent.futures import ThreadPoolExecutor
+ from pathlib import Path
+ 
+-import pytest
+-
+ from robomp.db import Database, iso_seconds_ago, issue_key
+ 
+ 
+@@ -57,6 +55,31 @@ def test_claim_next_event_singleton_under_contention(db: Database) -> None:
+     assert all(db.get_event(f"d-{i}").state == "running" for i in range(5))
+ 
+ 
++def test_requeue_event_can_be_restricted_by_source_state(db: Database) -> None:
++    db.record_event(
++        delivery_id="done-event",
++        event_type="issues",
++        repo="octo/widget",
++        issue_key=issue_key("octo/widget", 1),
++        payload={},
++        state="done",
++    )
++    db.record_event(
++        delivery_id="running-event",
++        event_type="issues",
++        repo="octo/widget",
++        issue_key=issue_key("octo/widget", 2),
++        payload={},
++        state="running",
++    )
++
++    assert db.requeue_event("done-event", from_states=("done", "failed", "skipped"))
++    assert db.get_event("done-event").state == "queued"
++
++    assert not db.requeue_event("running-event", from_states=("done", "failed", "skipped"))
++    assert db.get_event("running-event").state == "running"
++
++
+ def test_reset_stuck_running_recovers(db: Database) -> None:
+     db.record_event(
+         delivery_id="d1",
+@@ -76,12 +99,19 @@ def test_reset_stuck_running_recovers(db: Database) -> None:
+ def test_upsert_issue_round_trip(db: Database) -> None:
+     key = issue_key("octo/widget", 7)
+     row = db.upsert_issue(
+-        key=key, repo="octo/widget", number=7, state="new",
++        key=key,
++        repo="octo/widget",
++        number=7,
++        state="new",
+     )
+     assert row.state == "new"
+     row = db.upsert_issue(
+-        key=key, repo="octo/widget", number=7, state="opened",
+-        branch="farm/abcd1234/some-issue", session_dir="/tmp/s",
++        key=key,
++        repo="octo/widget",
++        number=7,
++        state="opened",
++        branch="farm/abcd1234/some-issue",
++        session_dir="/tmp/s",
+         pr_number=42,
+     )
+     assert row.state == "opened"
+@@ -138,7 +168,8 @@ def test_migration_adds_classification_to_existing_db(tmp_path: Path) -> None:
+           'reproducing', '2026-01-01T00:00:00Z');
+         """
+     )
+-    conn.commit(); conn.close()
++    conn.commit()
++    conn.close()
+     # Opening through our Database class should auto-migrate.
+     database = Database(path)
+     row = database.get_issue("octo/widget#1")
+@@ -148,12 +179,80 @@ def test_migration_adds_classification_to_existing_db(tmp_path: Path) -> None:
+     assert database.get_issue("octo/widget#1").classification == "bug"
+     database.close()
+ 
++
+ def test_record_submission_dedupes_by_delivery(db: Database) -> None:
+     assert db.record_submission(delivery_id="d-1", login="Alice", repo="octo/widget")
+     # Retry of the same delivery id is a no-op (idempotent webhook delivery).
+     assert not db.record_submission(delivery_id="d-1", login="alice", repo="octo/widget")
+ 
+ 
++def test_admit_submission_dedupes_by_delivery_before_rate_limit(db: Database) -> None:
++    since = iso_seconds_ago(60)
++    first = db.admit_submission(
++        delivery_id="d-1",
++        login="Alice",
++        repo="octo/widget",
++        since=since,
++        cap=1,
++    )
++    assert first.accepted
++    assert not first.duplicate
++    assert first.used == 1
++
++    duplicate = db.admit_submission(
++        delivery_id="d-1",
++        login="alice",
++        repo="octo/widget",
++        since=since,
++        cap=1,
++    )
++    assert duplicate.accepted
++    assert duplicate.duplicate
++    assert duplicate.used == 1
++
++    rejected = db.admit_submission(
++        delivery_id="d-2",
++        login="ALICE",
++        repo="octo/widget",
++        since=since,
++        cap=1,
++    )
++    assert not rejected.accepted
++    assert not rejected.duplicate
++    assert rejected.used == 1
++    assert db.count_submissions_since("alice", since) == 1
++
++
++def test_admit_submission_enforces_cap_atomically_across_connections(tmp_path: Path) -> None:
++    path = tmp_path / "admission.sqlite"
++    barrier = threading.Barrier(2)
++
++    def admit(delivery_id: str) -> bool:
++        database = Database(path)
++        try:
++            barrier.wait()
++            return database.admit_submission(
++                delivery_id=delivery_id,
++                login="alice",
++                repo="octo/widget",
++                since=iso_seconds_ago(60),
++                cap=1,
++            ).accepted
++        finally:
++            database.close()
++
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        futures = [pool.submit(admit, f"d-{i}") for i in range(2)]
++        accepted = [future.result() for future in futures]
++
++    verifier = Database(path)
++    try:
++        assert sorted(accepted) == [False, True]
++        assert verifier.count_submissions_since("alice", iso_seconds_ago(60)) == 1
++    finally:
++        verifier.close()
++
++
+ def test_count_submissions_since_is_case_insensitive(db: Database) -> None:
+     db.record_submission(delivery_id="d-1", login="Alice", repo="octo/widget")
+     db.record_submission(delivery_id="d-2", login="ALICE", repo="octo/widget")
+diff --git a/tests/test_github_client.py b/tests/test_github_client.py
+index 1cfc18651..67887c258 100644
+--- a/tests/test_github_client.py
++++ b/tests/test_github_client.py
+@@ -3,7 +3,6 @@
+ from __future__ import annotations
+ 
+ import asyncio
+-import threading
+ 
+ import httpx
+ import pytest
+@@ -16,9 +15,7 @@ def _run_async(coro):
+ 
+ 
+ def test_4xx_maps_to_github_error_with_message() -> None:
+-    transport = httpx.MockTransport(
+-        lambda req: httpx.Response(404, json={"message": "Not Found"})
+-    )
++    transport = httpx.MockTransport(lambda req: httpx.Response(404, json={"message": "Not Found"}))
+     client = GitHubClient("tok", transport=transport)
+     with pytest.raises(GitHubError) as exc:
+         asyncio.new_event_loop().run_until_complete(client.get_repo("o/r"))
+@@ -74,10 +71,15 @@ def test_redirect_target_succeeds_when_followable() -> None:
+                 301,
+                 headers={"location": "https://api.github.com/repos/new/repo"},
+             )
+-        return httpx.Response(200, json={
+-            "full_name": "new/repo", "default_branch": "main",
+-            "clone_url": "https://github.com/new/repo.git", "private": False,
+-        })
++        return httpx.Response(
++            200,
++            json={
++                "full_name": "new/repo",
++                "default_branch": "main",
++                "clone_url": "https://github.com/new/repo.git",
++                "private": False,
++            },
++        )
+ 
+     transport = httpx.MockTransport(handler)
+     client = GitHubClient("tok", transport=transport)
+diff --git a/tests/test_github_events.py b/tests/test_github_events.py
+index fbc6c9230..ef946c3b7 100644
+--- a/tests/test_github_events.py
++++ b/tests/test_github_events.py
+@@ -3,7 +3,13 @@ from __future__ import annotations
+ import hashlib
+ import hmac
+ 
+-from robomp.github_events import rate_limit_cap, route, verify_signature
++from robomp.github_events import (
++    extract_mention,
++    is_maintainer,
++    rate_limit_cap,
++    route,
++    verify_signature,
++)
+ 
+ ALLOWLIST = frozenset({"octo/widget"})
+ BOT = "robomp-bot"
+@@ -130,6 +136,7 @@ def test_route_pr_conversation_uses_handle_pr_conversation() -> None:
+         },
+         allowlist=ALLOWLIST,
+         bot_login=BOT,
++        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+     )
+     assert decision.should_queue
+     assert decision.task == "handle_pr_conversation"
+@@ -160,8 +167,8 @@ def test_route_pr_conversation_uses_resolver_for_inflight_key() -> None:
+     assert decision.issue_key == "octo/widget#42"
+ 
+ 
+-def test_route_pr_conversation_falls_back_when_resolver_misses() -> None:
+-    """If the DB doesn't know the PR yet, fall back to a PR-scoped key."""
++def test_route_pr_conversation_skips_when_resolver_misses() -> None:
++    """Unknown PR comments are not actionable and must not count as submissions."""
+ 
+     decision = route(
+         "issue_comment",
+@@ -175,8 +182,10 @@ def test_route_pr_conversation_falls_back_when_resolver_misses() -> None:
+         bot_login=BOT,
+         resolve_issue_from_pr=lambda _r, _n: None,
+     )
+-    assert decision.should_queue
+-    assert decision.issue_key == "octo/widget#pr-9"
++    assert not decision.should_queue
++    assert decision.submitter is None
++    assert decision.issue_key is None
++    assert "not mapped" in decision.reason
+ 
+ 
+ def test_route_review_only_for_bot_authored_pr() -> None:
+@@ -210,6 +219,23 @@ def test_route_review_only_for_bot_authored_pr() -> None:
+     assert not not_ours.should_queue
+ 
+ 
++def test_route_review_comment_skips_when_resolver_misses() -> None:
++    decision = route(
++        "pull_request_review_comment",
++        {
++            "action": "created",
++            "comment": {"user": {"login": "alice"}, "body": "nit"},
++            "pull_request": {"number": 9, "user": {"login": BOT}},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++        resolve_issue_from_pr=lambda _r, _n: None,
++    )
++    assert not decision.should_queue
++    assert decision.submitter is None
++
++
+ def test_route_pr_closed_only_when_merged_by_bot() -> None:
+     payload = {
+         "action": "closed",
+@@ -217,13 +243,28 @@ def test_route_pr_closed_only_when_merged_by_bot() -> None:
+         "repository": {"full_name": "octo/widget"},
+     }
+     decision = route(
+-        "pull_request", payload, allowlist=ALLOWLIST, bot_login=BOT,
++        "pull_request",
++        payload,
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
+         resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+     )
+     assert decision.should_queue
+     assert decision.task == "cleanup_workspace"
+     assert decision.issue_key == "octo/widget#42"
+ 
++    fallback = route(
++        "pull_request",
++        payload,
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++        resolve_issue_from_pr=lambda _r, _n: None,
++    )
++    assert fallback.should_queue
++    assert fallback.task == "cleanup_workspace"
++    assert fallback.issue_key == "octo/widget#pr-9"
++    assert fallback.submitter is None
++
+     payload["pull_request"]["merged"] = False  # type: ignore[index]
+     assert not route("pull_request", payload, allowlist=ALLOWLIST, bot_login=BOT).should_queue
+ 
+@@ -241,6 +282,7 @@ def test_route_skips_pull_request_issues_event() -> None:
+     )
+     assert not decision.should_queue
+ 
++
+ def test_route_issue_opened_captures_submitter() -> None:
+     decision = route(
+         "issues",
+@@ -288,7 +330,10 @@ def test_route_pr_merged_carries_no_submitter() -> None:
+         "repository": {"full_name": "octo/widget"},
+     }
+     decision = route(
+-        "pull_request", payload, allowlist=ALLOWLIST, bot_login=BOT,
++        "pull_request",
++        payload,
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
+         resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+     )
+     assert decision.should_queue
+@@ -297,42 +342,240 @@ def test_route_pr_merged_carries_no_submitter() -> None:
+ 
+ def test_rate_limit_cap_unlimited_allowlist_beats_association() -> None:
+     # Even a NONE association is unlimited when login is in the explicit list.
+-    assert rate_limit_cap(
+-        "can1357", "NONE",
+-        unlimited=frozenset({"can1357"}),
+-        default=3, contributor=10,
+-    ) is None
++    assert (
++        rate_limit_cap(
++            "can1357",
++            "NONE",
++            unlimited=frozenset({"can1357"}),
++            default=3,
++            contributor=10,
++        )
++        is None
++    )
+ 
+ 
+ def test_rate_limit_cap_unlimited_is_case_insensitive() -> None:
+-    assert rate_limit_cap(
+-        "Can1357", None,
+-        unlimited=frozenset({"can1357"}),
+-        default=3, contributor=10,
+-    ) is None
++    assert (
++        rate_limit_cap(
++            "Can1357",
++            None,
++            unlimited=frozenset({"can1357"}),
++            default=3,
++            contributor=10,
++        )
++        is None
++    )
+ 
+ 
+ def test_rate_limit_cap_trusted_associations_bypass() -> None:
+     for assoc in ("OWNER", "MEMBER", "COLLABORATOR"):
+-        assert rate_limit_cap(
+-            "stranger", assoc,
+-            unlimited=frozenset(),
+-            default=3, contributor=10,
+-        ) is None, assoc
++        assert (
++            rate_limit_cap(
++                "stranger",
++                assoc,
++                unlimited=frozenset(),
++                default=3,
++                contributor=10,
++            )
++            is None
++        ), assoc
+ 
+ 
+ def test_rate_limit_cap_contributor_tier() -> None:
+-    assert rate_limit_cap(
+-        "alice", "CONTRIBUTOR",
+-        unlimited=frozenset(),
+-        default=3, contributor=10,
+-    ) == 10
++    assert (
++        rate_limit_cap(
++            "alice",
++            "CONTRIBUTOR",
++            unlimited=frozenset(),
++            default=3,
++            contributor=10,
++        )
++        == 10
++    )
+ 
+ 
+ def test_rate_limit_cap_default_tier_for_unknown_and_first_timer() -> None:
+     for assoc in (None, "NONE", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"):
+-        assert rate_limit_cap(
+-            "alice", assoc,
+-            unlimited=frozenset(),
+-            default=3, contributor=10,
+-        ) == 3, assoc
++        assert (
++            rate_limit_cap(
++                "alice",
++                assoc,
++                unlimited=frozenset(),
++                default=3,
++                contributor=10,
++            )
++            == 3
++        ), assoc
++
++
++# ---------- mention + directive ----------
++
++
++def test_extract_mention_returns_body_minus_mention() -> None:
++    assert extract_mention("hey @robomp-bot please look", "robomp-bot") == "hey please look"
++    assert extract_mention("@robomp-bot do X", "robomp-bot") == "do X"
++
++
++def test_extract_mention_returns_none_without_mention() -> None:
++    assert extract_mention("hello there", "robomp-bot") is None
++    assert extract_mention(None, "robomp-bot") is None
++    assert extract_mention("", "robomp-bot") is None
++
++
++def test_extract_mention_is_case_insensitive() -> None:
++    assert extract_mention("yo @ROBOMP-BOT", "robomp-bot") == "yo"
++
++
++def test_extract_mention_respects_hyphen_word_boundary() -> None:
++    # @robomp-bot-helper must NOT match @robomp-bot.
++    assert extract_mention("@robomp-bot-helper hi", "robomp-bot") is None
++
++
++def test_extract_mention_handles_multiple_occurrences() -> None:
++    assert extract_mention("@robomp-bot one, then @robomp-bot two", "robomp-bot") == "one, then two"
++
++
++def test_is_maintainer_recognizes_explicit_allowlist() -> None:
++    assert is_maintainer("can1357", None, maintainers=frozenset({"can1357"}))
++    assert is_maintainer("Can1357", "NONE", maintainers=frozenset({"can1357"}))
++
++
++def test_is_maintainer_recognizes_trusted_associations() -> None:
++    for assoc in ("OWNER", "MEMBER", "COLLABORATOR"):
++        assert is_maintainer("anyone", assoc, maintainers=frozenset()), assoc
++
++
++def test_is_maintainer_rejects_contributor_and_none() -> None:
++    assert not is_maintainer("alice", "CONTRIBUTOR", maintainers=frozenset())
++    assert not is_maintainer("alice", None, maintainers=frozenset())
++    assert is_maintainer(None, "OWNER", maintainers=frozenset())  # association still wins
++
++
++def test_route_directive_set_on_issue_comment_when_owner_mentions_bot() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "can1357"},
++                "author_association": "OWNER",
++                "body": "@robomp-bot please refactor X",
++            },
++            "issue": {"number": 9},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++    )
++    assert decision.should_queue
++    assert decision.directive is True
++    assert decision.directive_body == "please refactor X"
++    assert decision.directive_author == "can1357"
++
++
++def test_route_directive_set_when_login_in_maintainers_list() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "can1357"},
++                # No author_association field.
++                "body": "@robomp-bot do it",
++            },
++            "issue": {"number": 9},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++        maintainers=frozenset({"can1357"}),
++    )
++    assert decision.directive is True
++    assert decision.directive_body == "do it"
++    assert decision.directive_author == "can1357"
++
++
++def test_route_directive_unset_for_random_user_even_with_mention() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "stranger"},
++                "author_association": "NONE",
++                "body": "@robomp-bot please refactor X",
++            },
++            "issue": {"number": 9},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++    )
++    assert decision.should_queue  # comment still routed normally
++    assert decision.directive is False
++    assert decision.directive_body is None
++
++
++def test_route_directive_unset_for_maintainer_without_mention() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "can1357"},
++                "author_association": "OWNER",
++                "body": "looks good to me",
++            },
++            "issue": {"number": 9},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++    )
++    assert decision.directive is False
++
++
++def test_route_directive_set_on_pr_conversation() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "can1357"},
++                "author_association": "OWNER",
++                "body": "@robomp-bot change the indentation in foo.py",
++            },
++            "issue": {"number": 50, "pull_request": {"url": "x"}},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
++    )
++    assert decision.should_queue
++    assert decision.task == "handle_pr_conversation"
++    assert decision.directive is True
++    assert decision.directive_body == "change the indentation in foo.py"
++
++
++def test_route_directive_set_on_review_comment() -> None:
++    decision = route(
++        "pull_request_review_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "can1357"},
++                "author_association": "OWNER",
++                "body": "@robomp-bot use a generator here",
++            },
++            "pull_request": {"number": 50, "user": {"login": BOT}},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
++    )
++    assert decision.should_queue
++    assert decision.task == "handle_review"
++    assert decision.directive is True
++    assert decision.directive_body == "use a generator here"
+diff --git a/tests/test_host_tools.py b/tests/test_host_tools.py
+index 637ac8b29..6da3fc513 100644
+--- a/tests/test_host_tools.py
++++ b/tests/test_host_tools.py
+@@ -10,10 +10,9 @@ from typing import Any
+ 
+ import httpx
+ import pytest
+-
+ from omp_rpc import HostToolContext, RpcCommandError
+ 
+-from robomp.db import Database, issue_key
++from robomp.db import Database
+ from robomp.github_client import GitHubClient, IssueInfo, RepoInfo
+ from robomp.host_tools import ToolBindings, build
+ from robomp.sandbox import Workspace
+@@ -41,15 +40,23 @@ def _stub_workspace(tmp_path: Path) -> Workspace:
+ 
+ def _stub_issue() -> IssueInfo:
+     return IssueInfo(
+-        repo="octo/widget", number=42, title="boom", body="b",
+-        state="open", author="alice", labels=("bug",), is_pull_request=False,
++        repo="octo/widget",
++        number=42,
++        title="boom",
++        body="b",
++        state="open",
++        author="alice",
++        labels=("bug",),
++        is_pull_request=False,
+     )
+ 
+ 
+ def _stub_repo() -> RepoInfo:
+     return RepoInfo(
+-        full_name="octo/widget", default_branch="main",
+-        clone_url="https://x/octo/widget.git", private=False,
++        full_name="octo/widget",
++        default_branch="main",
++        clone_url="https://x/octo/widget.git",
++        private=False,
+     )
+ 
+ 
+@@ -66,18 +73,28 @@ def _stop_loop(loop: asyncio.AbstractEventLoop, t: threading.Thread) -> None:
+     loop.close()
+ 
+ 
+-def _bindings(db: Database, tmp_path: Path, transport: httpx.MockTransport) -> tuple[ToolBindings, asyncio.AbstractEventLoop, threading.Thread]:
++def _bindings(
++    db: Database, tmp_path: Path, transport: httpx.MockTransport
++) -> tuple[ToolBindings, asyncio.AbstractEventLoop, threading.Thread]:
+     github = GitHubClient("token", transport=transport)
+     loop, thread = _make_loop_in_background()
+     bindings = ToolBindings(
+-        db=db, github=github, repo=_stub_repo(), issue=_stub_issue(),
+-        workspace=_stub_workspace(tmp_path), loop=loop,
++        db=db,
++        github=github,
++        repo=_stub_repo(),
++        issue=_stub_issue(),
++        workspace=_stub_workspace(tmp_path),
++        loop=loop,
+         author_name="robomp-bot",
+         author_email="robomp-bot@example.invalid",
+     )
+     db.upsert_issue(
+-        key=bindings.issue_key, repo="octo/widget", number=42, state="reproducing",
+-        branch=bindings.workspace.branch, session_dir=str(bindings.workspace.session_dir),
++        key=bindings.issue_key,
++        repo="octo/widget",
++        number=42,
++        state="reproducing",
++        branch=bindings.workspace.branch,
++        session_dir=str(bindings.workspace.session_dir),
+     )
+     return bindings, loop, thread
+ 
+@@ -199,13 +216,23 @@ def test_mark_unable_posts_comment_and_abandons(db: Database, tmp_path: Path) ->
+ def test_fetch_issue_thread_returns_markdown(db: Database, tmp_path: Path) -> None:
+     def handler(request: httpx.Request) -> httpx.Response:
+         if request.url.path.endswith("/comments"):
+-            return httpx.Response(200, json=[
+-                {"id": 1, "user": {"login": "alice"}, "body": "still broken", "created_at": "t1"},
+-            ])
+-        return httpx.Response(200, json={
+-            "number": 42, "title": "boom", "body": "b", "state": "open",
+-            "user": {"login": "alice"}, "labels": [{"name": "bug"}],
+-        })
++            return httpx.Response(
++                200,
++                json=[
++                    {"id": 1, "user": {"login": "alice"}, "body": "still broken", "created_at": "t1"},
++                ],
++            )
++        return httpx.Response(
++            200,
++            json={
++                "number": 42,
++                "title": "boom",
++                "body": "b",
++                "state": "open",
++                "user": {"login": "alice"},
++                "labels": [{"name": "bug"}],
++            },
++        )
+ 
+     bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+     try:
+@@ -250,17 +277,21 @@ def test_classify_issue_applies_labels_and_persists_primary(db: Database, tmp_pa
+     assert "reproduce" in result.lower()
+     assert captured["path"].endswith("/issues/42/labels")
+     assert captured["body"]["labels"] == [
+-        "bug", "prio:p1", "tool", "agent", "providers", "provider:openai",
+-        "platform:macos", "triaged",
++        "bug",
++        "prio:p1",
++        "tool",
++        "agent",
++        "providers",
++        "provider:openai",
++        "platform:macos",
++        "triaged",
+     ]
+     row = db.get_issue(bindings.issue_key)
+     assert row is not None and row.classification == "bug"
+ 
+ 
+ def test_classify_issue_question_skips_repro_path(db: Database, tmp_path: Path) -> None:
+-    transport = httpx.MockTransport(
+-        lambda r: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}])
+-    )
++    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}]))
+     bindings, loop, t = _bindings(db, tmp_path, transport)
+     try:
+         tool = next(x for x in build(bindings) if x.name == "classify_issue")
+@@ -340,7 +371,8 @@ def test_set_issue_labels_rejects_empty(db: Database, tmp_path: Path) -> None:
+ 
+ def test_gh_push_branch_rejects_wrong_identity(db: Database, tmp_path: Path) -> None:
+     """Pre-push gate refuses to push commits authored by anyone other than the configured identity."""
+-    import os, subprocess
++    import os
++    import subprocess
+ 
+     # Build a real local upstream + worktree so git operations actually work.
+     bare = tmp_path / "upstream.git"
+@@ -349,8 +381,10 @@ def test_gh_push_branch_rejects_wrong_identity(db: Database, tmp_path: Path) ->
+     seed = tmp_path / "seed"
+     seed.mkdir()
+     env = os.environ | {
+-        "GIT_AUTHOR_NAME": "seed", "GIT_AUTHOR_EMAIL": "seed@x",
+-        "GIT_COMMITTER_NAME": "seed", "GIT_COMMITTER_EMAIL": "seed@x",
++        "GIT_AUTHOR_NAME": "seed",
++        "GIT_AUTHOR_EMAIL": "seed@x",
++        "GIT_COMMITTER_NAME": "seed",
++        "GIT_COMMITTER_EMAIL": "seed@x",
+     }
+     subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
+     (seed / "README.md").write_text("init\n")
+@@ -363,37 +397,63 @@ def test_gh_push_branch_rejects_wrong_identity(db: Database, tmp_path: Path) ->
+         subprocess.run(cmd, check=True, capture_output=True, env=env)
+ 
+     from robomp.sandbox import SandboxManager
++
+     mgr = SandboxManager(tmp_path / "workspaces")
+     ws = mgr.ensure_workspace(
+-        repo="octo/widget", number=42, title="identity test",
+-        clone_url=str(bare), default_branch="main",
+-        author_name="robomp-bot", author_email="robomp-bot@example.invalid",
++        repo="octo/widget",
++        number=42,
++        title="identity test",
++        clone_url=str(bare),
++        default_branch="main",
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
+     )
+     # Commit with a different identity to provoke the gate.
+     bad_env = os.environ | {
+-        "GIT_AUTHOR_NAME": "wrong", "GIT_AUTHOR_EMAIL": "wrong@nope",
+-        "GIT_COMMITTER_NAME": "wrong", "GIT_COMMITTER_EMAIL": "wrong@nope",
++        "GIT_AUTHOR_NAME": "wrong",
++        "GIT_AUTHOR_EMAIL": "wrong@nope",
++        "GIT_COMMITTER_NAME": "wrong",
++        "GIT_COMMITTER_EMAIL": "wrong@nope",
+     }
+     (ws.repo_dir / "x.txt").write_text("hi\n")
+     subprocess.run(["git", "-C", str(ws.repo_dir), "add", "."], check=True, capture_output=True)
+     subprocess.run(
+-        ["git", "-C", str(ws.repo_dir), "-c", "user.email=wrong@nope", "-c", "user.name=wrong",
+-         "commit", "-m", "bad"],
+-        check=True, capture_output=True, env=bad_env,
++        ["git", "-C", str(ws.repo_dir), "-c", "user.email=wrong@nope", "-c", "user.name=wrong", "commit", "-m", "bad"],
++        check=True,
++        capture_output=True,
++        env=bad_env,
+     )
+ 
+     github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+     loop, thread = _make_loop_in_background()
+     try:
+         bindings = ToolBindings(
+-            db=db, github=github, repo=_stub_repo(),
+-            issue=IssueInfo(repo="octo/widget", number=42, title="t", body="", state="open",
+-                            author="alice", labels=(), is_pull_request=False),
+-            workspace=ws, loop=loop,
+-            author_name="robomp-bot", author_email="robomp-bot@example.invalid",
++            db=db,
++            github=github,
++            repo=_stub_repo(),
++            issue=IssueInfo(
++                repo="octo/widget",
++                number=42,
++                title="t",
++                body="",
++                state="open",
++                author="alice",
++                labels=(),
++                is_pull_request=False,
++            ),
++            workspace=ws,
++            loop=loop,
++            author_name="robomp-bot",
++            author_email="robomp-bot@example.invalid",
++        )
++        db.upsert_issue(
++            key=bindings.issue_key,
++            repo="octo/widget",
++            number=42,
++            state="reproducing",
++            branch=ws.branch,
++            session_dir=str(ws.session_dir),
+         )
+-        db.upsert_issue(key=bindings.issue_key, repo="octo/widget", number=42, state="reproducing",
+-                        branch=ws.branch, session_dir=str(ws.session_dir))
+         tool = next(x for x in build(bindings) if x.name == "gh_push_branch")
+         with pytest.raises(RpcCommandError) as exc:
+             tool.execute({}, _ctx())
+@@ -404,22 +464,260 @@ def test_gh_push_branch_rejects_wrong_identity(db: Database, tmp_path: Path) ->
+         # Branch must NOT have been pushed.
+         refs = subprocess.run(
+             ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
+-            capture_output=True, text=True, check=True,
++            capture_output=True,
++            text=True,
++            check=True,
+         )
+         assert not any(r.startswith("refs/heads/farm/") for r in refs.stdout.splitlines()), refs.stdout
+     finally:
+         _stop_loop(loop, thread)
+ 
+ 
++def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_path: Path) -> None:
++    """gh_open_pr uses the guarded push path before creating the pull request."""
++    import os
++    import subprocess
++
++    bare = tmp_path / "upstream.git"
++    bare.mkdir()
++    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], check=True, capture_output=True)
++    seed = tmp_path / "seed"
++    seed.mkdir()
++    env = os.environ | {
++        "GIT_AUTHOR_NAME": "seed",
++        "GIT_AUTHOR_EMAIL": "seed@x",
++        "GIT_COMMITTER_NAME": "seed",
++        "GIT_COMMITTER_EMAIL": "seed@x",
++    }
++    subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
++    (seed / "README.md").write_text("init\n")
++    for cmd in (
++        ["git", "-C", str(seed), "add", "."],
++        ["git", "-C", str(seed), "-c", "user.email=seed@x", "-c", "user.name=seed", "commit", "-m", "init"],
++        ["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
++        ["git", "-C", str(seed), "push", "origin", "main"],
++    ):
++        subprocess.run(cmd, check=True, capture_output=True, env=env)
++
++    from robomp.sandbox import SandboxManager
++
++    mgr = SandboxManager(tmp_path / "workspaces")
++    ws = mgr.ensure_workspace(
++        repo="octo/widget",
++        number=42,
++        title="identity test",
++        clone_url=str(bare),
++        default_branch="main",
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
++    )
++    bad_env = os.environ | {
++        "GIT_AUTHOR_NAME": "wrong",
++        "GIT_AUTHOR_EMAIL": "wrong@nope",
++        "GIT_COMMITTER_NAME": "wrong",
++        "GIT_COMMITTER_EMAIL": "wrong@nope",
++    }
++    (ws.repo_dir / "x.txt").write_text("hi\n")
++    subprocess.run(["git", "-C", str(ws.repo_dir), "add", "."], check=True, capture_output=True)
++    subprocess.run(
++        ["git", "-C", str(ws.repo_dir), "-c", "user.email=wrong@nope", "-c", "user.name=wrong", "commit", "-m", "bad"],
++        check=True,
++        capture_output=True,
++        env=bad_env,
++    )
++
++    opened_pr = False
++
++    def handler(_request: httpx.Request) -> httpx.Response:
++        nonlocal opened_pr
++        opened_pr = True
++        return httpx.Response(
++            201,
++            json={
++                "number": 7,
++                "html_url": "https://github.com/octo/widget/pull/7",
++                "head": {"ref": ws.branch},
++                "base": {"ref": "main"},
++            },
++        )
++
++    github = GitHubClient("tok", transport=httpx.MockTransport(handler))
++    loop, thread = _make_loop_in_background()
++    try:
++        bindings = ToolBindings(
++            db=db,
++            github=github,
++            repo=_stub_repo(),
++            issue=IssueInfo(
++                repo="octo/widget",
++                number=42,
++                title="t",
++                body="",
++                state="open",
++                author="alice",
++                labels=(),
++                is_pull_request=False,
++            ),
++            workspace=ws,
++            loop=loop,
++            author_name="robomp-bot",
++            author_email="robomp-bot@example.invalid",
++        )
++        db.upsert_issue(
++            key=bindings.issue_key,
++            repo="octo/widget",
++            number=42,
++            state="reproducing",
++            branch=ws.branch,
++            session_dir=str(ws.session_dir),
++        )
++        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
++        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
++        with pytest.raises(RpcCommandError) as exc:
++            tool.execute({"title": "fix: x", "body": body}, _ctx())
++        assert "identity mismatch" in str(exc.value)
++        assert not opened_pr
++        refs = subprocess.run(
++            ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
++            capture_output=True,
++            text=True,
++            check=True,
++        )
++        assert not any(r.startswith("refs/heads/farm/") for r in refs.stdout.splitlines()), refs.stdout
++    finally:
++        _stop_loop(loop, thread)
++
++
++def test_gh_push_branch_rejects_invalid_identity_scan_range(db: Database, tmp_path: Path) -> None:
++    """A failing git-log author scan is a push rejection, not an empty successful scan."""
++    import os
++    import subprocess
++
++    bare = tmp_path / "upstream.git"
++    bare.mkdir()
++    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], check=True, capture_output=True)
++    seed = tmp_path / "seed"
++    seed.mkdir()
++    env = os.environ | {
++        "GIT_AUTHOR_NAME": "robomp-bot",
++        "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
++        "GIT_COMMITTER_NAME": "robomp-bot",
++        "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
++    }
++    subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
++    (seed / "README.md").write_text("init\n")
++    for cmd in (
++        ["git", "-C", str(seed), "add", "."],
++        [
++            "git",
++            "-C",
++            str(seed),
++            "-c",
++            "user.email=robomp-bot@example.invalid",
++            "-c",
++            "user.name=robomp-bot",
++            "commit",
++            "-m",
++            "init",
++        ],
++        ["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
++        ["git", "-C", str(seed), "push", "origin", "main"],
++    ):
++        subprocess.run(cmd, check=True, capture_output=True, env=env)
++
++    from robomp.sandbox import SandboxManager
++
++    mgr = SandboxManager(tmp_path / "workspaces")
++    ws = mgr.ensure_workspace(
++        repo="octo/widget",
++        number=42,
++        title="missing base ref",
++        clone_url=str(bare),
++        default_branch="main",
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
++    )
++    subprocess.run(
++        ["git", "-C", str(ws.repo_dir), "update-ref", "-d", "refs/remotes/origin/main"], check=True, capture_output=True
++    )
++    (ws.repo_dir / "x.txt").write_text("hi\n")
++    subprocess.run(["git", "-C", str(ws.repo_dir), "add", "x.txt"], check=True, capture_output=True)
++    subprocess.run(
++        [
++            "git",
++            "-C",
++            str(ws.repo_dir),
++            "-c",
++            "user.email=robomp-bot@example.invalid",
++            "-c",
++            "user.name=robomp-bot",
++            "commit",
++            "-m",
++            "ok",
++        ],
++        check=True,
++        capture_output=True,
++        env=env,
++    )
++
++    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
++    loop, thread = _make_loop_in_background()
++    try:
++        bindings = ToolBindings(
++            db=db,
++            github=github,
++            repo=_stub_repo(),
++            issue=IssueInfo(
++                repo="octo/widget",
++                number=42,
++                title="t",
++                body="",
++                state="open",
++                author="alice",
++                labels=(),
++                is_pull_request=False,
++            ),
++            workspace=ws,
++            loop=loop,
++            author_name="robomp-bot",
++            author_email="robomp-bot@example.invalid",
++        )
++        db.upsert_issue(
++            key=bindings.issue_key,
++            repo="octo/widget",
++            number=42,
++            state="reproducing",
++            branch=ws.branch,
++            session_dir=str(ws.session_dir),
++        )
++        tool = next(x for x in build(bindings) if x.name == "gh_push_branch")
++        with pytest.raises(RpcCommandError) as exc:
++            tool.execute({}, _ctx())
++        msg = str(exc.value)
++        assert "could not inspect commit authors" in msg
++        assert "origin/main..HEAD" in msg
++        refs = subprocess.run(
++            ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
++            capture_output=True,
++            text=True,
++            check=True,
++        )
++        assert not any(r.startswith("refs/heads/farm/") for r in refs.stdout.splitlines()), refs.stdout
++        row = db._conn.execute(
++            "SELECT error FROM tool_calls WHERE tool='gh_push_branch' ORDER BY id DESC LIMIT 1"
++        ).fetchone()
++        assert row is not None and "could not inspect commit authors" in row["error"]
++        assert "origin/main..HEAD" in row["error"]
++    finally:
++        _stop_loop(loop, thread)
++
++
+ def test_gh_open_pr_requires_closes_keyword(db: Database, tmp_path: Path) -> None:
+     """gh_open_pr refuses if the body has the four sections but no Fixes/Closes/Resolves keyword."""
+     bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
+     try:
+         tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+-        body = (
+-            "## Repro\nrepro\n\n## Cause\ncause\n\n"
+-            "## Fix\nfix\n\n## Verification\nran tests\n"
+-        )
++        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n"
+         with pytest.raises(RpcCommandError) as exc:
+             tool.execute({"title": "fix: x", "body": body}, _ctx())
+         assert "Fixes #42" in str(exc.value)
+@@ -429,45 +727,73 @@ def test_gh_open_pr_requires_closes_keyword(db: Database, tmp_path: Path) -> Non
+ 
+ def test_gh_push_branch_rejects_dirty_worktree(db: Database, tmp_path: Path) -> None:
+     """Pre-push gate refuses if the working tree has uncommitted changes."""
+-    import os, subprocess
++    import os
++    import subprocess
+ 
+     # Real upstream + worktree so git status works.
+     bare = tmp_path / "upstream.git"
+     bare.mkdir()
+-    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)],
+-                   check=True, capture_output=True)
++    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], check=True, capture_output=True)
+     seed = tmp_path / "seed"
+     seed.mkdir()
+     env = os.environ | {
+-        "GIT_AUTHOR_NAME": "robomp-bot", "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
+-        "GIT_COMMITTER_NAME": "robomp-bot", "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
++        "GIT_AUTHOR_NAME": "robomp-bot",
++        "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
++        "GIT_COMMITTER_NAME": "robomp-bot",
++        "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
+     }
+     subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
+     (seed / "README.md").write_text("init\n")
+     for cmd in (
+         ["git", "-C", str(seed), "add", "."],
+-        ["git", "-C", str(seed), "-c", "user.email=robomp-bot@example.invalid", "-c",
+-         "user.name=robomp-bot", "commit", "-m", "init"],
++        [
++            "git",
++            "-C",
++            str(seed),
++            "-c",
++            "user.email=robomp-bot@example.invalid",
++            "-c",
++            "user.name=robomp-bot",
++            "commit",
++            "-m",
++            "init",
++        ],
+         ["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
+         ["git", "-C", str(seed), "push", "origin", "main"],
+     ):
+         subprocess.run(cmd, check=True, capture_output=True, env=env)
+ 
+     from robomp.sandbox import SandboxManager
++
+     mgr = SandboxManager(tmp_path / "workspaces")
+     ws = mgr.ensure_workspace(
+-        repo="octo/widget", number=42, title="dirty test",
+-        clone_url=str(bare), default_branch="main",
+-        author_name="robomp-bot", author_email="robomp-bot@example.invalid",
++        repo="octo/widget",
++        number=42,
++        title="dirty test",
++        clone_url=str(bare),
++        default_branch="main",
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
+     )
+     # Make a proper commit (so the identity gate passes).
+     (ws.repo_dir / "a.txt").write_text("a\n")
+     subprocess.run(["git", "-C", str(ws.repo_dir), "add", "a.txt"], check=True, capture_output=True)
+     subprocess.run(
+-        ["git", "-C", str(ws.repo_dir),
+-         "-c", "user.email=robomp-bot@example.invalid", "-c", "user.name=robomp-bot",
+-         "commit", "-m", "ok"],
+-        check=True, capture_output=True, env=env,
++        [
++            "git",
++            "-C",
++            str(ws.repo_dir),
++            "-c",
++            "user.email=robomp-bot@example.invalid",
++            "-c",
++            "user.name=robomp-bot",
++            "commit",
++            "-m",
++            "ok",
++        ],
++        check=True,
++        capture_output=True,
++        env=env,
+     )
+     # Now dirty the worktree — uncommitted edit.
+     (ws.repo_dir / "a.txt").write_text("a-modified\n")
+@@ -476,14 +802,32 @@ def test_gh_push_branch_rejects_dirty_worktree(db: Database, tmp_path: Path) ->
+     loop, thread = _make_loop_in_background()
+     try:
+         bindings = ToolBindings(
+-            db=db, github=github, repo=_stub_repo(),
+-            issue=IssueInfo(repo="octo/widget", number=42, title="t", body="", state="open",
+-                            author="alice", labels=(), is_pull_request=False),
+-            workspace=ws, loop=loop,
+-            author_name="robomp-bot", author_email="robomp-bot@example.invalid",
++            db=db,
++            github=github,
++            repo=_stub_repo(),
++            issue=IssueInfo(
++                repo="octo/widget",
++                number=42,
++                title="t",
++                body="",
++                state="open",
++                author="alice",
++                labels=(),
++                is_pull_request=False,
++            ),
++            workspace=ws,
++            loop=loop,
++            author_name="robomp-bot",
++            author_email="robomp-bot@example.invalid",
++        )
++        db.upsert_issue(
++            key=bindings.issue_key,
++            repo="octo/widget",
++            number=42,
++            state="reproducing",
++            branch=ws.branch,
++            session_dir=str(ws.session_dir),
+         )
+-        db.upsert_issue(key=bindings.issue_key, repo="octo/widget", number=42, state="reproducing",
+-                        branch=ws.branch, session_dir=str(ws.session_dir))
+         tool = next(x for x in build(bindings) if x.name == "gh_push_branch")
+         with pytest.raises(RpcCommandError) as exc:
+             tool.execute({}, _ctx())
+@@ -491,8 +835,150 @@ def test_gh_push_branch_rejects_dirty_worktree(db: Database, tmp_path: Path) ->
+         # Nothing pushed.
+         refs = subprocess.run(
+             ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
+-            capture_output=True, text=True, check=True,
++            capture_output=True,
++            text=True,
++            check=True,
+         )
+         assert not any(r.startswith("refs/heads/farm/") for r in refs.stdout.splitlines()), refs.stdout
+     finally:
+         _stop_loop(loop, thread)
++
++
++def test_gh_push_branch_does_not_run_repository_bun_scripts(
++    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """A clean push must not execute repository-controlled package scripts during preflight."""
++    import os
++    import subprocess
++
++    bare = tmp_path / "upstream.git"
++    bare.mkdir()
++    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], check=True, capture_output=True)
++    seed = tmp_path / "seed"
++    seed.mkdir()
++    env = os.environ | {
++        "GIT_AUTHOR_NAME": "robomp-bot",
++        "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
++        "GIT_COMMITTER_NAME": "robomp-bot",
++        "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
++    }
++    subprocess.run(["git", "init", "--initial-branch=main", str(seed)], check=True, capture_output=True)
++    (seed / "README.md").write_text("init\n")
++    for cmd in (
++        ["git", "-C", str(seed), "add", "."],
++        [
++            "git",
++            "-C",
++            str(seed),
++            "-c",
++            "user.email=robomp-bot@example.invalid",
++            "-c",
++            "user.name=robomp-bot",
++            "commit",
++            "-m",
++            "init",
++        ],
++        ["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
++        ["git", "-C", str(seed), "push", "origin", "main"],
++    ):
++        subprocess.run(cmd, check=True, capture_output=True, env=env)
++
++    from robomp.sandbox import SandboxManager
++
++    mgr = SandboxManager(tmp_path / "workspaces")
++    ws = mgr.ensure_workspace(
++        repo="octo/widget",
++        number=42,
++        title="no repo scripts during push",
++        clone_url=str(bare),
++        default_branch="main",
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
++    )
++
++    marker = tmp_path / "bun-invoked"
++    fakebin = tmp_path / "fakebin"
++    fakebin.mkdir()
++    fake_bun = fakebin / "bun"
++    fake_bun.write_text(f"#!/bin/sh\nprintf invoked > {marker}\nprintf dirty > formatter-output.txt\nexit 0\n")
++    fake_bun.chmod(0o755)
++    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
++
++    (ws.repo_dir / "package.json").write_text(
++        json.dumps(
++            {
++                "scripts": {
++                    "fix:tools": "printf dirty > formatter-output.txt",
++                    "fix": "printf dirty > formatter-output.txt",
++                },
++            }
++        )
++        + "\n"
++    )
++    (ws.repo_dir / "feature.txt").write_text("feature\n")
++    subprocess.run(
++        ["git", "-C", str(ws.repo_dir), "add", "package.json", "feature.txt"], check=True, capture_output=True
++    )
++    subprocess.run(
++        [
++            "git",
++            "-C",
++            str(ws.repo_dir),
++            "-c",
++            "user.email=robomp-bot@example.invalid",
++            "-c",
++            "user.name=robomp-bot",
++            "commit",
++            "-m",
++            "ok",
++        ],
++        check=True,
++        capture_output=True,
++        env=env,
++    )
++
++    github = GitHubClient("tok", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
++    loop, thread = _make_loop_in_background()
++    try:
++        bindings = ToolBindings(
++            db=db,
++            github=github,
++            repo=_stub_repo(),
++            issue=IssueInfo(
++                repo="octo/widget",
++                number=42,
++                title="t",
++                body="",
++                state="open",
++                author="alice",
++                labels=(),
++                is_pull_request=False,
++            ),
++            workspace=ws,
++            loop=loop,
++            author_name="robomp-bot",
++            author_email="robomp-bot@example.invalid",
++        )
++        db.upsert_issue(
++            key=bindings.issue_key,
++            repo="octo/widget",
++            number=42,
++            state="reproducing",
++            branch=ws.branch,
++            session_dir=str(ws.session_dir),
++        )
++        tool = next(x for x in build(bindings) if x.name == "gh_push_branch")
++        result = tool.execute({}, _ctx())
++    finally:
++        _stop_loop(loop, thread)
++
++    assert result.startswith(f"pushed {ws.branch} ")
++    assert not marker.exists()
++    assert not (ws.repo_dir / "formatter-output.txt").exists()
++    refs = subprocess.run(
++        ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
++        capture_output=True,
++        text=True,
++        check=True,
++    )
++    assert f"refs/heads/{ws.branch}" in refs.stdout.splitlines()
+diff --git a/tests/test_sandbox.py b/tests/test_sandbox.py
+index 61e1c3642..c1eef78f2 100644
+--- a/tests/test_sandbox.py
++++ b/tests/test_sandbox.py
+@@ -1,7 +1,6 @@
+ from __future__ import annotations
+ 
+ import os
+-import shutil
+ import subprocess
+ from pathlib import Path
+ 
+@@ -26,12 +25,18 @@ def upstream_repo(tmp_path: Path) -> Path:
+     (seed / "README.md").write_text("hello\n", encoding="utf-8")
+     _git(["-C", str(seed), "add", "."], cwd=tmp_path)
+     env = os.environ | {
+-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
++        "GIT_AUTHOR_NAME": "t",
++        "GIT_AUTHOR_EMAIL": "t@t",
++        "GIT_COMMITTER_NAME": "t",
++        "GIT_COMMITTER_EMAIL": "t@t",
+     }
+     subprocess.run(
+         ["git", "commit", "-m", "init"],
+-        cwd=str(seed), check=True, capture_output=True, text=True, env=env,
++        cwd=str(seed),
++        check=True,
++        capture_output=True,
++        text=True,
++        env=env,
+     )
+     _git(["-C", str(seed), "remote", "add", "origin", str(repo)], cwd=tmp_path)
+     _git(["-C", str(seed), "push", "origin", "main"], cwd=tmp_path)
+@@ -61,7 +66,9 @@ def test_ensure_workspace_creates_worktree(tmp_path: Path, upstream_repo: Path)
+     # Branch is checked out.
+     result = subprocess.run(
+         ["git", "-C", str(ws.repo_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+-        capture_output=True, text=True, check=True,
++        capture_output=True,
++        text=True,
++        check=True,
+     )
+     assert result.stdout.strip() == ws.branch
+     assert ws.branch.startswith("farm/")
+@@ -75,12 +82,18 @@ def test_ensure_workspace_creates_worktree(tmp_path: Path, upstream_repo: Path)
+ def test_ensure_workspace_is_idempotent(tmp_path: Path, upstream_repo: Path) -> None:
+     mgr = SandboxManager(tmp_path / "workspaces")
+     ws1 = mgr.ensure_workspace(
+-        repo="octo/widget", number=5, title="t",
+-        clone_url=str(upstream_repo), default_branch="main",
++        repo="octo/widget",
++        number=5,
++        title="t",
++        clone_url=str(upstream_repo),
++        default_branch="main",
+     )
+     ws2 = mgr.ensure_workspace(
+-        repo="octo/widget", number=5, title="t",
+-        clone_url=str(upstream_repo), default_branch="main",
++        repo="octo/widget",
++        number=5,
++        title="t",
++        clone_url=str(upstream_repo),
++        default_branch="main",
+     )
+     assert ws1.repo_dir == ws2.repo_dir
+     assert ws1.branch == ws2.branch
+@@ -89,8 +102,11 @@ def test_ensure_workspace_is_idempotent(tmp_path: Path, upstream_repo: Path) ->
+ def test_remove_workspace(tmp_path: Path, upstream_repo: Path) -> None:
+     mgr = SandboxManager(tmp_path / "workspaces")
+     ws = mgr.ensure_workspace(
+-        repo="octo/widget", number=12, title="t",
+-        clone_url=str(upstream_repo), default_branch="main",
++        repo="octo/widget",
++        number=12,
++        title="t",
++        clone_url=str(upstream_repo),
++        default_branch="main",
+     )
+     assert ws.repo_dir.exists()
+     mgr.remove_workspace(repo="octo/widget", number=12)
+@@ -100,6 +116,7 @@ def test_remove_workspace(tmp_path: Path, upstream_repo: Path) -> None:
+ 
+ def test_redact_credentials_strips_userinfo() -> None:
+     from robomp.sandbox import redact_credentials
++
+     assert (
+         redact_credentials("Cloning into 'x' from https://bot:ghp_secret@github.com/o/r.git failed")
+         == "Cloning into 'x' from https://***@github.com/o/r.git failed"
+@@ -116,9 +133,10 @@ def test_redact_credentials_strips_userinfo() -> None:
+ 
+ def test_git_command_error_redacts_url_in_args_and_stderr(tmp_path: Path) -> None:
+     """An ENOENT-style git failure on a credentialed clone URL must not echo the token."""
+-    from robomp.sandbox import _run
+     import pytest as _pytest
+ 
++    from robomp.sandbox import _run
++
+     cred_url = "https://bot:ghp_abc123secret@example.invalid/o/r.git"
+     with _pytest.raises(Exception) as exc:
+         _run(["git", "clone", cred_url, str(tmp_path / "out")])
+diff --git a/tests/test_server.py b/tests/test_server.py
+index 1601be1c4..8899db977 100644
+--- a/tests/test_server.py
++++ b/tests/test_server.py
+@@ -129,10 +129,15 @@ def test_api_logs_tails_jsonl_file(settings: Settings) -> None:
+     log_path.parent.mkdir(parents=True, exist_ok=True)
+     payloads = [
+         {"ts": "2026-05-14T21:28:28Z", "level": "INFO", "logger": "robomp.queue", "msg": "dispatch loop online"},
+-        {"ts": "2026-05-14T21:28:54Z", "level": "INFO", "logger": "robomp.server", "msg": "skip",
+-         "event": "issues", "reason": "issues.labeled ignored"},
+-        {"ts": "2026-05-14T21:30:00Z", "level": "WARNING", "logger": "robomp.queue", "msg": "tool_end",
+-         "ok": False},
++        {
++            "ts": "2026-05-14T21:28:54Z",
++            "level": "INFO",
++            "logger": "robomp.server",
++            "msg": "skip",
++            "event": "issues",
++            "reason": "issues.labeled ignored",
++        },
++        {"ts": "2026-05-14T21:30:00Z", "level": "WARNING", "logger": "robomp.queue", "msg": "tool_end", "ok": False},
+     ]
+     log_path.write_text("\n".join(json.dumps(p) for p in payloads) + "\n", encoding="utf-8")
+ 
+@@ -165,8 +170,7 @@ def test_tail_jsonl_recovers_from_garbage_lines(tmp_path: Path) -> None:
+     path = tmp_path / "noisy.jsonl"
+     path.write_text(
+         json.dumps({"ts": "a", "level": "INFO", "msg": "ok"}) + "\n"
+-        "{not json}\n"
+-        + json.dumps({"ts": "b", "level": "ERROR", "msg": "bang"}) + "\n",
++        "{not json}\n" + json.dumps({"ts": "b", "level": "ERROR", "msg": "bang"}) + "\n",
+         encoding="utf-8",
+     )
+     rows = tail_jsonl(path, limit=10)
+@@ -236,16 +240,27 @@ def test_trigger_triage_fetches_and_enqueues(env, monkeypatch: pytest.MonkeyPatc
+     def handler(request: httpx.Request) -> httpx.Response:
+         captured.append(request.url.path)
+         if request.url.path.endswith("/issues/7"):
+-            return httpx.Response(200, json={
+-                "number": 7, "title": "boom", "body": "details here",
+-                "state": "open", "user": {"login": "alice"},
+-                "labels": [{"name": "bug"}],
+-            })
++            return httpx.Response(
++                200,
++                json={
++                    "number": 7,
++                    "title": "boom",
++                    "body": "details here",
++                    "state": "open",
++                    "user": {"login": "alice"},
++                    "labels": [{"name": "bug"}],
++                },
++            )
+         if request.url.path.endswith("/repos/octo/widget"):
+-            return httpx.Response(200, json={
+-                "full_name": "octo/widget", "default_branch": "main",
+-                "clone_url": "https://github.com/octo/widget.git", "private": False,
+-            })
++            return httpx.Response(
++                200,
++                json={
++                    "full_name": "octo/widget",
++                    "default_branch": "main",
++                    "clone_url": "https://github.com/octo/widget.git",
++                    "private": False,
++                },
++            )
+         return httpx.Response(404)
+ 
+     app = create_app(cfg)
+@@ -268,6 +283,159 @@ def test_trigger_triage_fetches_and_enqueues(env, monkeypatch: pytest.MonkeyPatc
+     assert any(p.endswith("/repos/octo/widget") for p in captured)
+ 
+ 
++@pytest.mark.parametrize("state", ["queued", "running"])
++def test_trigger_triage_conflicts_when_manual_delivery_is_active(
++    env, monkeypatch: pytest.MonkeyPatch, state: str
++) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    delivery = "manual-octo__widget-7"
++    original_payload = {"action": "opened", "issue": {"number": 7, "title": "old"}}
++
++    calls: list[str] = []
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        calls.append(request.url.path)
++        return httpx.Response(500, json={"message": "should not fetch active manual event"})
++
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        db = get_database(cfg.sqlite_path)
++        db.record_event(
++            delivery_id=delivery,
++            event_type="issues",
++            repo="octo/widget",
++            issue_key=issue_key("octo/widget", 7),
++            payload=original_payload,
++            state=state,
++        )
++        _install_github_mock(app, httpx.MockTransport(handler))
++        resp = client.post(
++            "/api/trigger",
++            json={"mode": "triage", "issue": "octo/widget#7"},
++            headers={"X-Robomp-Replay-Token": token},
++        )
++        row = get_database(cfg.sqlite_path).get_event(delivery)
++    close_database()
++
++    assert resp.status_code == 409, resp.text
++    assert row is not None
++    assert row.state == state
++    assert row.payload == original_payload
++    assert calls == []
++
++
++@pytest.mark.parametrize("state", ["done", "failed", "skipped"])
++def test_trigger_triage_replaces_inactive_manual_delivery(env, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    delivery = "manual-octo__widget-7"
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        if request.url.path.endswith("/issues/7"):
++            return httpx.Response(
++                200,
++                json={
++                    "number": 7,
++                    "title": "fresh",
++                    "body": "new details",
++                    "state": "open",
++                    "user": {"login": "alice"},
++                    "labels": [{"name": "bug"}],
++                },
++            )
++        if request.url.path.endswith("/repos/octo/widget"):
++            return httpx.Response(
++                200,
++                json={
++                    "full_name": "octo/widget",
++                    "default_branch": "main",
++                    "clone_url": "https://github.com/octo/widget.git",
++                    "private": False,
++                },
++            )
++        return httpx.Response(404)
++
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        db = get_database(cfg.sqlite_path)
++        db.record_event(
++            delivery_id=delivery,
++            event_type="issues",
++            repo="octo/widget",
++            issue_key=issue_key("octo/widget", 7),
++            payload={"action": "opened", "issue": {"number": 7, "title": "old"}},
++            state=state,
++        )
++        _install_github_mock(app, httpx.MockTransport(handler))
++        resp = client.post(
++            "/api/trigger",
++            json={"mode": "triage", "issue": "octo/widget#7"},
++            headers={"X-Robomp-Replay-Token": token},
++        )
++        row = get_database(cfg.sqlite_path).get_event(delivery)
++    close_database()
++
++    assert resp.status_code == 202, resp.text
++    assert row is not None
++    assert row.state == "queued"
++    assert row.attempts == 0
++    assert row.payload["issue"]["title"] == "fresh"
++
++
++def test_trigger_triage_rejects_pull_request_issue_payload(env, monkeypatch: pytest.MonkeyPatch) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++
++    captured: list[str] = []
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        captured.append(request.url.path)
++        if request.url.path.endswith("/issues/7"):
++            return httpx.Response(
++                200,
++                json={
++                    "number": 7,
++                    "title": "change",
++                    "body": "details here",
++                    "state": "open",
++                    "user": {"login": "alice"},
++                    "labels": [{"name": "bug"}],
++                    "pull_request": {"url": "https://api.github.com/repos/octo/widget/pulls/7"},
++                },
++            )
++        if request.url.path.endswith("/repos/octo/widget"):
++            return httpx.Response(
++                200,
++                json={
++                    "full_name": "octo/widget",
++                    "default_branch": "main",
++                    "clone_url": "https://github.com/octo/widget.git",
++                    "private": False,
++                },
++            )
++        return httpx.Response(404)
++
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        _install_github_mock(app, httpx.MockTransport(handler))
++        resp = client.post(
++            "/api/trigger",
++            json={"mode": "triage", "issue": "octo/widget#7"},
++            headers={"X-Robomp-Replay-Token": token},
++        )
++        assert get_database(cfg.sqlite_path).get_event("manual-octo__widget-7") is None
++    close_database()
++
++    assert resp.status_code == 400, resp.text
++    assert "pull request" in resp.json()["detail"]
++    assert any(p.endswith("/issues/7") for p in captured)
++    assert not any(p.endswith("/repos/octo/widget") for p in captured)
++
++
+ def test_trigger_triage_rejects_repo_not_in_allowlist(env, monkeypatch: pytest.MonkeyPatch) -> None:
+     token = _enable_replay(monkeypatch)
+     cfg = Settings()  # type: ignore[call-arg]
+@@ -285,6 +453,37 @@ def test_trigger_triage_rejects_repo_not_in_allowlist(env, monkeypatch: pytest.M
+     assert "ROBOMP_REPO_ALLOWLIST" in resp.json()["detail"]
+ 
+ 
++@pytest.mark.parametrize("state", ["queued", "running"])
++def test_trigger_retry_by_delivery_rejects_active_events(
++    env,
++    monkeypatch: pytest.MonkeyPatch,
++    state: str,
++) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        db = get_database(cfg.sqlite_path)
++        db.record_event(
++            delivery_id=f"d-{state}",
++            event_type="issues",
++            repo="octo/widget",
++            issue_key=issue_key("octo/widget", 5),
++            payload={"action": "opened", "issue": {"number": 5}},
++            state=state,
++        )
++        resp = client.post(
++            "/api/trigger",
++            json={"mode": "retry", "delivery_id": f"d-{state}"},
++            headers={"X-Robomp-Replay-Token": token},
++        )
++        assert resp.status_code == 409
++        assert state in resp.json()["detail"]
++        assert get_database(cfg.sqlite_path).get_event(f"d-{state}").state == state
++    close_database()
++
++
+ def test_trigger_triage_surfaces_github_failure(env, monkeypatch: pytest.MonkeyPatch) -> None:
+     token = _enable_replay(monkeypatch)
+     cfg = Settings()  # type: ignore[call-arg]
+@@ -311,9 +510,12 @@ def test_trigger_retry_by_delivery_id_requeues(env, monkeypatch: pytest.MonkeyPa
+     with TestClient(app) as client:
+         db = get_database(cfg.sqlite_path)
+         db.record_event(
+-            delivery_id="d-old", event_type="issues", repo="octo/widget",
++            delivery_id="d-old",
++            event_type="issues",
++            repo="octo/widget",
+             issue_key=issue_key("octo/widget", 4),
+-            payload={"action": "opened", "issue": {"number": 4}}, state="failed",
++            payload={"action": "opened", "issue": {"number": 4}},
++            state="failed",
+         )
+         resp = client.post(
+             "/api/trigger",
+@@ -333,10 +535,22 @@ def test_trigger_retry_by_issue_finds_latest_event(env, monkeypatch: pytest.Monk
+     with TestClient(app) as client:
+         db = get_database(cfg.sqlite_path)
+         key = issue_key("octo/widget", 9)
+-        db.record_event(delivery_id="d-old-1", event_type="issues", repo="octo/widget",
+-                        issue_key=key, payload={"a": 1}, state="failed")
+-        db.record_event(delivery_id="d-old-2", event_type="issue_comment", repo="octo/widget",
+-                        issue_key=key, payload={"a": 2}, state="done")
++        db.record_event(
++            delivery_id="d-old-1",
++            event_type="issues",
++            repo="octo/widget",
++            issue_key=key,
++            payload={"a": 1},
++            state="failed",
++        )
++        db.record_event(
++            delivery_id="d-old-2",
++            event_type="issue_comment",
++            repo="octo/widget",
++            issue_key=key,
++            payload={"a": 2},
++            state="done",
++        )
+         resp = client.post(
+             "/api/trigger",
+             json={"mode": "retry", "issue": "octo/widget#9"},
+@@ -350,6 +564,68 @@ def test_trigger_retry_by_issue_finds_latest_event(env, monkeypatch: pytest.Monk
+     close_database()
+ 
+ 
++def test_trigger_retry_by_issue_rejects_active_latest_event(env, monkeypatch: pytest.MonkeyPatch) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        db = get_database(cfg.sqlite_path)
++        key = issue_key("octo/widget", 10)
++        db.record_event(
++            delivery_id="d-inactive",
++            event_type="issues",
++            repo="octo/widget",
++            issue_key=key,
++            payload={"a": 1},
++            state="failed",
++        )
++        db.record_event(
++            delivery_id="d-active",
++            event_type="issue_comment",
++            repo="octo/widget",
++            issue_key=key,
++            payload={"a": 2},
++            state="running",
++        )
++        resp = client.post(
++            "/api/trigger",
++            json={"mode": "retry", "issue": "octo/widget#10"},
++            headers={"X-Robomp-Replay-Token": token},
++        )
++        assert resp.status_code == 409
++        assert "running" in resp.json()["detail"]
++        assert get_database(cfg.sqlite_path).get_event("d-active").state == "running"
++        assert get_database(cfg.sqlite_path).get_event("d-inactive").state == "failed"
++    close_database()
++
++
++def test_trigger_retry_by_issue_rejects_repo_not_in_allowlist(env, monkeypatch: pytest.MonkeyPatch) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        db = get_database(cfg.sqlite_path)
++        db.record_event(
++            delivery_id="d-evil",
++            event_type="issues",
++            repo="evil/repo",
++            issue_key=issue_key("evil/repo", 1),
++            payload={"a": 1},
++            state="failed",
++        )
++        resp = client.post(
++            "/api/trigger",
++            json={"mode": "retry", "issue": "evil/repo#1"},
++            headers={"X-Robomp-Replay-Token": token},
++        )
++        assert resp.status_code == 403
++        assert "ROBOMP_REPO_ALLOWLIST" in resp.json()["detail"]
++        assert get_database(cfg.sqlite_path).get_event("d-evil").state == "failed"
++    close_database()
++
++
+ def test_trigger_retry_unknown_delivery_404s(env, monkeypatch: pytest.MonkeyPatch) -> None:
+     token = _enable_replay(monkeypatch)
+     cfg = Settings()  # type: ignore[call-arg]
+@@ -382,6 +658,7 @@ def test_trigger_rejects_bad_mode(env, monkeypatch: pytest.MonkeyPatch) -> None:
+ 
+ # -------- /webhook/github rate-limiting --------------------------------
+ 
++
+ def _signed_headers(secret: str, body: bytes, *, event: str, delivery: str) -> dict[str, str]:
+     sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+     return {
+@@ -418,6 +695,36 @@ def _post_issue_opened(
+     )
+ 
+ 
++def _post_pr_issue_comment(
++    client: TestClient,
++    *,
++    delivery: str,
++    user: str,
++    pr_number: int,
++    association: str = "NONE",
++    secret: str = "test-webhook-secret",
++):
++    payload = {
++        "action": "created",
++        "comment": {
++            "user": {"login": user},
++            "author_association": association,
++            "body": "follow-up",
++        },
++        "issue": {
++            "number": pr_number,
++            "pull_request": {"url": f"https://api.github.com/repos/octo/widget/pulls/{pr_number}"},
++        },
++        "repository": {"full_name": "octo/widget"},
++    }
++    body = json.dumps(payload).encode()
++    return client.post(
++        "/webhook/github",
++        content=body,
++        headers=_signed_headers(secret, body, event="issue_comment", delivery=delivery),
++    )
++
++
+ @pytest.fixture
+ def rate_limited_settings(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> Settings:
+     monkeypatch.setenv("ROBOMP_RATE_LIMIT_DEFAULT", "2")
+@@ -436,7 +743,10 @@ def test_webhook_rate_limits_unknown_submitter_at_default_cap(rate_limited_setti
+         states = []
+         for i in range(3):
+             resp = _post_issue_opened(
+-                client, delivery=f"d-{i}", user="stranger", number=100 + i,
++                client,
++                delivery=f"d-{i}",
++                user="stranger",
++                number=100 + i,
+                 association="NONE",
+             )
+             assert resp.status_code == 202
+@@ -445,19 +755,63 @@ def test_webhook_rate_limits_unknown_submitter_at_default_cap(rate_limited_setti
+     assert states == ["queued", "queued", "skipped"]
+ 
+ 
++def test_webhook_unmapped_pr_comment_does_not_consume_submitter_budget(
++    rate_limited_settings: Settings,
++) -> None:
++    app = create_app(rate_limited_settings)
++    with TestClient(app) as client:
++        skipped = _post_pr_issue_comment(
++            client,
++            delivery="pr-unmapped",
++            user="stranger",
++            pr_number=900,
++            association="NONE",
++        )
++        assert skipped.status_code == 202
++        assert skipped.json()["state"] == "skipped"
++
++        states = []
++        for i in range(3):
++            resp = _post_issue_opened(
++                client,
++                delivery=f"real-{i}",
++                user="stranger",
++                number=100 + i,
++                association="NONE",
++            )
++            assert resp.status_code == 202
++            states.append(resp.json()["state"])
++
++        db = get_database(rate_limited_settings.sqlite_path)
++        unmapped = db.get_event("pr-unmapped")
++    close_database()
++
++    assert unmapped is not None
++    assert unmapped.issue_key is None
++    assert unmapped.last_error is not None
++    assert "not mapped" in unmapped.last_error
++    assert states == ["queued", "queued", "skipped"]
++
++
+ def test_webhook_contributor_gets_higher_cap(rate_limited_settings: Settings) -> None:
+     app = create_app(rate_limited_settings)
+     with TestClient(app) as client:
+         # Default cap (2) would block at i=2; CONTRIBUTOR cap (4) allows it.
+         for i in range(4):
+             resp = _post_issue_opened(
+-                client, delivery=f"c-{i}", user="bob", number=200 + i,
++                client,
++                delivery=f"c-{i}",
++                user="bob",
++                number=200 + i,
+                 association="CONTRIBUTOR",
+             )
+             assert resp.status_code == 202
+             assert resp.json()["state"] == "queued", i
+         resp = _post_issue_opened(
+-            client, delivery="c-x", user="bob", number=299,
++            client,
++            delivery="c-x",
++            user="bob",
++            number=299,
+             association="CONTRIBUTOR",
+         )
+         assert resp.json()["state"] == "skipped"
+@@ -469,7 +823,10 @@ def test_webhook_owner_association_bypasses_limit(rate_limited_settings: Setting
+     with TestClient(app) as client:
+         for i in range(5):  # well over default cap
+             resp = _post_issue_opened(
+-                client, delivery=f"o-{i}", user="acme-staff", number=300 + i,
++                client,
++                delivery=f"o-{i}",
++                user="acme-staff",
++                number=300 + i,
+                 association="OWNER",
+             )
+             assert resp.json()["state"] == "queued", i
+@@ -482,7 +839,10 @@ def test_webhook_unlimited_allowlist_bypasses_limit(rate_limited_settings: Setti
+         # NONE association would normally cap at 2, but `can1357` is whitelisted.
+         for i in range(5):
+             resp = _post_issue_opened(
+-                client, delivery=f"u-{i}", user="can1357", number=400 + i,
++                client,
++                delivery=f"u-{i}",
++                user="can1357",
++                number=400 + i,
+                 association="NONE",
+             )
+             assert resp.json()["state"] == "queued", i
+@@ -495,21 +855,39 @@ def test_webhook_rate_limit_per_user_is_independent(rate_limited_settings: Setti
+     with TestClient(app) as client:
+         # alice exhausts default cap.
+         for i in range(2):
+-            assert _post_issue_opened(
+-                client, delivery=f"a-{i}", user="alice", number=500 + i,
+-                association="NONE",
+-            ).json()["state"] == "queued"
++            assert (
++                _post_issue_opened(
++                    client,
++                    delivery=f"a-{i}",
++                    user="alice",
++                    number=500 + i,
++                    association="NONE",
++                ).json()["state"]
++                == "queued"
++            )
+         # alice's next attempt is skipped.
+-        assert _post_issue_opened(
+-            client, delivery="a-x", user="alice", number=599,
+-            association="NONE",
+-        ).json()["state"] == "skipped"
++        assert (
++            _post_issue_opened(
++                client,
++                delivery="a-x",
++                user="alice",
++                number=599,
++                association="NONE",
++            ).json()["state"]
++            == "skipped"
++        )
+         # bob is untouched.
+         for i in range(2):
+-            assert _post_issue_opened(
+-                client, delivery=f"b-{i}", user="bob", number=600 + i,
+-                association="NONE",
+-            ).json()["state"] == "queued"
++            assert (
++                _post_issue_opened(
++                    client,
++                    delivery=f"b-{i}",
++                    user="bob",
++                    number=600 + i,
++                    association="NONE",
++                ).json()["state"]
++                == "queued"
++            )
+     close_database()
+ 
+ 
+@@ -519,7 +897,10 @@ def test_webhook_rate_limited_event_records_reason(rate_limited_settings: Settin
+     with TestClient(app) as client:
+         for i in range(3):
+             _post_issue_opened(
+-                client, delivery=f"r-{i}", user="charlie", number=700 + i,
++                client,
++                delivery=f"r-{i}",
++                user="charlie",
++                number=700 + i,
+                 association="NONE",
+             )
+         db = get_database(rate_limited_settings.sqlite_path)
+@@ -540,13 +921,36 @@ def _allowlist(monkeypatch: pytest.MonkeyPatch, repos: str) -> None:
+     reset_settings_cache()
+ 
+ 
+-def _make_issues_handler(by_repo: dict[str, list[dict]]) -> httpx.MockTransport:
++def _make_issues_handler(
++    by_repo: dict[str, list[dict]],
++    *,
++    expected_state: str = "open",
++    expected_limit: int = 30,
++    failing_repos: tuple[str, ...] = (),
++) -> httpx.MockTransport:
++    expected_params = {
++        "state": expected_state,
++        "per_page": str(expected_limit),
++        "sort": "updated",
++        "direction": "desc",
++    }
++
+     def handler(request: httpx.Request) -> httpx.Response:
++        assert request.method == "GET"
++        params = request.url.params
++        assert set(params.keys()) == set(expected_params)
++        for key, expected in expected_params.items():
++            assert params.get(key) == expected
++
+         path = request.url.path
+         for repo, items in by_repo.items():
+             if path == f"/repos/{repo}/issues":
+                 return httpx.Response(200, json=items)
++        for repo in failing_repos:
++            if path == f"/repos/{repo}/issues":
++                return httpx.Response(500, json={"message": "boom"})
+         return httpx.Response(404, json={"message": "not found"})
++
+     return httpx.MockTransport(handler)
+ 
+ 
+@@ -558,35 +962,72 @@ def test_browse_returns_404_without_token(settings: Settings) -> None:
+     assert resp.status_code == 404
+ 
+ 
+-def test_browse_fans_out_across_allowlist_and_filters_prs(
+-    env, monkeypatch: pytest.MonkeyPatch
+-) -> None:
++def test_browse_returns_401_with_replay_enabled_without_valid_token(env, monkeypatch: pytest.MonkeyPatch) -> None:
++    token = _enable_replay(monkeypatch)
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    app = create_app(cfg)
++
++    with TestClient(app) as client:
++        missing = client.get("/api/github/issues")
++        wrong = client.get(
++            "/api/github/issues",
++            headers={"X-Robomp-Replay-Token": f"{token}-wrong"},
++        )
++    close_database()
++
++    assert missing.status_code == 401
++    assert wrong.status_code == 401
++
++
++def test_browse_fans_out_across_allowlist_and_filters_prs(env, monkeypatch: pytest.MonkeyPatch) -> None:
+     token = _enable_replay(monkeypatch)
+     _allowlist(monkeypatch, "octo/widget,octo/gadget")
+     cfg = Settings()  # type: ignore[call-arg]
+     cfg.ensure_paths()
+-    transport = _make_issues_handler({
+-        "octo/widget": [
+-            {"number": 7, "title": "newest", "state": "open",
+-             "user": {"login": "alice"}, "labels": [{"name": "bug"}],
+-             "comments": 3, "updated_at": "2026-05-14T10:00:00Z",
+-             "created_at": "2026-05-01T10:00:00Z",
+-             "html_url": "https://github.com/octo/widget/issues/7"},
+-            {"number": 8, "title": "a PR not an issue", "state": "open",
+-             "user": {"login": "bob"}, "labels": [], "comments": 0,
+-             "updated_at": "2026-05-14T11:00:00Z",
+-             "created_at": "2026-05-14T11:00:00Z",
+-             "html_url": "https://github.com/octo/widget/pull/8",
+-             "pull_request": {"url": "..."}},  # GitHub /issues returns these too
+-        ],
+-        "octo/gadget": [
+-            {"number": 2, "title": "older", "state": "open",
+-             "user": {"login": "carol"}, "labels": [], "comments": 1,
+-             "updated_at": "2026-05-12T09:00:00Z",
+-             "created_at": "2026-05-12T09:00:00Z",
+-             "html_url": "https://github.com/octo/gadget/issues/2"},
+-        ],
+-    })
++    transport = _make_issues_handler(
++        {
++            "octo/widget": [
++                {
++                    "number": 7,
++                    "title": "newest",
++                    "state": "open",
++                    "user": {"login": "alice"},
++                    "labels": [{"name": "bug"}],
++                    "comments": 3,
++                    "updated_at": "2026-05-14T10:00:00Z",
++                    "created_at": "2026-05-01T10:00:00Z",
++                    "html_url": "https://github.com/octo/widget/issues/7",
++                },
++                {
++                    "number": 8,
++                    "title": "a PR not an issue",
++                    "state": "open",
++                    "user": {"login": "bob"},
++                    "labels": [],
++                    "comments": 0,
++                    "updated_at": "2026-05-14T11:00:00Z",
++                    "created_at": "2026-05-14T11:00:00Z",
++                    "html_url": "https://github.com/octo/widget/pull/8",
++                    "pull_request": {"url": "..."},
++                },  # GitHub /issues returns these too
++            ],
++            "octo/gadget": [
++                {
++                    "number": 2,
++                    "title": "older",
++                    "state": "open",
++                    "user": {"login": "carol"},
++                    "labels": [],
++                    "comments": 1,
++                    "updated_at": "2026-05-12T09:00:00Z",
++                    "created_at": "2026-05-12T09:00:00Z",
++                    "html_url": "https://github.com/octo/gadget/issues/2",
++                },
++            ],
++        },
++        expected_limit=20,
++    )
+     app = create_app(cfg)
+     with TestClient(app) as client:
+         _install_github_mock(app, transport)
+@@ -610,28 +1051,34 @@ def test_browse_fans_out_across_allowlist_and_filters_prs(
+     assert first["html_url"].endswith("/issues/7")
+ 
+ 
+-def test_browse_per_repo_failure_does_not_take_down_panel(
+-    env, monkeypatch: pytest.MonkeyPatch
+-) -> None:
++def test_browse_per_repo_failure_does_not_take_down_panel(env, monkeypatch: pytest.MonkeyPatch) -> None:
+     token = _enable_replay(monkeypatch)
+     _allowlist(monkeypatch, "octo/widget,octo/dead")
+     cfg = Settings()  # type: ignore[call-arg]
+     cfg.ensure_paths()
+ 
+-    def handler(request: httpx.Request) -> httpx.Response:
+-        if request.url.path == "/repos/octo/widget/issues":
+-            return httpx.Response(200, json=[
+-                {"number": 1, "title": "ok", "state": "open",
+-                 "user": {"login": "u"}, "labels": [], "comments": 0,
+-                 "updated_at": "2026-05-14T00:00:00Z",
+-                 "created_at": "2026-05-14T00:00:00Z",
+-                 "html_url": "https://github.com/octo/widget/issues/1"},
+-            ])
+-        return httpx.Response(500, json={"message": "boom"})
++    transport = _make_issues_handler(
++        {
++            "octo/widget": [
++                {
++                    "number": 1,
++                    "title": "ok",
++                    "state": "open",
++                    "user": {"login": "u"},
++                    "labels": [],
++                    "comments": 0,
++                    "updated_at": "2026-05-14T00:00:00Z",
++                    "created_at": "2026-05-14T00:00:00Z",
++                    "html_url": "https://github.com/octo/widget/issues/1",
++                },
++            ],
++        },
++        failing_repos=("octo/dead",),
++    )
+ 
+     app = create_app(cfg)
+     with TestClient(app) as client:
+-        _install_github_mock(app, httpx.MockTransport(handler))
++        _install_github_mock(app, transport)
+         resp = client.get(
+             "/api/github/issues",
+             headers={"X-Robomp-Replay-Token": token},
+@@ -659,3 +1106,344 @@ def test_browse_rejects_bad_state(env, monkeypatch: pytest.MonkeyPatch) -> None:
+         )
+     close_database()
+     assert resp.status_code == 400
++
++
++# -------- maintainer directives ----------------------------------------
++
++
++def _post_issue_comment(
++    client: TestClient,
++    *,
++    delivery: str,
++    user: str,
++    number: int,
++    body: str,
++    association: str = "NONE",
++    secret: str = "test-webhook-secret",
++):
++    payload = {
++        "action": "created",
++        "comment": {
++            "user": {"login": user},
++            "author_association": association,
++            "body": body,
++        },
++        "issue": {"number": number},
++        "repository": {"full_name": "octo/widget"},
++    }
++    raw = json.dumps(payload).encode()
++    return client.post(
++        "/webhook/github",
++        content=raw,
++        headers=_signed_headers(secret, raw, event="issue_comment", delivery=delivery),
++    )
++
++
++def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env) -> None:
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        resp = _post_issue_comment(
++            client,
++            delivery="dir-1",
++            user="can1357",
++            number=77,
++            body="@robomp-bot please refactor X",
++            association="OWNER",
++        )
++        assert resp.status_code == 202
++        assert resp.json()["state"] == "queued"
++        row = get_database(cfg.sqlite_path).get_event("dir-1")
++    close_database()
++    assert row is not None
++    assert row.state == "queued"
++    directive = row.payload.get("_robomp_directive")
++    assert directive == {"body": "please refactor X", "author": "can1357"}
++
++
++def test_webhook_maintainer_bypasses_rate_limit(
++    rate_limited_settings: Settings,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Login in ROBOMP_MAINTAINER_LOGINS is always unlimited, even with NONE association."""
++    monkeypatch.setenv("ROBOMP_MAINTAINER_LOGINS", "can1357")
++    reset_settings_cache()
++    cfg = Settings()  # type: ignore[call-arg]
++    cfg.ensure_paths()
++
++    app = create_app(cfg)
++    with TestClient(app) as client:
++        states = []
++        # cap=2 from rate_limited_settings — 3rd would normally be skipped.
++        for i in range(4):
++            resp = _post_issue_comment(
++                client,
++                delivery=f"m-{i}",
++                user="can1357",
++                number=300 + i,
++                body=("@robomp-bot do X" if i == 3 else "comment"),
++                association="NONE",
++            )
++            assert resp.status_code == 202
++            states.append(resp.json()["state"])
++    close_database()
++    assert states == ["queued"] * 4, states
++
++
++# -------- handler-level: bootstrap + reopen ----------------------------
++
++
++class _RecordingSandbox:
++    """Stand-in for SandboxManager: records calls, hands back a fake Workspace."""
++
++    def __init__(self, tmp_root: Path) -> None:
++        self.tmp_root = tmp_root
++        self.ensure_calls: list[dict] = []
++        self.remove_calls: list[tuple[str, int]] = []
++
++    def ensure_workspace(
++        self,
++        *,
++        repo: str,
++        number: int,
++        title: str,
++        clone_url: str,
++        default_branch: str,
++        existing_branch=None,
++        author_name: str = "",
++        author_email: str = "",
++    ):
++        self.ensure_calls.append(
++            {
++                "repo": repo,
++                "number": number,
++                "title": title,
++                "default_branch": default_branch,
++                "existing_branch": existing_branch,
++            }
++        )
++        # Mimic Workspace shape — only the attributes ensure_workspace's
++        # downstream callers touch.
++        from dataclasses import dataclass
++
++        @dataclass(slots=True, frozen=True)
++        class _W:
++            branch: str
++            session_dir: Path
++            context_dir: Path
++            repo_dir: Path
++
++        wid = f"{repo.replace('/', '__')}__{number}"
++        return _W(
++            branch=existing_branch or f"farm/auto/{wid}",
++            session_dir=self.tmp_root / wid / "session",
++            context_dir=self.tmp_root / wid / "context",
++            repo_dir=self.tmp_root / wid / "repo",
++        )
++
++    def remove_workspace(self, *, repo: str, number: int) -> None:
++        self.remove_calls.append((repo, number))
++
++
++@pytest.fixture
++def stub_run_task(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
++    """Capture run_task invocations instead of spinning up RpcClient."""
++    captured: list[dict] = []
++
++    async def _stub(**kwargs):
++        captured.append(kwargs)
++        return None
++
++    from robomp import tasks as tasks_module
++
++    monkeypatch.setattr(tasks_module, "run_task", _stub)
++    return captured
++
++
++async def test_handle_comment_directive_bootstraps_untriaged_issue(
++    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
++) -> None:
++    """Directive on an unknown issue → DB row created, triage_issue task with directive."""
++    from robomp import tasks
++    from robomp.github_client import GitHubClient, IssueInfo, RepoInfo
++
++    sandbox = _RecordingSandbox(tmp_path)
++    db = get_database(settings.sqlite_path)
++    repo = RepoInfo(
++        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
++    )
++    issue = IssueInfo(
++        repo="octo/widget",
++        number=88,
++        title="boom",
++        body="details",
++        state="open",
++        author="alice",
++        labels=(),
++        is_pull_request=False,
++    )
++
++    async def _resolve(_gh, _payload):
++        return repo, issue
++
++    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve)
++
++    payload = {
++        "action": "created",
++        "issue": {"number": 88, "user": {"login": "alice"}, "title": "boom"},
++        "comment": {"user": {"login": "can1357"}, "body": "do it", "id": 1, "created_at": "2026-05-14T20:00:00Z"},
++        "repository": {"full_name": "octo/widget"},
++        "_robomp_directive": {"body": "please refactor X", "author": "can1357"},
++    }
++    await tasks.handle_comment(
++        settings=settings,
++        db=db,
++        github=GitHubClient("t"),
++        sandbox=sandbox,
++        payload=payload,
++    )
++    assert len(stub_run_task) == 1
++    call = stub_run_task[0]
++    assert call["task_kind"] == "triage_issue"
++    assert call["directive"] is not None
++    assert call["directive"].body == "please refactor X"
++    assert call["directive"].author == "can1357"
++    row = db.get_issue("octo/widget#88")
++    assert row is not None
++    assert row.state == "reproducing"
++    assert sandbox.ensure_calls, "ensure_workspace must be called"
++    assert sandbox.remove_calls == [], "no removal on bootstrap"
++    close_database()
++
++
++async def test_handle_comment_directive_reopens_finalized_issue(
++    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
++) -> None:
++    """Directive on a closed issue → workspace torn down, state reset, no auto-reply."""
++    from robomp import tasks
++    from robomp.github_client import GitHubClient, IssueInfo, RepoInfo
++
++    sandbox = _RecordingSandbox(tmp_path)
++    db = get_database(settings.sqlite_path)
++    db.upsert_issue(
++        key="octo/widget#88", repo="octo/widget", number=88, state="closed", branch="farm/old/branch", pr_number=99
++    )
++
++    repo = RepoInfo(
++        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
++    )
++    issue = IssueInfo(
++        repo="octo/widget",
++        number=88,
++        title="boom",
++        body="details",
++        state="open",
++        author="alice",
++        labels=(),
++        is_pull_request=False,
++    )
++
++    async def _resolve(_gh, _payload):
++        return repo, issue
++
++    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve)
++
++    post_comment_calls: list = []
++
++    async def _no_post_comment(*args, **kwargs):
++        post_comment_calls.append((args, kwargs))
++        return None
++
++    monkeypatch.setattr(GitHubClient, "post_comment", _no_post_comment)
++
++    payload = {
++        "action": "created",
++        "issue": {"number": 88, "user": {"login": "alice"}, "title": "boom"},
++        "comment": {"user": {"login": "can1357"}, "body": "redo", "id": 2, "created_at": "2026-05-14T21:00:00Z"},
++        "repository": {"full_name": "octo/widget"},
++        "_robomp_directive": {"body": "redo the fix", "author": "can1357"},
++    }
++    await tasks.handle_comment(
++        settings=settings,
++        db=db,
++        github=GitHubClient("t"),
++        sandbox=sandbox,
++        payload=payload,
++    )
++    assert len(stub_run_task) == 1
++    call = stub_run_task[0]
++    assert call["task_kind"] == "handle_comment"
++    assert call["directive"].body == "redo the fix"
++    assert sandbox.remove_calls == [("octo/widget", 88)]
++    assert sandbox.ensure_calls
++    # Reopen branches afresh (no existing_branch passed).
++    assert sandbox.ensure_calls[0]["existing_branch"] is None
++    assert post_comment_calls == [], "no 'this is closed' comment on reopen"
++    row = db.get_issue("octo/widget#88")
++    assert row is not None and row.state == "reproducing"
++    close_database()
++
++
++async def test_handle_comment_finalized_without_directive_still_replies(
++    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
++) -> None:
++    """Non-maintainer on a closed issue → original behavior preserved."""
++    from robomp import tasks
++    from robomp.github_client import GitHubClient, IssueInfo, RepoInfo
++
++    sandbox = _RecordingSandbox(tmp_path)
++    db = get_database(settings.sqlite_path)
++    db.upsert_issue(
++        key="octo/widget#88", repo="octo/widget", number=88, state="closed", branch="farm/old/branch", pr_number=99
++    )
++
++    repo = RepoInfo(
++        full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
++    )
++    issue = IssueInfo(
++        repo="octo/widget",
++        number=88,
++        title="boom",
++        body="details",
++        state="closed",
++        author="alice",
++        labels=(),
++        is_pull_request=False,
++    )
++
++    async def _resolve(_gh, _payload):
++        return repo, issue
++
++    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve)
++
++    post_comment_calls: list = []
++
++    async def _capture_post(self, *args, **kwargs):
++        post_comment_calls.append((args, kwargs))
++        return None
++
++    monkeypatch.setattr(GitHubClient, "post_comment", _capture_post)
++
++    payload = {
++        "action": "created",
++        "issue": {"number": 88, "user": {"login": "stranger"}, "title": "boom"},
++        "comment": {
++            "user": {"login": "stranger"},
++            "body": "still broken",
++            "id": 3,
++            "created_at": "2026-05-14T22:00:00Z",
++        },
++        "repository": {"full_name": "octo/widget"},
++    }
++    await tasks.handle_comment(
++        settings=settings,
++        db=db,
++        github=GitHubClient("t"),
++        sandbox=sandbox,
++        payload=payload,
++    )
++    assert stub_run_task == [], "must not invoke run_task on plain finalized comment"
++    assert post_comment_calls, "should post the finalized-issue reply"
++    assert sandbox.remove_calls == []
++    close_database()
+diff --git a/tests/test_worker_smoke.py b/tests/test_worker_smoke.py
+index cb43b8e16..0f0709aa6 100644
+--- a/tests/test_worker_smoke.py
++++ b/tests/test_worker_smoke.py
+@@ -19,9 +19,7 @@ from __future__ import annotations
+ import asyncio
+ import json
+ import os
+-import shutil
+ import subprocess
+-import threading
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -38,8 +36,10 @@ pytestmark = pytest.mark.skipif(
+ 
+ def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+     env = os.environ | {
+-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
++        "GIT_AUTHOR_NAME": "t",
++        "GIT_AUTHOR_EMAIL": "t@t",
++        "GIT_COMMITTER_NAME": "t",
++        "GIT_COMMITTER_EMAIL": "t@t",
+     }
+     return subprocess.run(["git", *args], cwd=str(cwd), check=check, capture_output=True, text=True, env=env)
+ 
+@@ -94,24 +94,37 @@ def test_triage_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
+         path = request.url.path
+         method = request.method
+         if method == "GET" and path == "/repos/octo/widget":
+-            return httpx.Response(200, json={
+-                "full_name": "octo/widget", "default_branch": "main",
+-                "clone_url": str(bare), "private": False,
+-            })
++            return httpx.Response(
++                200,
++                json={
++                    "full_name": "octo/widget",
++                    "default_branch": "main",
++                    "clone_url": str(bare),
++                    "private": False,
++                },
++            )
+         if method == "GET" and path == "/repos/octo/widget/issues/1":
+-            return httpx.Response(200, json={
+-                "number": 1, "title": "2+2 should be 4",
+-                "body": "Running `node test.js` exits non-zero because the assertion claims 2+2 is 5.",
+-                "state": "open", "user": {"login": "alice"}, "labels": [],
+-            })
++            return httpx.Response(
++                200,
++                json={
++                    "number": 1,
++                    "title": "2+2 should be 4",
++                    "body": "Running `node test.js` exits non-zero because the assertion claims 2+2 is 5.",
++                    "state": "open",
++                    "user": {"login": "alice"},
++                    "labels": [],
++                },
++            )
+         if method == "GET" and path == "/repos/octo/widget/issues/1/comments":
+             return httpx.Response(200, json=comments)
+         if method == "POST" and path == "/repos/octo/widget/issues/1/comments":
+             body = json.loads(request.content)
+             next_comment_id[0] += 1
+             comment = {
+-                "id": next_comment_id[0], "user": {"login": "robomp-bot"},
+-                "body": body["body"], "created_at": "now",
++                "id": next_comment_id[0],
++                "user": {"login": "robomp-bot"},
++                "body": body["body"],
++                "created_at": "now",
+             }
+             comments.append(comment)
+             return httpx.Response(201, json=comment)
+@@ -135,13 +148,18 @@ def test_triage_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
+     payload = {
+         "action": "opened",
+         "issue": {
+-            "number": 1, "title": "2+2 should be 4",
++            "number": 1,
++            "title": "2+2 should be 4",
+             "body": "Running `node test.js` exits non-zero because the assertion claims 2+2 is 5.",
+-            "state": "open", "user": {"login": "alice"}, "labels": [],
++            "state": "open",
++            "user": {"login": "alice"},
++            "labels": [],
+         },
+         "repository": {
+-            "full_name": "octo/widget", "default_branch": "main",
+-            "clone_url": str(bare), "private": False,
++            "full_name": "octo/widget",
++            "default_branch": "main",
++            "clone_url": str(bare),
++            "private": False,
+         },
+     }
+ 
+@@ -150,7 +168,11 @@ def test_triage_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
+         github = GitHubClient("ghp_test", transport=transport)
+         sandbox = SandboxManager(cfg.workspace_root)
+         await triage_issue(
+-            settings=cfg, db=db, github=github, sandbox=sandbox, payload=payload,
++            settings=cfg,
++            db=db,
++            github=github,
++            sandbox=sandbox,
++            payload=payload,
+         )
+         row = db.get_issue("octo/widget#1")
+         assert row is not None, "issue row missing"
+@@ -167,7 +189,9 @@ def test_triage_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
+     # Branch should be pushed to the bare repo.
+     refs = subprocess.run(
+         ["git", "-C", str(bare), "for-each-ref", "--format=%(refname)"],
+-        capture_output=True, text=True, check=True,
++        capture_output=True,
++        text=True,
++        check=True,
+     )
+     assert any(r.startswith("refs/heads/farm/") for r in refs.stdout.splitlines()), refs.stdout
+     assert comments, "expected at least one comment"

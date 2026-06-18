@@ -1,0 +1,324 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index d3f9bd9b4..58ccbe65f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -923,9 +923,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+ 
+ [[package]]
+ name = "futures"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
++checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
+ dependencies = [
+  "futures-channel",
+  "futures-core",
+@@ -938,9 +938,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "futures-channel"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2dff15bf788c671c1934e366d07e30c1814a8ef514e1af724a602e8a2fbe1b10"
++checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
+ dependencies = [
+  "futures-core",
+  "futures-sink",
+@@ -948,15 +948,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "futures-core"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
++checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+ 
+ [[package]]
+ name = "futures-executor"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1e28d1d997f585e54aebc3f97d39e72338912123a67330d723fdbb564d646c9f"
++checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+ dependencies = [
+  "futures-core",
+  "futures-task",
+@@ -965,15 +965,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "futures-io"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9e5c1b78ca4aae1ac06c48a526a655760685149f0d465d21f37abfe57ce075c6"
++checksum = "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
+ 
+ [[package]]
+ name = "futures-macro"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "162ee34ebcb7c64a8abebc059ce0fee27c2262618d7b60ed8faf72fef13c3650"
++checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -982,21 +982,21 @@ dependencies = [
+ 
+ [[package]]
+ name = "futures-sink"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e575fab7d1e0dcb8d0c7bcf9a63ee213816ab51902e6d244a95819acacf1d4f7"
++checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
+ 
+ [[package]]
+ name = "futures-task"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f90f7dce0722e95104fcb095585910c0977252f286e354b5e3bd38902cd99988"
++checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+ 
+ [[package]]
+ name = "futures-util"
+-version = "0.3.31"
++version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
++checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
+ dependencies = [
+  "futures-channel",
+  "futures-core",
+@@ -1006,7 +1006,6 @@ dependencies = [
+  "futures-task",
+  "memchr",
+  "pin-project-lite",
+- "pin-utils",
+  "slab",
+ ]
+ 
+@@ -2059,7 +2058,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "pi-natives"
+-version = "12.5.0"
++version = "12.5.1"
+ dependencies = [
+  "arboard",
+  "brush-builtins",
+@@ -2101,12 +2100,6 @@ version = "0.2.16"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
+ 
+-[[package]]
+-name = "pin-utils"
+-version = "0.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+-
+ [[package]]
+ name = "pkg-config"
+ version = "0.3.32"
+diff --git a/Cargo.toml b/Cargo.toml
+index e6594fe7d..c2ee50b7f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -4,7 +4,7 @@ exclude = ["crates/brush-core-vendored", "crates/brush-builtins-vendored"]
+ resolver = "3"
+ 
+ [workspace.package]
+-version = "12.5.0"
++version = "12.5.1"
+ edition = "2024"
+ license = "MIT"
+ authors = ["Can Boluk"]
+diff --git a/bun.lock b/bun.lock
+index 7248ff8c1..10ef5bd28 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -20,7 +20,7 @@
+     },
+     "packages/agent": {
+       "name": "@oh-my-pi/pi-agent-core",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "dependencies": {
+         "@oh-my-pi/pi-ai": "workspace:*",
+         "@oh-my-pi/pi-tui": "workspace:*",
+@@ -33,7 +33,7 @@
+     },
+     "packages/ai": {
+       "name": "@oh-my-pi/pi-ai",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "bin": {
+         "pi-ai": "./src/cli.ts",
+       },
+@@ -61,7 +61,7 @@
+     },
+     "packages/coding-agent": {
+       "name": "@oh-my-pi/pi-coding-agent",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "bin": {
+         "omp": "src/cli.ts",
+       },
+@@ -97,7 +97,7 @@
+     },
+     "packages/natives": {
+       "name": "@oh-my-pi/pi-natives",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "dependencies": {
+         "@oh-my-pi/pi-utils": "workspace:*",
+       },
+@@ -124,7 +124,7 @@
+     },
+     "packages/stats": {
+       "name": "@oh-my-pi/omp-stats",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "bin": {
+         "omp-stats": "./src/index.ts",
+       },
+@@ -148,7 +148,7 @@
+     },
+     "packages/swarm-extension": {
+       "name": "@oh-my-pi/swarm-extension",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "bin": {
+         "omp-swarm": "src/cli.ts",
+       },
+@@ -161,7 +161,7 @@
+     },
+     "packages/tui": {
+       "name": "@oh-my-pi/pi-tui",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "dependencies": {
+         "@oh-my-pi/pi-natives": "workspace:*",
+         "@oh-my-pi/pi-utils": "workspace:*",
+@@ -177,7 +177,7 @@
+     },
+     "packages/utils": {
+       "name": "@oh-my-pi/pi-utils",
+-      "version": "12.5.0",
++      "version": "12.5.1",
+       "dependencies": {
+         "winston": "^3.19.0",
+         "winston-daily-rotate-file": "^5.0.0",
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index 29c30be73..a19031a43 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-agent-core",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+ 	"type": "module",
+ 	"main": "./src/index.ts",
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index 0d1eeb48a..e218138c7 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-ai",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"type": "module",
+ 	"main": "./src/index.ts",
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index a1f0a0a55..f406c28a1 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,6 +1,8 @@
+ # Changelog
+ 
+ ## [Unreleased]
++
++## [12.5.1] - 2026-02-15
+ ### Added
+ 
+ - Added `repeatToolDescriptions` setting to render full tool descriptions in the system prompt instead of a tool name list
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 15a162b39..498dc553a 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-coding-agent",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"type": "module",
+ 	"bin": {
+diff --git a/packages/natives/package.json b/packages/natives/package.json
+index 5af6d3227..5430a1efd 100644
+--- a/packages/natives/package.json
++++ b/packages/natives/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-natives",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "Native Rust functionality via N-API",
+ 	"keywords": ["napi", "rust", "native", "grep", "text-processing"],
+ 	"type": "module",
+diff --git a/packages/stats/package.json b/packages/stats/package.json
+index 11f825ac1..5f1e170c8 100644
+--- a/packages/stats/package.json
++++ b/packages/stats/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@oh-my-pi/omp-stats",
+-  "version": "12.5.0",
++  "version": "12.5.1",
+   "description": "Local observability dashboard for pi AI usage statistics",
+   "type": "module",
+   "main": "./src/index.ts",
+diff --git a/packages/swarm-extension/package.json b/packages/swarm-extension/package.json
+index a05e32aa7..5491b05b2 100644
+--- a/packages/swarm-extension/package.json
++++ b/packages/swarm-extension/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/swarm-extension",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "Swarm orchestration extension for omp",
+ 	"keywords": ["swarm", "orchestration", "agent", "extension"],
+ 	"author": "Derek Rynd",
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 4173542e9..b771e88f9 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-tui",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+ 	"type": "module",
+ 	"main": "./src/index.ts",
+diff --git a/packages/utils/package.json b/packages/utils/package.json
+index 68f08fbd4..d89d02156 100644
+--- a/packages/utils/package.json
++++ b/packages/utils/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-utils",
+-	"version": "12.5.0",
++	"version": "12.5.1",
+ 	"description": "Shared utilities for pi packages",
+ 	"keywords": ["utilities", "cli", "logging", "streams"],
+ 	"type": "module",

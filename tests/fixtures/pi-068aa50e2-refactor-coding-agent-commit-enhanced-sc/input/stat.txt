@@ -1,0 +1,2 @@
+ packages/coding-agent/src/commit/analysis/scope.ts | 30 ++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)

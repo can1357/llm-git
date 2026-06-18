@@ -1,0 +1,6 @@
+ biome.json                                    |  2 +-
+ package-lock.json                             | 86 +++++++++++++--------------
+ package.json                                  |  2 +-
+ packages/coding-agent/src/tui/user-message.ts |  7 +--
+ packages/tui/src/components/select-list.ts    |  2 -
+ 5 files changed, 46 insertions(+), 53 deletions(-)

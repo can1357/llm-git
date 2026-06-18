@@ -1,0 +1,265 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index d7de44021..449ee1639 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -4,7 +4,10 @@
+ 
+ ### Added
+ 
+-- **Compaction hook `resolveApiKey`**: The `before_compact` session event now includes `resolveApiKey` function to resolve API keys for any model (checks settings, OAuth, env vars). Useful for hooks that need to call different models during custom compaction.
++- **Compaction hook improvements**: The `before_compact` session event now includes:
++  - `messagesToKeep`: Messages that will be kept after the summary (recent turns), in addition to `messagesToSummarize`
++  - `resolveApiKey`: Function to resolve API keys for any model (checks settings, OAuth, env vars)
++  - Removed `apiKey` string in favor of `resolveApiKey` for more flexibility
+ 
+ ## [0.27.5] - 2025-12-24
+ 
+diff --git a/packages/coding-agent/docs/hooks.md b/packages/coding-agent/docs/hooks.md
+index 60316a91c..b0bc9afa2 100644
+--- a/packages/coding-agent/docs/hooks.md
++++ b/packages/coding-agent/docs/hooks.md
+@@ -180,13 +180,15 @@ For `before_branch` and `branch` events, `event.targetTurnIndex` contains the en
+ 
+ For `before_compact` events, additional fields are available:
+ - `event.cutPoint`: Where the context will be cut (`firstKeptEntryIndex`, `isSplitTurn`)
+-- `event.messagesToSummarize`: Messages that will be summarized
++- `event.messagesToSummarize`: Messages that will be summarized and discarded
++- `event.messagesToKeep`: Messages that will be kept after the summary (recent turns)
+ - `event.tokensBefore`: Current context token count
+ - `event.model`: Model to use for summarization
+-- `event.apiKey`: API key for the model
+ - `event.resolveApiKey`: Function to resolve API key for any model (checks settings, OAuth, env vars)
+ - `event.customInstructions`: Optional custom focus for summary (from `/compact` command)
+ 
++To get all messages since the last compaction: `[...event.messagesToSummarize, ...event.messagesToKeep]`
++
+ Return `{ compactionEntry }` to provide a custom summary instead of the default. The `compactionEntry` must have: `type: "compaction"`, `timestamp`, `summary`, `firstKeptEntryIndex` (from `cutPoint`), `tokensBefore`.
+ 
+ For `compact` events (after compaction):
+diff --git a/packages/coding-agent/examples/hooks/full-compaction.ts b/packages/coding-agent/examples/hooks/full-compaction.ts
+index 5c34f2398..a9badf77b 100644
+--- a/packages/coding-agent/examples/hooks/full-compaction.ts
++++ b/packages/coding-agent/examples/hooks/full-compaction.ts
+@@ -3,8 +3,8 @@
+  *
+  * Replaces the default compaction behavior with a full summary of the entire context.
+  * Instead of keeping the last 20k tokens of conversation turns, this hook:
+- * 1. Summarizes ALL messages being compacted into a single comprehensive summary
+- * 2. Discards all old turns completely
++ * 1. Summarizes ALL messages (both messagesToSummarize and messagesToKeep)
++ * 2. Discards all old turns completely, keeping only the summary
+  *
+  * This is useful when you want maximum context window space for new work
+  * at the cost of losing exact conversation history.
+@@ -21,9 +21,12 @@ export default function (pi: HookAPI) {
+ 	pi.on("session", async (event, ctx) => {
+ 		if (event.reason !== "before_compact") return;
+ 
+-		const { messagesToSummarize, tokensBefore, model, resolveApiKey, cutPoint } = event;
++		const { messagesToSummarize, messagesToKeep, tokensBefore, model, resolveApiKey, entries } = event;
+ 
+-		ctx.ui.notify(`Compacting ${tokensBefore.toLocaleString()} tokens with full summary...`, "info");
++		// Combine all messages for full summary
++		const allMessages = [...messagesToSummarize, ...messagesToKeep];
++
++		ctx.ui.notify(`Full compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens)...`, "info");
+ 
+ 		// Resolve API key for the model
+ 		const apiKey = await resolveApiKey(model);
+@@ -33,7 +36,7 @@ export default function (pi: HookAPI) {
+ 		}
+ 
+ 		// Transform app messages to LLM-compatible format
+-		const transformedMessages = messageTransformer(messagesToSummarize);
++		const transformedMessages = messageTransformer(allMessages);
+ 
+ 		// Build messages that ask for a comprehensive summary
+ 		const summaryMessages = [
+@@ -43,7 +46,7 @@ export default function (pi: HookAPI) {
+ 				content: [
+ 					{
+ 						type: "text" as const,
+-						text: `You are a conversation summarizer. Create a comprehensive summary of this conversation that captures:
++						text: `You are a conversation summarizer. Create a comprehensive summary of this entire conversation that captures:
+ 
+ 1. The main goals and objectives discussed
+ 2. Key decisions made and their rationale
+@@ -52,7 +55,7 @@ export default function (pi: HookAPI) {
+ 5. Any blockers, issues, or open questions
+ 6. Next steps that were planned or suggested
+ 
+-Be thorough but concise. The summary will replace the entire conversation history, so include all information needed to continue the work effectively.
++Be thorough but concise. The summary will replace the ENTIRE conversation history, so include all information needed to continue the work effectively.
+ 
+ Format the summary as structured markdown with clear sections.`,
+ 					},
+@@ -75,14 +78,14 @@ Format the summary as structured markdown with clear sections.`,
+ 				return; // Fall back to default compaction
+ 			}
+ 
+-			// Return a compaction entry that discards ALL old messages
+-			// firstKeptEntryIndex points to after all summarized content
++			// Return a compaction entry that discards ALL messages
++			// firstKeptEntryIndex points past all current entries
+ 			return {
+ 				compactionEntry: {
+ 					type: "compaction" as const,
+ 					timestamp: new Date().toISOString(),
+ 					summary,
+-					firstKeptEntryIndex: cutPoint.firstKeptEntryIndex,
++					firstKeptEntryIndex: entries.length,
+ 					tokensBefore,
+ 				},
+ 			};
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 6c394b2d6..e605ccf54 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -767,11 +767,11 @@ export class AgentSession {
+ 					previousSessionFile: null,
+ 					reason: "before_compact",
+ 					cutPoint: preparation.cutPoint,
+-					messagesToSummarize: preparation.messagesToSummarize,
++					messagesToSummarize: [...preparation.messagesToSummarize],
++					messagesToKeep: [...preparation.messagesToKeep],
+ 					tokensBefore: preparation.tokensBefore,
+ 					customInstructions,
+ 					model: this.model,
+-					apiKey,
+ 					resolveApiKey: this._resolveApiKey,
+ 				})) as SessionEventResult | undefined;
+ 
+@@ -918,11 +918,11 @@ export class AgentSession {
+ 					previousSessionFile: null,
+ 					reason: "before_compact",
+ 					cutPoint: preparation.cutPoint,
+-					messagesToSummarize: preparation.messagesToSummarize,
++					messagesToSummarize: [...preparation.messagesToSummarize],
++					messagesToKeep: [...preparation.messagesToKeep],
+ 					tokensBefore: preparation.tokensBefore,
+ 					customInstructions: undefined,
+ 					model: this.model,
+-					apiKey,
+ 					resolveApiKey: this._resolveApiKey,
+ 				})) as SessionEventResult | undefined;
+ 
+diff --git a/packages/coding-agent/src/core/compaction.ts b/packages/coding-agent/src/core/compaction.ts
+index 32b21af9e..af4edfb83 100644
+--- a/packages/coding-agent/src/core/compaction.ts
++++ b/packages/coding-agent/src/core/compaction.ts
+@@ -327,7 +327,10 @@ export async function generateSummary(
+ 
+ export interface CompactionPreparation {
+ 	cutPoint: CutPointResult;
++	/** Messages that will be summarized and discarded */
+ 	messagesToSummarize: AppMessage[];
++	/** Messages that will be kept after the summary (recent turns) */
++	messagesToKeep: AppMessage[];
+ 	tokensBefore: number;
+ 	boundaryStart: number;
+ }
+@@ -353,6 +356,8 @@ export function prepareCompaction(entries: SessionEntry[], settings: CompactionS
+ 	const cutPoint = findCutPoint(entries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+ 
+ 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
++
++	// Messages to summarize (will be discarded after summary)
+ 	const messagesToSummarize: AppMessage[] = [];
+ 	for (let i = boundaryStart; i < historyEnd; i++) {
+ 		const entry = entries[i];
+@@ -361,7 +366,16 @@ export function prepareCompaction(entries: SessionEntry[], settings: CompactionS
+ 		}
+ 	}
+ 
+-	return { cutPoint, messagesToSummarize, tokensBefore, boundaryStart };
++	// Messages to keep (recent turns, kept after summary)
++	const messagesToKeep: AppMessage[] = [];
++	for (let i = cutPoint.firstKeptEntryIndex; i < boundaryEnd; i++) {
++		const entry = entries[i];
++		if (entry.type === "message") {
++			messagesToKeep.push(entry.message);
++		}
++	}
++
++	return { cutPoint, messagesToSummarize, messagesToKeep, tokensBefore, boundaryStart };
+ }
+ 
+ // ============================================================================
+diff --git a/packages/coding-agent/src/core/hooks/types.ts b/packages/coding-agent/src/core/hooks/types.ts
+index 2653c26d1..6b88915e7 100644
+--- a/packages/coding-agent/src/core/hooks/types.ts
++++ b/packages/coding-agent/src/core/hooks/types.ts
+@@ -130,11 +130,13 @@ export type SessionEvent =
+ 	| (SessionEventBase & {
+ 			reason: "before_compact";
+ 			cutPoint: CutPointResult;
++			/** Messages that will be summarized and discarded */
+ 			messagesToSummarize: AppMessage[];
++			/** Messages that will be kept after the summary (recent turns) */
++			messagesToKeep: AppMessage[];
+ 			tokensBefore: number;
+ 			customInstructions?: string;
+ 			model: Model<any>;
+-			apiKey: string;
+ 			/** Resolve API key for any model (checks settings, OAuth, env vars) */
+ 			resolveApiKey: (model: Model<any>) => Promise<string | undefined>;
+ 	  })
+diff --git a/packages/coding-agent/test/compaction-hooks-example.test.ts b/packages/coding-agent/test/compaction-hooks-example.test.ts
+index 2d65a6ec3..476d40fb6 100644
+--- a/packages/coding-agent/test/compaction-hooks-example.test.ts
++++ b/packages/coding-agent/test/compaction-hooks-example.test.ts
+@@ -15,17 +15,19 @@ describe("Documentation example", () => {
+ 
+ 				// After narrowing, these should all be accessible
+ 				const messages = event.messagesToSummarize;
++				const messagesToKeep = event.messagesToKeep;
+ 				const cutPoint = event.cutPoint;
+ 				const tokensBefore = event.tokensBefore;
+ 				const model = event.model;
+-				const apiKey = event.apiKey;
++				const resolveApiKey = event.resolveApiKey;
+ 
+ 				// Verify types
+ 				expect(Array.isArray(messages)).toBe(true);
++				expect(Array.isArray(messagesToKeep)).toBe(true);
+ 				expect(typeof cutPoint.firstKeptEntryIndex).toBe("number");
+ 				expect(typeof tokensBefore).toBe("number");
+ 				expect(model).toBeDefined();
+-				expect(typeof apiKey).toBe("string");
++				expect(typeof resolveApiKey).toBe("function");
+ 
+ 				const summary = messages
+ 					.filter((m) => m.role === "user")
+diff --git a/packages/coding-agent/test/compaction-hooks.test.ts b/packages/coding-agent/test/compaction-hooks.test.ts
+index d39d020b6..839d1afac 100644
+--- a/packages/coding-agent/test/compaction-hooks.test.ts
++++ b/packages/coding-agent/test/compaction-hooks.test.ts
+@@ -129,9 +129,10 @@ describe.skipIf(!API_KEY)("Compaction hooks", () => {
+ 			expect(beforeEvent.cutPoint).toBeDefined();
+ 			expect(beforeEvent.cutPoint.firstKeptEntryIndex).toBeGreaterThanOrEqual(0);
+ 			expect(beforeEvent.messagesToSummarize).toBeDefined();
++			expect(beforeEvent.messagesToKeep).toBeDefined();
+ 			expect(beforeEvent.tokensBefore).toBeGreaterThanOrEqual(0);
+ 			expect(beforeEvent.model).toBeDefined();
+-			expect(beforeEvent.apiKey).toBeDefined();
++			expect(beforeEvent.resolveApiKey).toBeDefined();
+ 		}
+ 
+ 		const afterEvent = compactEvents[0];
+@@ -336,14 +337,14 @@ describe.skipIf(!API_KEY)("Compaction hooks", () => {
+ 		expect(event.cutPoint).toHaveProperty("turnStartIndex");
+ 
+ 		expect(Array.isArray(event.messagesToSummarize)).toBe(true);
++		expect(Array.isArray(event.messagesToKeep)).toBe(true);
+ 
+ 		expect(typeof event.tokensBefore).toBe("number");
+ 
+ 		expect(event.model).toHaveProperty("provider");
+ 		expect(event.model).toHaveProperty("id");
+ 
+-		expect(typeof event.apiKey).toBe("string");
+-		expect(event.apiKey.length).toBeGreaterThan(0);
++		expect(typeof event.resolveApiKey).toBe("function");
+ 
+ 		expect(Array.isArray(event.entries)).toBe(true);
+ 		expect(event.entries.length).toBeGreaterThan(0);

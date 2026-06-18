@@ -1,0 +1,9 @@
+ package-lock.json                  | 14 +++++++-------
+ packages/agent/package.json        |  6 +++---
+ packages/ai/package.json           |  2 +-
+ packages/coding-agent/package.json |  6 +++---
+ packages/pods/package.json         |  4 ++--
+ packages/proxy/package.json        |  2 +-
+ packages/tui/package.json          |  2 +-
+ packages/web-ui/package.json       |  4 ++--
+ 8 files changed, 20 insertions(+), 20 deletions(-)

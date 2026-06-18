@@ -1,0 +1,4 @@
+ packages/ai/CHANGELOG.md                       | 10 ++++++++
+ packages/ai/src/models.json                    | 32 +++++++++++++++++++++-----
+ packages/ai/src/provider-models/descriptors.ts |  4 ++--
+ 3 files changed, 38 insertions(+), 8 deletions(-)

@@ -1,0 +1,8 @@
+ .gitignore                                         |  1 +
+ packages/ai/CHANGELOG.md                           |  2 +
+ .../ai/src/providers/azure-openai-responses.ts     | 12 ++--
+ .../ai/src/providers/openai-completions-compat.ts  | 18 +++--
+ packages/ai/src/providers/openai-completions.ts    | 17 +++--
+ packages/ai/src/providers/openai-responses.ts      | 18 ++++-
+ .../test/openai-responses-developer-role.test.ts   | 78 ++++++++++++++++++++++
+ 7 files changed, 131 insertions(+), 15 deletions(-)

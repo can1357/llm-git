@@ -1,0 +1,15 @@
+ package-lock.json                                 |  40 +++---
+ packages/agent/package.json                       |   6 +-
+ packages/ai/package.json                          |   2 +-
+ packages/ai/src/models.generated.ts               | 148 +++++++++++-----------
+ packages/coding-agent/CHANGELOG.md                |   6 +
+ packages/coding-agent/package.json                |   8 +-
+ packages/coding-agent/src/core/session-manager.ts |   4 +
+ packages/coding-agent/src/modes/print-mode.ts     |  16 ++-
+ packages/mom/package.json                         |   8 +-
+ packages/pods/package.json                        |   4 +-
+ packages/proxy/package.json                       |   2 +-
+ packages/tui/package.json                         |   2 +-
+ packages/web-ui/example/package.json              |   2 +-
+ packages/web-ui/package.json                      |   6 +-
+ 14 files changed, 133 insertions(+), 121 deletions(-)

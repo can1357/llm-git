@@ -1,0 +1,5 @@
+ packages/coding-agent/examples/sdk/11-sessions.ts  |   4 +-
+ .../coding-agent/src/core/export-html/index.ts     |   2 +-
+ packages/coding-agent/src/core/session-manager.ts  | 823 +++++++++++----------
+ packages/coding-agent/src/main.ts                  |  10 +-
+ 4 files changed, 460 insertions(+), 379 deletions(-)

@@ -1,0 +1,4407 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index f1313b03c..4a3aff2eb 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -1,6 +1,12 @@
+ # Changelog
+ 
+ ## [Unreleased]
++
++### Added
++
++- Added Google Vertex AI provider with Gemini 1.5, 2.0, 2.5, and 3.0 model support
++- Added GPT-5 series models (gpt-5, gpt-5.1, gpt-5.2 and variants) to OpenAI Codex provider
++
+ ### Changed
+ 
+ - Changed default reasoning summary from `auto` to `detailed` for OpenAI Codex provider
+diff --git a/packages/ai/scripts/generate-models.ts b/packages/ai/scripts/generate-models.ts
+index 66af93ffd..73ec45b32 100644
+--- a/packages/ai/scripts/generate-models.ts
++++ b/packages/ai/scripts/generate-models.ts
+@@ -1,9 +1,13 @@
+ #!/usr/bin/env bun
+ 
+-import { join } from "node:path";
++import { writeFileSync } from "fs";
++import { join, dirname } from "path";
++import { fileURLToPath } from "url";
+ import { Api, KnownProvider, Model } from "../src/types";
+ 
+-const packageRoot = join(import.meta.dir, "..");
++const __filename = fileURLToPath(import.meta.url);
++const __dirname = dirname(__filename);
++const packageRoot = join(__dirname, "..");
+ 
+ interface ModelsDevModel {
+ 	id: string;
+@@ -440,6 +444,170 @@ async function generateModels() {
+ 		});
+ 	}
+ 
++	// OpenAI Codex (ChatGPT OAuth) models
++	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
++	const CODEX_CONTEXT = 400000;
++	const CODEX_MAX_TOKENS = 128000;
++	const codexModels: Model<"openai-codex-responses">[] = [
++		{
++			id: "gpt-5.2-codex",
++			name: "GPT-5.2 Codex",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5.2",
++			name: "GPT-5.2",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5.1-codex-max",
++			name: "GPT-5.1 Codex Max",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5.1-codex",
++			name: "GPT-5.1 Codex",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5.1-codex-mini",
++			name: "GPT-5.1 Codex Mini",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "codex-mini-latest",
++			name: "Codex Mini Latest",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5-codex-mini",
++			name: "gpt-5-codex-mini",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5-codex",
++			name: "gpt-5-codex",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5.1",
++			name: "GPT-5.1",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5.1-chat-latest",
++			name: "gpt-5.1-chat-latest",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5",
++			name: "gpt-5",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5-mini",
++			name: "gpt-5-mini",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++		{
++			id: "gpt-5-nano",
++			name: "gpt-5-nano",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: CODEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow: CODEX_CONTEXT,
++			maxTokens: CODEX_MAX_TOKENS,
++		},
++	];
++	allModels.push(...codexModels);
++
+ 	// Add missing Grok models
+ 	if (!allModels.some((m) => m.provider === "xai" && m.id === "grok-code-fast-1")) {
+ 		allModels.push({
+@@ -642,6 +810,143 @@ async function generateModels() {
+ 	];
+ 	allModels.push(...antigravityModels);
+ 
++	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
++	const vertexModels: Model<"google-vertex">[] = [
++		{
++			id: "gemini-3-pro-preview",
++			name: "Gemini 3 Pro Preview (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
++			contextWindow: 1000000,
++			maxTokens: 64000,
++		},
++		{
++			id: "gemini-3-flash-preview",
++			name: "Gemini 3 Flash Preview (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		},
++		{
++			id: "gemini-2.0-flash",
++			name: "Gemini 2.0 Flash (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: false,
++			input: ["text", "image"],
++			cost: { input: 0.15, output: 0.6, cacheRead: 0.0375, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 8192,
++		},
++		{
++			id: "gemini-2.0-flash-lite",
++			name: "Gemini 2.0 Flash Lite (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0.075, output: 0.3, cacheRead: 0.01875, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		},
++		{
++			id: "gemini-2.5-pro",
++			name: "Gemini 2.5 Pro (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		},
++		{
++			id: "gemini-2.5-flash",
++			name: "Gemini 2.5 Flash (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		},
++		{
++			id: "gemini-2.5-flash-lite-preview-09-2025",
++			name: "Gemini 2.5 Flash Lite Preview 09-25 (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		},
++		{
++			id: "gemini-2.5-flash-lite",
++			name: "Gemini 2.5 Flash Lite (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: true,
++			input: ["text", "image"],
++			cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		},
++		{
++			id: "gemini-1.5-pro",
++			name: "Gemini 1.5 Pro (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: false,
++			input: ["text", "image"],
++			cost: { input: 1.25, output: 5, cacheRead: 0.3125, cacheWrite: 0 },
++			contextWindow: 1000000,
++			maxTokens: 8192,
++		},
++		{
++			id: "gemini-1.5-flash",
++			name: "Gemini 1.5 Flash (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: false,
++			input: ["text", "image"],
++			cost: { input: 0.075, output: 0.3, cacheRead: 0.01875, cacheWrite: 0 },
++			contextWindow: 1000000,
++			maxTokens: 8192,
++		},
++		{
++			id: "gemini-1.5-flash-8b",
++			name: "Gemini 1.5 Flash-8B (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: VERTEX_BASE_URL,
++			reasoning: false,
++			input: ["text", "image"],
++			cost: { input: 0.0375, output: 0.15, cacheRead: 0.01, cacheWrite: 0 },
++			contextWindow: 1000000,
++			maxTokens: 8192,
++		},
++	];
++	allModels.push(...vertexModels);
++
+ 	// Group by provider and deduplicate by model ID
+ 	const providers: Record<string, Record<string, Model<any>>> = {};
+ 	for (const model of allModels) {
+@@ -708,7 +1013,7 @@ export const MODELS = {
+ `;
+ 
+ 	// Write file
+-	await Bun.write(join(packageRoot, "src/models.generated.ts"), output);
++	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
+ 	console.log("Generated src/models.generated.ts");
+ 
+ 	// Print statistics
+diff --git a/packages/ai/src/models.generated.ts b/packages/ai/src/models.generated.ts
+index f6e5e4686..ea46741c8 100644
+--- a/packages/ai/src/models.generated.ts
++++ b/packages/ai/src/models.generated.ts
+@@ -1337,6 +1337,195 @@ export const MODELS = {
+ 			maxTokens: 65535,
+ 		} satisfies Model<"google-gemini-cli">,
+ 	},
++	"google-vertex": {
++		"gemini-1.5-flash": {
++			id: "gemini-1.5-flash",
++			name: "Gemini 1.5 Flash (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: false,
++			input: ["text", "image"],
++			cost: {
++				input: 0.075,
++				output: 0.3,
++				cacheRead: 0.01875,
++				cacheWrite: 0,
++			},
++			contextWindow: 1000000,
++			maxTokens: 8192,
++		} satisfies Model<"google-vertex">,
++		"gemini-1.5-flash-8b": {
++			id: "gemini-1.5-flash-8b",
++			name: "Gemini 1.5 Flash-8B (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: false,
++			input: ["text", "image"],
++			cost: {
++				input: 0.0375,
++				output: 0.15,
++				cacheRead: 0.01,
++				cacheWrite: 0,
++			},
++			contextWindow: 1000000,
++			maxTokens: 8192,
++		} satisfies Model<"google-vertex">,
++		"gemini-1.5-pro": {
++			id: "gemini-1.5-pro",
++			name: "Gemini 1.5 Pro (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: false,
++			input: ["text", "image"],
++			cost: {
++				input: 1.25,
++				output: 5,
++				cacheRead: 0.3125,
++				cacheWrite: 0,
++			},
++			contextWindow: 1000000,
++			maxTokens: 8192,
++		} satisfies Model<"google-vertex">,
++		"gemini-2.0-flash": {
++			id: "gemini-2.0-flash",
++			name: "Gemini 2.0 Flash (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: false,
++			input: ["text", "image"],
++			cost: {
++				input: 0.15,
++				output: 0.6,
++				cacheRead: 0.0375,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 8192,
++		} satisfies Model<"google-vertex">,
++		"gemini-2.0-flash-lite": {
++			id: "gemini-2.0-flash-lite",
++			name: "Gemini 2.0 Flash Lite (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0.075,
++				output: 0.3,
++				cacheRead: 0.01875,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		} satisfies Model<"google-vertex">,
++		"gemini-2.5-flash": {
++			id: "gemini-2.5-flash",
++			name: "Gemini 2.5 Flash (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0.3,
++				output: 2.5,
++				cacheRead: 0.03,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		} satisfies Model<"google-vertex">,
++		"gemini-2.5-flash-lite": {
++			id: "gemini-2.5-flash-lite",
++			name: "Gemini 2.5 Flash Lite (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0.1,
++				output: 0.4,
++				cacheRead: 0.01,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		} satisfies Model<"google-vertex">,
++		"gemini-2.5-flash-lite-preview-09-2025": {
++			id: "gemini-2.5-flash-lite-preview-09-2025",
++			name: "Gemini 2.5 Flash Lite Preview 09-25 (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0.1,
++				output: 0.4,
++				cacheRead: 0.01,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		} satisfies Model<"google-vertex">,
++		"gemini-2.5-pro": {
++			id: "gemini-2.5-pro",
++			name: "Gemini 2.5 Pro (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 1.25,
++				output: 10,
++				cacheRead: 0.125,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		} satisfies Model<"google-vertex">,
++		"gemini-3-flash-preview": {
++			id: "gemini-3-flash-preview",
++			name: "Gemini 3 Flash Preview (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0.5,
++				output: 3,
++				cacheRead: 0.05,
++				cacheWrite: 0,
++			},
++			contextWindow: 1048576,
++			maxTokens: 65536,
++		} satisfies Model<"google-vertex">,
++		"gemini-3-pro-preview": {
++			id: "gemini-3-pro-preview",
++			name: "Gemini 3 Pro Preview (Vertex)",
++			api: "google-vertex",
++			provider: "google-vertex",
++			baseUrl: "https://{location}-aiplatform.googleapis.com",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 2,
++				output: 12,
++				cacheRead: 0.2,
++				cacheWrite: 0,
++			},
++			contextWindow: 1000000,
++			maxTokens: 64000,
++		} satisfies Model<"google-vertex">,
++	},
+ 	"groq": {
+ 		"deepseek-r1-distill-llama-70b": {
+ 			id: "deepseek-r1-distill-llama-70b",
+@@ -2584,6 +2773,229 @@ export const MODELS = {
+ 			maxTokens: 100000,
+ 		} satisfies Model<"openai-responses">,
+ 	},
++	"openai-codex": {
++		"codex-mini-latest": {
++			id: "codex-mini-latest",
++			name: "Codex Mini Latest",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5": {
++			id: "gpt-5",
++			name: "gpt-5",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5-codex": {
++			id: "gpt-5-codex",
++			name: "gpt-5-codex",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5-codex-mini": {
++			id: "gpt-5-codex-mini",
++			name: "gpt-5-codex-mini",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5-mini": {
++			id: "gpt-5-mini",
++			name: "gpt-5-mini",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5-nano": {
++			id: "gpt-5-nano",
++			name: "gpt-5-nano",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.1": {
++			id: "gpt-5.1",
++			name: "GPT-5.1",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.1-chat-latest": {
++			id: "gpt-5.1-chat-latest",
++			name: "gpt-5.1-chat-latest",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.1-codex": {
++			id: "gpt-5.1-codex",
++			name: "GPT-5.1 Codex",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.1-codex-max": {
++			id: "gpt-5.1-codex-max",
++			name: "GPT-5.1 Codex Max",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.1-codex-mini": {
++			id: "gpt-5.1-codex-mini",
++			name: "GPT-5.1 Codex Mini",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.2": {
++			id: "gpt-5.2",
++			name: "GPT-5.2",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++		"gpt-5.2-codex": {
++			id: "gpt-5.2-codex",
++			name: "GPT-5.2 Codex",
++			api: "openai-codex-responses",
++			provider: "openai-codex",
++			baseUrl: "https://chatgpt.com/backend-api",
++			reasoning: true,
++			input: ["text", "image"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 400000,
++			maxTokens: 128000,
++		} satisfies Model<"openai-codex-responses">,
++	},
+ 	"openrouter": {
+ 		"ai21/jamba-large-1.7": {
+ 			id: "ai21/jamba-large-1.7",
+@@ -2755,23 +3167,6 @@ export const MODELS = {
+ 			contextWindow: 200000,
+ 			maxTokens: 4096,
+ 		} satisfies Model<"openai-completions">,
+-		"anthropic/claude-3-opus": {
+-			id: "anthropic/claude-3-opus",
+-			name: "Anthropic: Claude 3 Opus",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text", "image"],
+-			cost: {
+-				input: 15,
+-				output: 75,
+-				cacheRead: 1.5,
+-				cacheWrite: 18.75,
+-			},
+-			contextWindow: 200000,
+-			maxTokens: 4096,
+-		} satisfies Model<"openai-completions">,
+ 		"anthropic/claude-3.5-haiku": {
+ 			id: "anthropic/claude-3.5-haiku",
+ 			name: "Anthropic: Claude 3.5 Haiku",
+@@ -3211,8 +3606,8 @@ export const MODELS = {
+ 				cacheRead: 0,
+ 				cacheWrite: 0,
+ 			},
+-			contextWindow: 163840,
+-			maxTokens: 65536,
++			contextWindow: 32768,
++			maxTokens: 7168,
+ 		} satisfies Model<"openai-completions">,
+ 		"deepseek/deepseek-r1": {
+ 			id: "deepseek/deepseek-r1",
+@@ -3240,13 +3635,13 @@ export const MODELS = {
+ 			reasoning: true,
+ 			input: ["text"],
+ 			cost: {
+-				input: 0.32,
+-				output: 0.48,
++				input: 0.39999999999999997,
++				output: 1.75,
+ 				cacheRead: 0,
+ 				cacheWrite: 0,
+ 			},
+-			contextWindow: 262144,
+-			maxTokens: 4096,
++			contextWindow: 163840,
++			maxTokens: 65536,
+ 		} satisfies Model<"openai-completions">,
+ 		"deepseek/deepseek-r1-distill-llama-70b": {
+ 			id: "deepseek/deepseek-r1-distill-llama-70b",
+@@ -3637,7 +4032,7 @@ export const MODELS = {
+ 				cacheWrite: 0,
+ 			},
+ 			contextWindow: 256000,
+-			maxTokens: 32768,
++			maxTokens: 128000,
+ 		} satisfies Model<"openai-completions">,
+ 		"meta-llama/llama-3-70b-instruct": {
+ 			id: "meta-llama/llama-3-70b-instruct",
+@@ -3717,11 +4112,11 @@ export const MODELS = {
+ 			input: ["text"],
+ 			cost: {
+ 				input: 0.02,
+-				output: 0.03,
++				output: 0.049999999999999996,
+ 				cacheRead: 0,
+ 				cacheWrite: 0,
+ 			},
+-			contextWindow: 131072,
++			contextWindow: 16384,
+ 			maxTokens: 16384,
+ 		} satisfies Model<"openai-completions">,
+ 		"meta-llama/llama-3.2-3b-instruct": {
+@@ -3809,57 +4204,6 @@ export const MODELS = {
+ 			contextWindow: 327680,
+ 			maxTokens: 16384,
+ 		} satisfies Model<"openai-completions">,
+-		"microsoft/phi-3-medium-128k-instruct": {
+-			id: "microsoft/phi-3-medium-128k-instruct",
+-			name: "Microsoft: Phi-3 Medium 128K Instruct",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 1,
+-				output: 1,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 128000,
+-			maxTokens: 4096,
+-		} satisfies Model<"openai-completions">,
+-		"microsoft/phi-3-mini-128k-instruct": {
+-			id: "microsoft/phi-3-mini-128k-instruct",
+-			name: "Microsoft: Phi-3 Mini 128K Instruct",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 0.09999999999999999,
+-				output: 0.09999999999999999,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 128000,
+-			maxTokens: 4096,
+-		} satisfies Model<"openai-completions">,
+-		"microsoft/phi-3.5-mini-128k-instruct": {
+-			id: "microsoft/phi-3.5-mini-128k-instruct",
+-			name: "Microsoft: Phi-3.5 Mini 128K Instruct",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 0.09999999999999999,
+-				output: 0.09999999999999999,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 128000,
+-			maxTokens: 4096,
+-		} satisfies Model<"openai-completions">,
+ 		"minimax/minimax-m1": {
+ 			id: "minimax/minimax-m1",
+ 			name: "MiniMax: MiniMax M1",
+@@ -6257,6 +6601,23 @@ export const MODELS = {
+ 			contextWindow: 163840,
+ 			maxTokens: 65536,
+ 		} satisfies Model<"openai-completions">,
++		"tngtech/tng-r1t-chimera:free": {
++			id: "tngtech/tng-r1t-chimera:free",
++			name: "TNG: R1T Chimera (free)",
++			api: "openai-completions",
++			provider: "openrouter",
++			baseUrl: "https://openrouter.ai/api/v1",
++			reasoning: true,
++			input: ["text"],
++			cost: {
++				input: 0,
++				output: 0,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 163840,
++			maxTokens: 65536,
++		} satisfies Model<"openai-completions">,
+ 		"x-ai/grok-3": {
+ 			id: "x-ai/grok-3",
+ 			name: "xAI: Grok 3",
+@@ -6540,11 +6901,11 @@ export const MODELS = {
+ 			cost: {
+ 				input: 0.3,
+ 				output: 0.8999999999999999,
+-				cacheRead: 0.049999999999999996,
++				cacheRead: 0,
+ 				cacheWrite: 0,
+ 			},
+ 			contextWindow: 131072,
+-			maxTokens: 24000,
++			maxTokens: 131072,
+ 		} satisfies Model<"openai-completions">,
+ 		"z-ai/glm-4.7": {
+ 			id: "z-ai/glm-4.7",
+diff --git a/packages/ai/src/providers/openai-codex/request-transformer.ts b/packages/ai/src/providers/openai-codex/request-transformer.ts
+index 3194be2f5..b96a86a8b 100644
+--- a/packages/ai/src/providers/openai-codex/request-transformer.ts
++++ b/packages/ai/src/providers/openai-codex/request-transformer.ts
+@@ -159,10 +159,10 @@ function getReasoningConfig(modelName: string | undefined, options: CodexRequest
+ 	const defaultEffort: ReasoningConfig["effort"] = isCodexMini
+ 		? "medium"
+ 		: supportsXhigh
+-			? "high"
+-			: isLightweight
+-				? "minimal"
+-				: "medium";
++		? "high"
++		: isLightweight
++		? "minimal"
++		: "medium";
+ 
+ 	let effort = options.reasoningEffort || defaultEffort;
+ 
+@@ -213,7 +213,7 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
+ function addCodexBridgeMessage(
+ 	input: InputItem[] | undefined,
+ 	hasTools: boolean,
+-	systemPrompt?: string,
++	systemPrompt?: string
+ ): InputItem[] | undefined {
+ 	if (!hasTools || !Array.isArray(input)) return input;
+ 
+@@ -255,7 +255,7 @@ export async function transformRequestBody(
+ 	codexInstructions: string,
+ 	options: CodexRequestOptions = {},
+ 	codexMode = true,
+-	systemPrompt?: string,
++	systemPrompt?: string
+ ): Promise<RequestBody> {
+ 	const normalizedModel = normalizeModel(body.model);
+ 
+@@ -277,7 +277,7 @@ export async function transformRequestBody(
+ 			const functionCallIds = new Set(
+ 				body.input
+ 					.filter((item) => item.type === "function_call" && typeof item.call_id === "string")
+-					.map((item) => item.call_id as string),
++					.map((item) => item.call_id as string)
+ 			);
+ 
+ 			body.input = body.input.map((item) => {
+@@ -319,7 +319,9 @@ export async function transformRequestBody(
+ 		verbosity: options.textVerbosity || "medium",
+ 	};
+ 
+-	body.include = options.include || ["reasoning.encrypted_content"];
++	const include = Array.isArray(options.include) ? [...options.include] : [];
++	include.push("reasoning.encrypted_content");
++	body.include = Array.from(new Set(include));
+ 
+ 	delete body.max_output_tokens;
+ 	delete body.max_completion_tokens;
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index ff4258980..c1d2e4667 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,6 +1,7 @@
+ # Changelog
+ 
+ ## [Unreleased]
++
+ ### Added
+ 
+ - Added `webSearchProvider` setting to override auto-detection priority (Exa > Perplexity > Anthropic)
+@@ -22,6 +23,7 @@
+ 
+ ### Changed
+ 
++- Refactored tool renderers to be co-located with their respective tool implementations for improved code organization
+ - Changed web search to try all configured providers in sequence with fallback before reporting errors
+ - Changed default Anthropic web search model from `claude-sonnet-4-5-20250514` to `claude-haiku-4-5`
+ - Changed read tool to show first 50KB of oversized lines instead of directing users to bash sed
+diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
+index 4fb990b45..4390b1327 100644
+--- a/packages/coding-agent/src/core/system-prompt.ts
++++ b/packages/coding-agent/src/core/system-prompt.ts
+@@ -145,12 +145,20 @@ function generateAntiBashRules(tools: ToolName[]): string | null {
+ 	if (hasGit) {
+ 		lines.push("\n### Git Tool — Preferred for Git Operations");
+ 		lines.push("Use `git` instead of bash git when you need:");
+-		lines.push("- **Status/diff/log**: `git { operation: 'status' }`, `git { operation: 'diff' }`, `git { operation: 'log' }`");
+-		lines.push("- **Commit workflow**: `git { operation: 'add', paths: [...] }` then `git { operation: 'commit', message: '...' }`");
++		lines.push(
++			"- **Status/diff/log**: `git { operation: 'status' }`, `git { operation: 'diff' }`, `git { operation: 'log' }`",
++		);
++		lines.push(
++			"- **Commit workflow**: `git { operation: 'add', paths: [...] }` then `git { operation: 'commit', message: '...' }`",
++		);
+ 		lines.push("- **Branching**: `git { operation: 'branch', action: 'create', name: '...' }`");
+ 		lines.push("- **GitHub PRs**: `git { operation: 'pr', action: 'create', title: '...', body: '...' }`");
+-		lines.push("- **GitHub Issues**: `git { operation: 'issue', action: 'list' }` or `{ operation: 'issue', number: 123 }`");
+-		lines.push("The git tool provides typed output, safety guards, and a clean API for all git and GitHub operations.\n");
++		lines.push(
++			"- **GitHub Issues**: `git { operation: 'issue', action: 'list' }` or `{ operation: 'issue', number: 123 }`",
++		);
++		lines.push(
++			"The git tool provides typed output, safety guards, and a clean API for all git and GitHub operations.\n",
++		);
+ 	}
+ 
+ 	// Add search-first protocol
+diff --git a/packages/coding-agent/src/core/tools/ask.ts b/packages/coding-agent/src/core/tools/ask.ts
+index 0e7e0ad41..60d11055f 100644
+--- a/packages/coding-agent/src/core/tools/ask.ts
++++ b/packages/coding-agent/src/core/tools/ask.ts
+@@ -16,9 +16,13 @@
+  */
+ 
+ import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
+-import { theme } from "../../modes/interactive/theme/theme";
++import { type Theme, theme } from "../../modes/interactive/theme/theme";
+ import askDescription from "../../prompts/tools/ask.md" with { type: "text" };
++import type { RenderResultOptions } from "../custom-tools/types";
++import { formatErrorMessage, formatMeta } from "./render-utils";
+ 
+ // =============================================================================
+ // Types
+@@ -191,3 +195,86 @@ export function createAskTool(_cwd: string): AgentTool<typeof askSchema, AskTool
+ 
+ /** Default ask tool using process.cwd() - for backwards compatibility (no UI) */
+ export const askTool = createAskTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface AskRenderArgs {
++	question: string;
++	options?: Array<{ label: string }>;
++	multi?: boolean;
++}
++
++export const askToolRenderer = {
++	renderCall(args: AskRenderArgs, uiTheme: Theme): Component {
++		if (!args.question) {
++			return new Text(formatErrorMessage("No question provided", uiTheme), 0, 0);
++		}
++
++		const label = uiTheme.fg("toolTitle", uiTheme.bold("Ask"));
++		let text = `${label} ${uiTheme.fg("accent", args.question)}`;
++
++		const meta: string[] = [];
++		if (args.multi) meta.push("multi");
++		if (args.options?.length) meta.push(`options:${args.options.length}`);
++		text += formatMeta(meta, uiTheme);
++
++		if (args.options?.length) {
++			for (let i = 0; i < args.options.length; i++) {
++				const opt = args.options[i];
++				const isLast = i === args.options.length - 1;
++				const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++				text += `\n ${uiTheme.fg("dim", branch)} ${uiTheme.fg(
++					"dim",
++					uiTheme.checkbox.unchecked,
++				)} ${uiTheme.fg("muted", opt.label)}`;
++			}
++		}
++
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails },
++		_opts: RenderResultOptions,
++		uiTheme: Theme,
++	): Component {
++		const { details } = result;
++		if (!details) {
++			const txt = result.content[0];
++			return new Text(txt?.type === "text" && txt.text ? txt.text : "", 0, 0);
++		}
++
++		const hasSelection = details.customInput || details.selectedOptions.length > 0;
++		const statusIcon = hasSelection
++			? uiTheme.styledSymbol("status.success", "success")
++			: uiTheme.styledSymbol("status.warning", "warning");
++
++		let text = `${statusIcon} ${uiTheme.fg("accent", details.question)}`;
++
++		if (details.customInput) {
++			text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.styledSymbol(
++				"status.success",
++				"success",
++			)} ${uiTheme.fg("toolOutput", details.customInput)}`;
++		} else if (details.selectedOptions.length > 0) {
++			const selected = details.selectedOptions;
++			for (let i = 0; i < selected.length; i++) {
++				const isLast = i === selected.length - 1;
++				const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++				text += `\n ${uiTheme.fg("dim", branch)} ${uiTheme.fg(
++					"success",
++					uiTheme.checkbox.checked,
++				)} ${uiTheme.fg("toolOutput", selected[i])}`;
++			}
++		} else {
++			text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.styledSymbol(
++				"status.warning",
++				"warning",
++			)} ${uiTheme.fg("warning", "Cancelled")}`;
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/bash.ts b/packages/coding-agent/src/core/tools/bash.ts
+index a4131f1c9..8891aba39 100644
+--- a/packages/coding-agent/src/core/tools/bash.ts
++++ b/packages/coding-agent/src/core/tools/bash.ts
+@@ -1,7 +1,12 @@
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
++import type { Theme } from "../../modes/interactive/theme/theme";
+ import bashDescription from "../../prompts/tools/bash.md" with { type: "text" };
+ import { executeBash } from "../bash-executor";
++import type { RenderResultOptions } from "../custom-tools/types";
++import { formatBytes, wrapBrackets } from "./render-utils";
+ import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateTail } from "./truncate";
+ 
+ const bashSchema = Type.Object({
+@@ -89,3 +94,104 @@ export function createBashTool(cwd: string): AgentTool<typeof bashSchema> {
+ 
+ /** Default bash tool using process.cwd() - for backwards compatibility */
+ export const bashTool = createBashTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface BashRenderArgs {
++	command?: string;
++	timeout?: number;
++}
++
++interface BashRenderContext {
++	/** Visual lines for truncated output (pre-computed by tool-execution) */
++	visualLines?: string[];
++	/** Number of lines skipped */
++	skippedCount?: number;
++	/** Total visual lines */
++	totalVisualLines?: number;
++}
++
++export const bashToolRenderer = {
++	renderCall(args: BashRenderArgs, uiTheme: Theme): Component {
++		const command = args.command || uiTheme.format.ellipsis;
++		const text = uiTheme.fg("toolTitle", uiTheme.bold(`$ ${command}`));
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: {
++			content: Array<{ type: string; text?: string }>;
++			details?: BashToolDetails;
++		},
++		options: RenderResultOptions & { renderContext?: BashRenderContext },
++		uiTheme: Theme,
++	): Component {
++		const { expanded, renderContext } = options;
++		const details = result.details;
++		const lines: string[] = [];
++
++		// Get output text
++		const textContent = result.content?.find((c) => c.type === "text")?.text ?? "";
++		const output = textContent.trim();
++
++		if (output) {
++			if (expanded) {
++				// Show all lines when expanded
++				const styledOutput = output
++					.split("\n")
++					.map((line) => uiTheme.fg("toolOutput", line))
++					.join("\n");
++				lines.push(styledOutput);
++			} else if (renderContext?.visualLines) {
++				// Use pre-computed visual lines from tool-execution
++				const { visualLines, skippedCount = 0, totalVisualLines = visualLines.length } = renderContext;
++				if (skippedCount > 0) {
++					lines.push(
++						uiTheme.fg(
++							"dim",
++							`${uiTheme.format.ellipsis} (${skippedCount} earlier lines, showing ${visualLines.length} of ${totalVisualLines}) (ctrl+o to expand)`,
++						),
++					);
++				}
++				lines.push(...visualLines);
++			} else {
++				// Fallback: show first few lines
++				const outputLines = output.split("\n");
++				const maxLines = 5;
++				const displayLines = outputLines.slice(0, maxLines);
++				const remaining = outputLines.length - maxLines;
++
++				lines.push(...displayLines.map((line) => uiTheme.fg("toolOutput", line)));
++				if (remaining > 0) {
++					lines.push(uiTheme.fg("dim", `${uiTheme.format.ellipsis} (${remaining} more lines) (ctrl+o to expand)`));
++				}
++			}
++		}
++
++		// Truncation warnings
++		const truncation = details?.truncation;
++		const fullOutputPath = details?.fullOutputPath;
++		if (truncation?.truncated || fullOutputPath) {
++			const warnings: string[] = [];
++			if (fullOutputPath) {
++				warnings.push(`Full output: ${fullOutputPath}`);
++			}
++			if (truncation?.truncated) {
++				if (truncation.truncatedBy === "lines") {
++					warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
++				} else {
++					warnings.push(
++						`Truncated: ${truncation.outputLines} lines shown (${formatBytes(
++							truncation.maxBytes ?? DEFAULT_MAX_BYTES,
++						)} limit)`,
++					);
++				}
++			}
++			lines.push(uiTheme.fg("warning", wrapBrackets(warnings.join(". "), uiTheme)));
++		}
++
++		return new Text(lines.join("\n"), 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/edit.ts b/packages/coding-agent/src/core/tools/edit.ts
+index 95cd6bb2c..df6f023c0 100644
+--- a/packages/coding-agent/src/core/tools/edit.ts
++++ b/packages/coding-agent/src/core/tools/edit.ts
+@@ -1,9 +1,15 @@
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
++import { getLanguageFromPath, type Theme } from "../../modes/interactive/theme/theme";
+ import editDescription from "../../prompts/tools/edit.md" with { type: "text" };
++import type { RenderResultOptions } from "../custom-tools/types";
+ import {
+ 	DEFAULT_FUZZY_THRESHOLD,
+ 	detectLineEnding,
++	type EditDiffError,
++	type EditDiffResult,
+ 	EditMatchError,
+ 	findEditMatch,
+ 	generateDiffString,
+@@ -13,6 +19,14 @@ import {
+ } from "./edit-diff";
+ import { type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "./lsp/index";
+ import { resolveToCwd } from "./path-utils";
++import {
++	formatDiagnostics,
++	formatDiffStats,
++	getDiffStats,
++	shortenPath,
++	truncateDiffByHunk,
++	wrapBrackets,
++} from "./render-utils";
+ 
+ const editSchema = Type.Object({
+ 	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+@@ -191,3 +205,130 @@ export function createEditTool(cwd: string, options: EditToolOptions = {}): Agen
+ 
+ /** Default edit tool using process.cwd() - for backwards compatibility */
+ export const editTool = createEditTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface EditRenderArgs {
++	path?: string;
++	file_path?: string;
++	oldText?: string;
++	newText?: string;
++	all?: boolean;
++}
++
++/** Extended context for edit tool rendering */
++export interface EditRenderContext {
++	/** Pre-computed diff preview (computed before tool executes) */
++	editDiffPreview?: EditDiffResult | EditDiffError;
++	/** Function to render diff text with syntax highlighting */
++	renderDiff?: (diffText: string, options?: { filePath?: string }) => string;
++}
++
++const EDIT_DIFF_PREVIEW_HUNKS = 2;
++const EDIT_DIFF_PREVIEW_LINES = 24;
++
++function countLines(text: string): number {
++	if (!text) return 0;
++	return text.split("\n").length;
++}
++
++function formatMetadataLine(lineCount: number | null, language: string | undefined, uiTheme: Theme): string {
++	const icon = uiTheme.getLangIcon(language);
++	if (lineCount !== null) {
++		return uiTheme.fg("dim", `${icon} ${lineCount} lines`);
++	}
++	return uiTheme.fg("dim", `${icon}`);
++}
++
++export const editToolRenderer = {
++	renderCall(args: EditRenderArgs, uiTheme: Theme): Component {
++		const rawPath = args.file_path || args.path || "";
++		const filePath = shortenPath(rawPath);
++		const editLanguage = getLanguageFromPath(rawPath) ?? "text";
++		const editIcon = uiTheme.fg("muted", uiTheme.getLangIcon(editLanguage));
++		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", uiTheme.format.ellipsis);
++
++		const text = `${uiTheme.fg("toolTitle", uiTheme.bold("Edit"))} ${editIcon} ${pathDisplay}`;
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: EditToolDetails; isError?: boolean },
++		options: RenderResultOptions & { renderContext?: EditRenderContext },
++		uiTheme: Theme,
++		args?: EditRenderArgs,
++	): Component {
++		const { expanded, renderContext } = options;
++		const rawPath = args?.file_path || args?.path || "";
++		const filePath = shortenPath(rawPath);
++		const editLanguage = getLanguageFromPath(rawPath) ?? "text";
++		const editIcon = uiTheme.fg("muted", uiTheme.getLangIcon(editLanguage));
++		const editDiffPreview = renderContext?.editDiffPreview;
++		const renderDiffFn = renderContext?.renderDiff ?? ((t: string) => t);
++
++		// Build path display with line number if available
++		let pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", uiTheme.format.ellipsis);
++		const firstChangedLine =
++			(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
++			(result.details && !result.isError ? result.details.firstChangedLine : undefined);
++		if (firstChangedLine) {
++			pathDisplay += uiTheme.fg("warning", `:${firstChangedLine}`);
++		}
++
++		let text = `${uiTheme.fg("toolTitle", uiTheme.bold("Edit"))} ${editIcon} ${pathDisplay}`;
++
++		const editLineCount = countLines(args?.newText ?? args?.oldText ?? "");
++		text += `\n${formatMetadataLine(editLineCount, editLanguage, uiTheme)}`;
++
++		if (result.isError) {
++			// Show error from result
++			const errorText = result.content?.find((c) => c.type === "text")?.text ?? "";
++			if (errorText) {
++				text += `\n\n${uiTheme.fg("error", errorText)}`;
++			}
++		} else if (editDiffPreview) {
++			// Use cached diff preview (works both before and after execution)
++			if ("error" in editDiffPreview) {
++				text += `\n\n${uiTheme.fg("error", editDiffPreview.error)}`;
++			} else if (editDiffPreview.diff) {
++				const diffStats = getDiffStats(editDiffPreview.diff);
++				text += `\n${uiTheme.fg("dim", uiTheme.format.bracketLeft)}${formatDiffStats(
++					diffStats.added,
++					diffStats.removed,
++					diffStats.hunks,
++					uiTheme,
++				)}${uiTheme.fg("dim", uiTheme.format.bracketRight)}`;
++
++				const {
++					text: diffText,
++					hiddenHunks,
++					hiddenLines,
++				} = expanded
++					? { text: editDiffPreview.diff, hiddenHunks: 0, hiddenLines: 0 }
++					: truncateDiffByHunk(editDiffPreview.diff, EDIT_DIFF_PREVIEW_HUNKS, EDIT_DIFF_PREVIEW_LINES);
++
++				text += `\n\n${renderDiffFn(diffText, { filePath: rawPath })}`;
++				if (!expanded && (hiddenHunks > 0 || hiddenLines > 0)) {
++					const remainder: string[] = [];
++					if (hiddenHunks > 0) remainder.push(`${hiddenHunks} more hunks`);
++					if (hiddenLines > 0) remainder.push(`${hiddenLines} more lines`);
++					text += uiTheme.fg(
++						"toolOutput",
++						`\n${uiTheme.format.ellipsis} (${remainder.join(", ")}) ${wrapBrackets("Ctrl+O to expand", uiTheme)}`,
++					);
++				}
++			}
++		}
++
++		// Show LSP diagnostics if available
++		if (result.details?.diagnostics) {
++			text += formatDiagnostics(result.details.diagnostics, expanded, uiTheme, (fp) =>
++				uiTheme.getLangIcon(getLanguageFromPath(fp)),
++			);
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/find.ts b/packages/coding-agent/src/core/tools/find.ts
+index 456354569..bce425541 100644
+--- a/packages/coding-agent/src/core/tools/find.ts
++++ b/packages/coding-agent/src/core/tools/find.ts
+@@ -1,12 +1,27 @@
+ import { existsSync, type Stats, statSync } from "node:fs";
+ import path from "node:path";
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
+ import { globSync } from "glob";
++import { getLanguageFromPath, type Theme } from "../../modes/interactive/theme/theme";
+ import findDescription from "../../prompts/tools/find.md" with { type: "text" };
+ import { ensureTool } from "../../utils/tools-manager";
++import type { RenderResultOptions } from "../custom-tools/types";
+ import { untilAborted } from "../utils";
+ import { resolveToCwd } from "./path-utils";
++import {
++	formatCount,
++	formatEmptyMessage,
++	formatErrorMessage,
++	formatExpandHint,
++	formatMeta,
++	formatMoreItems,
++	formatScope,
++	formatTruncationSuffix,
++	PREVIEW_LIMITS,
++} from "./render-utils";
+ import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate";
+ 
+ const findSchema = Type.Object({
+@@ -248,3 +263,143 @@ export function createFindTool(cwd: string): AgentTool<typeof findSchema> {
+ 
+ /** Default find tool using process.cwd() - for backwards compatibility */
+ export const findTool = createFindTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface FindRenderArgs {
++	pattern: string;
++	path?: string;
++	type?: string;
++	hidden?: boolean;
++	sortByMtime?: boolean;
++	limit?: number;
++}
++
++const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
++
++export const findToolRenderer = {
++	renderCall(args: FindRenderArgs, uiTheme: Theme): Component {
++		const label = uiTheme.fg("toolTitle", uiTheme.bold("Find"));
++		let text = `${label} ${uiTheme.fg("accent", args.pattern || "*")}`;
++
++		const meta: string[] = [];
++		if (args.path) meta.push(`in ${args.path}`);
++		if (args.type && args.type !== "all") meta.push(`type:${args.type}`);
++		if (args.hidden) meta.push("hidden");
++		if (args.sortByMtime) meta.push("sort:mtime");
++		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
++
++		text += formatMeta(meta, uiTheme);
++
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: FindToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++	): Component {
++		const details = result.details;
++
++		if (details?.error) {
++			return new Text(formatErrorMessage(details.error, uiTheme), 0, 0);
++		}
++
++		const hasDetailedData = details?.fileCount !== undefined;
++		const textContent = result.content?.find((c) => c.type === "text")?.text;
++
++		if (!hasDetailedData) {
++			if (!textContent || textContent.includes("No files matching") || textContent.trim() === "") {
++				return new Text(formatEmptyMessage("No files found", uiTheme), 0, 0);
++			}
++
++			const lines = textContent.split("\n").filter((l) => l.trim());
++			const maxLines = expanded ? lines.length : Math.min(lines.length, COLLAPSED_LIST_LIMIT);
++			const displayLines = lines.slice(0, maxLines);
++			const remaining = lines.length - maxLines;
++			const hasMore = remaining > 0;
++
++			const icon = uiTheme.styledSymbol("status.success", "success");
++			const summary = formatCount("file", lines.length);
++			const expandHint = formatExpandHint(expanded, hasMore, uiTheme);
++			let text = `${icon} ${uiTheme.fg("dim", summary)}${expandHint}`;
++
++			for (let i = 0; i < displayLines.length; i++) {
++				const isLast = i === displayLines.length - 1 && remaining === 0;
++				const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++				text += `\n ${uiTheme.fg("dim", branch)} ${uiTheme.fg("accent", displayLines[i])}`;
++			}
++			if (remaining > 0) {
++				text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++					"muted",
++					formatMoreItems(remaining, "file", uiTheme),
++				)}`;
++			}
++			return new Text(text, 0, 0);
++		}
++
++		const fileCount = details?.fileCount ?? 0;
++		const truncated = details?.truncated ?? details?.truncation?.truncated ?? false;
++		const files = details?.files ?? [];
++
++		if (fileCount === 0) {
++			return new Text(formatEmptyMessage("No files found", uiTheme), 0, 0);
++		}
++
++		const icon = uiTheme.styledSymbol("status.success", "success");
++		const summaryText = formatCount("file", fileCount);
++		const scopeLabel = formatScope(details?.scopePath, uiTheme);
++		const maxFiles = expanded ? files.length : Math.min(files.length, COLLAPSED_LIST_LIMIT);
++		const hasMoreFiles = files.length > maxFiles;
++		const expandHint = formatExpandHint(expanded, hasMoreFiles, uiTheme);
++
++		let text = `${icon} ${uiTheme.fg("dim", summaryText)}${formatTruncationSuffix(
++			truncated,
++			uiTheme,
++		)}${scopeLabel}${expandHint}`;
++
++		const truncationReasons: string[] = [];
++		if (details?.resultLimitReached) {
++			truncationReasons.push(`limit ${details.resultLimitReached} results`);
++		}
++		if (details?.truncation?.truncated) {
++			truncationReasons.push("size limit");
++		}
++
++		const hasTruncation = truncationReasons.length > 0;
++
++		if (files.length > 0) {
++			for (let i = 0; i < maxFiles; i++) {
++				const isLast = i === maxFiles - 1 && !hasMoreFiles && !hasTruncation;
++				const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++				const entry = files[i];
++				const isDir = entry.endsWith("/");
++				const entryPath = isDir ? entry.slice(0, -1) : entry;
++				const lang = isDir ? undefined : getLanguageFromPath(entryPath);
++				const entryIcon = isDir
++					? uiTheme.fg("accent", uiTheme.icon.folder)
++					: uiTheme.fg("muted", uiTheme.getLangIcon(lang));
++				text += `\n ${uiTheme.fg("dim", branch)} ${entryIcon} ${uiTheme.fg("accent", entry)}`;
++			}
++
++			if (hasMoreFiles) {
++				const moreFilesBranch = hasTruncation ? uiTheme.tree.branch : uiTheme.tree.last;
++				text += `\n ${uiTheme.fg("dim", moreFilesBranch)} ${uiTheme.fg(
++					"muted",
++					formatMoreItems(files.length - maxFiles, "file", uiTheme),
++				)}`;
++			}
++		}
++
++		if (hasTruncation) {
++			text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++				"warning",
++				`truncated: ${truncationReasons.join(", ")}`,
++			)}`;
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/grep.ts b/packages/coding-agent/src/core/tools/grep.ts
+index 22e0e8ad7..fdceda134 100644
+--- a/packages/coding-agent/src/core/tools/grep.ts
++++ b/packages/coding-agent/src/core/tools/grep.ts
+@@ -1,11 +1,26 @@
+ import { readFileSync, type Stats, statSync } from "node:fs";
+ import nodePath from "node:path";
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
+ import type { Subprocess } from "bun";
++import { getLanguageFromPath, type Theme } from "../../modes/interactive/theme/theme";
+ import grepDescription from "../../prompts/tools/grep.md" with { type: "text" };
+ import { ensureTool } from "../../utils/tools-manager";
++import type { RenderResultOptions } from "../custom-tools/types";
+ import { resolveToCwd } from "./path-utils";
++import {
++	formatCount,
++	formatEmptyMessage,
++	formatErrorMessage,
++	formatExpandHint,
++	formatMeta,
++	formatMoreItems,
++	formatScope,
++	formatTruncationSuffix,
++	PREVIEW_LIMITS,
++} from "./render-utils";
+ import {
+ 	DEFAULT_MAX_BYTES,
+ 	formatSize,
+@@ -582,3 +597,179 @@ export function createGrepTool(cwd: string): AgentTool<typeof grepSchema> {
+ 
+ /** Default grep tool using process.cwd() - for backwards compatibility */
+ export const grepTool = createGrepTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface GrepRenderArgs {
++	pattern: string;
++	path?: string;
++	glob?: string;
++	type?: string;
++	ignoreCase?: boolean;
++	caseSensitive?: boolean;
++	literal?: boolean;
++	multiline?: boolean;
++	context?: number;
++	limit?: number;
++	outputMode?: string;
++}
++
++const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
++const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
++
++export const grepToolRenderer = {
++	renderCall(args: GrepRenderArgs, uiTheme: Theme): Component {
++		const label = uiTheme.fg("toolTitle", uiTheme.bold("Grep"));
++		let text = `${label} ${uiTheme.fg("accent", args.pattern || "?")}`;
++
++		const meta: string[] = [];
++		if (args.path) meta.push(`in ${args.path}`);
++		if (args.glob) meta.push(`glob:${args.glob}`);
++		if (args.type) meta.push(`type:${args.type}`);
++		if (args.outputMode && args.outputMode !== "files_with_matches") meta.push(`mode:${args.outputMode}`);
++		if (args.caseSensitive) {
++			meta.push("case:sensitive");
++		} else if (args.ignoreCase) {
++			meta.push("case:insensitive");
++		}
++		if (args.literal) meta.push("literal");
++		if (args.multiline) meta.push("multiline");
++		if (args.context !== undefined) meta.push(`context:${args.context}`);
++		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
++
++		text += formatMeta(meta, uiTheme);
++
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: GrepToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++	): Component {
++		const details = result.details;
++
++		if (details?.error) {
++			return new Text(formatErrorMessage(details.error, uiTheme), 0, 0);
++		}
++
++		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
++
++		if (!hasDetailedData) {
++			const textContent = result.content?.find((c) => c.type === "text")?.text;
++			if (!textContent || textContent === "No matches found") {
++				return new Text(formatEmptyMessage("No matches found", uiTheme), 0, 0);
++			}
++
++			const lines = textContent.split("\n").filter((line) => line.trim() !== "");
++			const maxLines = expanded ? lines.length : Math.min(lines.length, COLLAPSED_TEXT_LIMIT);
++			const displayLines = lines.slice(0, maxLines);
++			const remaining = lines.length - maxLines;
++			const hasMore = remaining > 0;
++
++			const icon = uiTheme.styledSymbol("status.success", "success");
++			const summary = formatCount("item", lines.length);
++			const expandHint = formatExpandHint(expanded, hasMore, uiTheme);
++			let text = `${icon} ${uiTheme.fg("dim", summary)}${expandHint}`;
++
++			for (let i = 0; i < displayLines.length; i++) {
++				const isLast = i === displayLines.length - 1 && remaining === 0;
++				const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++				text += `\n ${uiTheme.fg("dim", branch)} ${uiTheme.fg("toolOutput", displayLines[i])}`;
++			}
++
++			if (remaining > 0) {
++				text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++					"muted",
++					formatMoreItems(remaining, "item", uiTheme),
++				)}`;
++			}
++
++			return new Text(text, 0, 0);
++		}
++
++		const matchCount = details?.matchCount ?? 0;
++		const fileCount = details?.fileCount ?? 0;
++		const mode = details?.mode ?? "files_with_matches";
++		const truncated = details?.truncated ?? details?.truncation?.truncated ?? false;
++		const files = details?.files ?? [];
++
++		if (matchCount === 0) {
++			return new Text(formatEmptyMessage("No matches found", uiTheme), 0, 0);
++		}
++
++		const icon = uiTheme.styledSymbol("status.success", "success");
++		const summaryParts =
++			mode === "files_with_matches"
++				? [formatCount("file", fileCount)]
++				: [formatCount("match", matchCount), formatCount("file", fileCount)];
++		const summaryText = summaryParts.join(uiTheme.sep.dot);
++		const scopeLabel = formatScope(details?.scopePath, uiTheme);
++
++		const fileEntries: Array<{ path: string; count?: number }> = details?.fileMatches?.length
++			? details.fileMatches.map((entry) => ({ path: entry.path, count: entry.count }))
++			: files.map((path) => ({ path }));
++		const maxFiles = expanded ? fileEntries.length : Math.min(fileEntries.length, COLLAPSED_LIST_LIMIT);
++		const hasMoreFiles = fileEntries.length > maxFiles;
++		const expandHint = formatExpandHint(expanded, hasMoreFiles, uiTheme);
++
++		let text = `${icon} ${uiTheme.fg("dim", summaryText)}${formatTruncationSuffix(
++			truncated,
++			uiTheme,
++		)}${scopeLabel}${expandHint}`;
++
++		const truncationReasons: string[] = [];
++		if (details?.matchLimitReached) {
++			truncationReasons.push(`limit ${details.matchLimitReached} matches`);
++		}
++		if (details?.headLimitReached) {
++			truncationReasons.push(`head limit ${details.headLimitReached}`);
++		}
++		if (details?.truncation?.truncated) {
++			truncationReasons.push("size limit");
++		}
++		if (details?.linesTruncated) {
++			truncationReasons.push("line length");
++		}
++
++		const hasTruncation = truncationReasons.length > 0;
++
++		if (fileEntries.length > 0) {
++			for (let i = 0; i < maxFiles; i++) {
++				const entry = fileEntries[i];
++				const isLast = i === maxFiles - 1 && !hasMoreFiles && !hasTruncation;
++				const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++				const isDir = entry.path.endsWith("/");
++				const entryPath = isDir ? entry.path.slice(0, -1) : entry.path;
++				const lang = isDir ? undefined : getLanguageFromPath(entryPath);
++				const entryIcon = isDir
++					? uiTheme.fg("accent", uiTheme.icon.folder)
++					: uiTheme.fg("muted", uiTheme.getLangIcon(lang));
++				const countLabel =
++					entry.count !== undefined
++						? ` ${uiTheme.fg("dim", `(${entry.count} match${entry.count !== 1 ? "es" : ""})`)}`
++						: "";
++				text += `\n ${uiTheme.fg("dim", branch)} ${entryIcon} ${uiTheme.fg("accent", entry.path)}${countLabel}`;
++			}
++
++			if (hasMoreFiles) {
++				const moreFilesBranch = hasTruncation ? uiTheme.tree.branch : uiTheme.tree.last;
++				text += `\n ${uiTheme.fg("dim", moreFilesBranch)} ${uiTheme.fg(
++					"muted",
++					formatMoreItems(fileEntries.length - maxFiles, "file", uiTheme),
++				)}`;
++			}
++		}
++
++		if (hasTruncation) {
++			text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++				"warning",
++				`truncated: ${truncationReasons.join(", ")}`,
++			)}`;
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/ls.ts b/packages/coding-agent/src/core/tools/ls.ts
+index c2d8aeabf..768f11e93 100644
+--- a/packages/coding-agent/src/core/tools/ls.ts
++++ b/packages/coding-agent/src/core/tools/ls.ts
+@@ -1,10 +1,24 @@
+ import { existsSync, readdirSync, statSync } from "node:fs";
+ import nodePath from "node:path";
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
++import { getLanguageFromPath, type Theme } from "../../modes/interactive/theme/theme";
++import type { RenderResultOptions } from "../custom-tools/types";
+ import { untilAborted } from "../utils";
+ import { resolveToCwd } from "./path-utils";
+-import { formatAge } from "./render-utils";
++import {
++	formatAge,
++	formatBytes,
++	formatCount,
++	formatEmptyMessage,
++	formatExpandHint,
++	formatMeta,
++	formatMoreItems,
++	formatTruncationSuffix,
++	PREVIEW_LIMITS,
++} from "./render-utils";
+ import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate";
+ 
+ const lsSchema = Type.Object({
+@@ -147,3 +161,122 @@ export function createLsTool(cwd: string): AgentTool<typeof lsSchema> {
+ 
+ /** Default ls tool using process.cwd() - for backwards compatibility */
+ export const lsTool = createLsTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface LsRenderArgs {
++	path?: string;
++	limit?: number;
++}
++
++const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
++
++export const lsToolRenderer = {
++	renderCall(args: LsRenderArgs, uiTheme: Theme): Component {
++		const label = uiTheme.fg("toolTitle", uiTheme.bold("Ls"));
++		let text = `${label} ${uiTheme.fg("accent", args.path || ".")}`;
++
++		const meta: string[] = [];
++		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
++		text += formatMeta(meta, uiTheme);
++
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: LsToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++	): Component {
++		const details = result.details;
++		const textContent = result.content?.find((c) => c.type === "text")?.text ?? "";
++
++		if (
++			(!textContent || textContent.trim() === "" || textContent.trim() === "(empty directory)") &&
++			(!details?.entries || details.entries.length === 0)
++		) {
++			return new Text(formatEmptyMessage("Empty directory", uiTheme), 0, 0);
++		}
++
++		let entries: string[] = details?.entries ? [...details.entries] : [];
++		if (entries.length === 0) {
++			const rawLines = textContent.split("\n").filter((l: string) => l.trim());
++			entries = rawLines.filter((line) => !/^\[.*\]$/.test(line.trim()));
++		}
++
++		if (entries.length === 0) {
++			return new Text(formatEmptyMessage("Empty directory", uiTheme), 0, 0);
++		}
++
++		let dirCount = details?.dirCount;
++		let fileCount = details?.fileCount;
++		if (dirCount === undefined || fileCount === undefined) {
++			dirCount = 0;
++			fileCount = 0;
++			for (const entry of entries) {
++				if (entry.endsWith("/")) {
++					dirCount += 1;
++				} else {
++					fileCount += 1;
++				}
++			}
++		}
++
++		const truncated = Boolean(details?.truncation?.truncated || details?.entryLimitReached);
++		const icon = truncated
++			? uiTheme.styledSymbol("status.warning", "warning")
++			: uiTheme.styledSymbol("status.success", "success");
++
++		const summaryText = [formatCount("dir", dirCount ?? 0), formatCount("file", fileCount ?? 0)].join(
++			uiTheme.sep.dot,
++		);
++		const maxEntries = expanded ? entries.length : Math.min(entries.length, COLLAPSED_LIST_LIMIT);
++		const hasMoreEntries = entries.length > maxEntries;
++		const expandHint = formatExpandHint(expanded, hasMoreEntries, uiTheme);
++
++		let text = `${icon} ${uiTheme.fg("dim", summaryText)}${formatTruncationSuffix(truncated, uiTheme)}${expandHint}`;
++
++		const truncationReasons: string[] = [];
++		if (details?.entryLimitReached) {
++			truncationReasons.push(`entry limit ${details.entryLimitReached}`);
++		}
++		if (details?.truncation?.truncated) {
++			truncationReasons.push(`output cap ${formatBytes(details.truncation.maxBytes)}`);
++		}
++
++		const hasTruncation = truncationReasons.length > 0;
++
++		for (let i = 0; i < maxEntries; i++) {
++			const entry = entries[i];
++			const isLast = i === maxEntries - 1 && !hasMoreEntries && !hasTruncation;
++			const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++			const isDir = entry.endsWith("/");
++			const entryPath = isDir ? entry.slice(0, -1) : entry;
++			const lang = isDir ? undefined : getLanguageFromPath(entryPath);
++			const entryIcon = isDir
++				? uiTheme.fg("accent", uiTheme.icon.folder)
++				: uiTheme.fg("muted", uiTheme.getLangIcon(lang));
++			const entryColor = isDir ? "accent" : "toolOutput";
++			text += `\n ${uiTheme.fg("dim", branch)} ${entryIcon} ${uiTheme.fg(entryColor, entry)}`;
++		}
++
++		if (hasMoreEntries) {
++			const moreEntriesBranch = hasTruncation ? uiTheme.tree.branch : uiTheme.tree.last;
++			text += `\n ${uiTheme.fg("dim", moreEntriesBranch)} ${uiTheme.fg(
++				"muted",
++				formatMoreItems(entries.length - maxEntries, "entry", uiTheme),
++			)}`;
++		}
++
++		if (hasTruncation) {
++			text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++				"warning",
++				`truncated: ${truncationReasons.join(", ")}`,
++			)}`;
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/lsp/render.ts b/packages/coding-agent/src/core/tools/lsp/render.ts
+index 1954fff1e..fbb32b4d0 100644
+--- a/packages/coding-agent/src/core/tools/lsp/render.ts
++++ b/packages/coding-agent/src/core/tools/lsp/render.ts
+@@ -550,3 +550,8 @@ function severityToColor(severity: string): "error" | "warning" | "accent" | "di
+ 			return "dim";
+ 	}
+ }
++
++export const lspToolRenderer = {
++	renderCall,
++	renderResult,
++};
+diff --git a/packages/coding-agent/src/core/tools/notebook.ts b/packages/coding-agent/src/core/tools/notebook.ts
+index a68321a53..c8fb0011a 100644
+--- a/packages/coding-agent/src/core/tools/notebook.ts
++++ b/packages/coding-agent/src/core/tools/notebook.ts
+@@ -1,7 +1,19 @@
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
++import type { Theme } from "../../modes/interactive/theme/theme";
++import type { RenderResultOptions } from "../custom-tools/types";
+ import { untilAborted } from "../utils";
+ import { resolveToCwd } from "./path-utils";
++import {
++	formatCount,
++	formatErrorMessage,
++	formatExpandHint,
++	formatMeta,
++	formatMoreItems,
++	PREVIEW_LIMITS,
++} from "./render-utils";
+ 
+ const notebookSchema = Type.Object({
+ 	action: Type.Union([Type.Literal("edit"), Type.Literal("insert"), Type.Literal("delete")], {
+@@ -180,3 +192,101 @@ export function createNotebookTool(cwd: string): AgentTool<typeof notebookSchema
+ 
+ /** Default notebook tool using process.cwd() */
+ export const notebookTool = createNotebookTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface NotebookRenderArgs {
++	action: string;
++	notebookPath: string;
++	cellNumber?: number;
++	cellType?: string;
++	content?: string;
++}
++
++const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
++
++function normalizeCellLines(lines: string[]): string[] {
++	return lines.map((line) => (line.endsWith("\n") ? line.slice(0, -1) : line));
++}
++
++function renderCellPreview(lines: string[], expanded: boolean, uiTheme: Theme): string {
++	const normalized = normalizeCellLines(lines);
++	if (normalized.length === 0) {
++		return `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg("muted", "(empty cell)")}`;
++	}
++
++	const maxLines = expanded ? normalized.length : Math.min(normalized.length, COLLAPSED_TEXT_LIMIT);
++	let text = "";
++
++	for (let i = 0; i < maxLines; i++) {
++		const isLast = i === maxLines - 1 && (expanded || normalized.length <= maxLines);
++		const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++		const line = normalized[i];
++		text += `\n ${uiTheme.fg("dim", branch)} ${uiTheme.fg("toolOutput", line)}`;
++	}
++
++	const remaining = normalized.length - maxLines;
++	if (remaining > 0) {
++		text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++			"muted",
++			formatMoreItems(remaining, "line", uiTheme),
++		)}`;
++	}
++
++	return text;
++}
++
++export const notebookToolRenderer = {
++	renderCall(args: NotebookRenderArgs, uiTheme: Theme): Component {
++		const label = uiTheme.fg("toolTitle", uiTheme.bold("Notebook"));
++		let text = `${label} ${uiTheme.fg("accent", args.action || "?")}`;
++
++		const meta: string[] = [];
++		meta.push(`in ${args.notebookPath || "?"}`);
++		if (args.cellNumber !== undefined) meta.push(`cell:${args.cellNumber}`);
++		if (args.cellType) meta.push(`type:${args.cellType}`);
++
++		text += formatMeta(meta, uiTheme);
++
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: NotebookToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++	): Component {
++		const content = result.content?.[0];
++		if (content?.type === "text" && content.text?.startsWith("Error:")) {
++			return new Text(formatErrorMessage(content.text, uiTheme), 0, 0);
++		}
++
++		const details = result.details;
++		const action = details?.action ?? "edit";
++		const cellIndex = details?.cellIndex;
++		const cellType = details?.cellType;
++		const totalCells = details?.totalCells;
++		const cellSource = details?.cellSource;
++		const lineCount = cellSource?.length;
++		const canExpand = cellSource !== undefined && cellSource.length > COLLAPSED_TEXT_LIMIT;
++
++		const icon = uiTheme.styledSymbol("status.success", "success");
++		const actionLabel = action === "insert" ? "Inserted" : action === "delete" ? "Deleted" : "Edited";
++		const cellLabel = cellType || "cell";
++		const summaryParts = [`${actionLabel} ${cellLabel} at index ${cellIndex ?? "?"}`];
++		if (lineCount !== undefined) summaryParts.push(formatCount("line", lineCount));
++		if (totalCells !== undefined) summaryParts.push(`${totalCells} total`);
++		const summaryText = summaryParts.join(uiTheme.sep.dot);
++
++		const expandHint = formatExpandHint(expanded, canExpand, uiTheme);
++		let text = `${icon} ${uiTheme.fg("dim", summaryText)}${expandHint}`;
++
++		if (cellSource) {
++			text += renderCellPreview(cellSource, expanded, uiTheme);
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/output.ts b/packages/coding-agent/src/core/tools/output.ts
+index 00615abcd..51272328f 100644
+--- a/packages/coding-agent/src/core/tools/output.ts
++++ b/packages/coding-agent/src/core/tools/output.ts
+@@ -8,9 +8,22 @@ import * as fs from "node:fs";
+ import * as path from "node:path";
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+ import type { TextContent } from "@oh-my-pi/pi-ai";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
++import type { Theme } from "../../modes/interactive/theme/theme";
+ import outputDescription from "../../prompts/tools/output.md" with { type: "text" };
++import type { RenderResultOptions } from "../custom-tools/types";
+ import type { SessionContext } from "./index";
++import {
++	formatCount,
++	formatEmptyMessage,
++	formatExpandHint,
++	formatMeta,
++	formatMoreItems,
++	TRUNCATE_LENGTHS,
++	truncate,
++} from "./render-utils";
+ import { getArtifactsDir } from "./task/artifacts";
+ 
+ const outputSchema = Type.Object({
+@@ -242,3 +255,116 @@ export function createOutputTool(
+ 
+ /** Default output tool using process.cwd() - for backwards compatibility */
+ export const outputTool = createOutputTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface OutputRenderArgs {
++	ids: string[];
++	format?: "raw" | "json" | "stripped";
++	offset?: number;
++	limit?: number;
++}
++
++type OutputEntryItem = OutputToolDetails["outputs"][number];
++
++function formatOutputMeta(entry: OutputEntryItem, uiTheme: Theme): string {
++	const metaParts: string[] = [];
++	if (entry.range) {
++		metaParts.push(`lines ${entry.range.startLine}-${entry.range.endLine} of ${entry.range.totalLines}`);
++	} else {
++		metaParts.push(formatCount("line", entry.lineCount));
++	}
++	metaParts.push(formatBytes(entry.charCount));
++	if (entry.provenance) {
++		metaParts.push(`agent ${entry.provenance.agent}(${entry.provenance.index})`);
++	}
++	return uiTheme.fg("dim", metaParts.join(uiTheme.sep.dot));
++}
++
++export const outputToolRenderer = {
++	renderCall(args: OutputRenderArgs, uiTheme: Theme): Component {
++		const ids = args.ids?.join(", ") ?? "?";
++		const label = uiTheme.fg("toolTitle", uiTheme.bold("Output"));
++		let text = `${label} ${uiTheme.fg("accent", ids)}`;
++
++		const meta: string[] = [];
++		if (args.format && args.format !== "raw") meta.push(`format:${args.format}`);
++		if (args.offset !== undefined) meta.push(`offset:${args.offset}`);
++		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
++		text += formatMeta(meta, uiTheme);
++
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: OutputToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++	): Component {
++		const details = result.details;
++
++		if (details?.notFound?.length) {
++			const icon = uiTheme.styledSymbol("status.error", "error");
++			let text = `${icon} ${uiTheme.fg("error", `Error: Not found: ${details.notFound.join(", ")}`)}`;
++			if (details.availableIds?.length) {
++				text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++					"muted",
++					`Available: ${details.availableIds.join(", ")}`,
++				)}`;
++			} else {
++				text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++					"muted",
++					"No outputs available in current session",
++				)}`;
++			}
++			return new Text(text, 0, 0);
++		}
++
++		const outputs = details?.outputs ?? [];
++
++		if (outputs.length === 0) {
++			const textContent = result.content?.find((c) => c.type === "text")?.text;
++			return new Text(formatEmptyMessage(textContent || "No outputs", uiTheme), 0, 0);
++		}
++
++		const icon = uiTheme.styledSymbol("status.success", "success");
++		const summary = `read ${formatCount("output", outputs.length)}`;
++		const previewLimit = expanded ? 3 : 1;
++		const maxOutputs = expanded ? outputs.length : Math.min(outputs.length, 5);
++		const hasMoreOutputs = outputs.length > maxOutputs;
++		const hasMorePreview = outputs.some((o) => (o.previewLines?.length ?? 0) > previewLimit);
++		const expandHint = formatExpandHint(expanded, hasMoreOutputs || hasMorePreview, uiTheme);
++		let text = `${icon} ${uiTheme.fg("dim", summary)}${expandHint}`;
++
++		for (let i = 0; i < maxOutputs; i++) {
++			const o = outputs[i];
++			const isLast = i === maxOutputs - 1 && !hasMoreOutputs;
++			const branch = isLast ? uiTheme.tree.last : uiTheme.tree.branch;
++			text += `\n ${uiTheme.fg("dim", branch)} ${uiTheme.fg("accent", o.id)} ${formatOutputMeta(o, uiTheme)}`;
++
++			const previewLines = o.previewLines ?? [];
++			const shownPreview = previewLines.slice(0, previewLimit);
++			if (shownPreview.length > 0) {
++				const childPrefix = isLast ? "   " : ` ${uiTheme.fg("dim", uiTheme.tree.vertical)} `;
++				for (const line of shownPreview) {
++					const previewText = truncate(line, TRUNCATE_LENGTHS.CONTENT, uiTheme.format.ellipsis);
++					text += `\n${childPrefix}${uiTheme.fg("dim", uiTheme.tree.hook)} ${uiTheme.fg(
++						"muted",
++						"preview:",
++					)} ${uiTheme.fg("toolOutput", previewText)}`;
++				}
++			}
++		}
++
++		if (hasMoreOutputs) {
++			text += `\n ${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg(
++				"muted",
++				formatMoreItems(outputs.length - maxOutputs, "output", uiTheme),
++			)}`;
++		}
++
++		return new Text(text, 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/read.ts b/packages/coding-agent/src/core/tools/read.ts
+index aa4974133..56dde9691 100644
+--- a/packages/coding-agent/src/core/tools/read.ts
++++ b/packages/coding-agent/src/core/tools/read.ts
+@@ -2,15 +2,20 @@ import { existsSync } from "node:fs";
+ import path from "node:path";
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
+ import { globSync } from "glob";
++import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme";
+ import readDescription from "../../prompts/tools/read.md" with { type: "text" };
+ import { formatDimensionNote, resizeImage } from "../../utils/image-resize";
+ import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime";
+ import { ensureTool } from "../../utils/tools-manager";
++import type { RenderResultOptions } from "../custom-tools/types";
+ import { untilAborted } from "../utils";
+ import { createLsTool } from "./ls";
+ import { resolveReadPath, resolveToCwd } from "./path-utils";
++import { replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
+ import {
+ 	DEFAULT_MAX_BYTES,
+ 	DEFAULT_MAX_LINES,
+@@ -559,3 +564,94 @@ export function createReadTool(cwd: string, options?: ReadToolOptions): AgentToo
+ 
+ /** Default read tool using process.cwd() - for backwards compatibility */
+ export const readTool = createReadTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface ReadRenderArgs {
++	path?: string;
++	file_path?: string;
++	offset?: number;
++	limit?: number;
++}
++
++const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff"]);
++const BINARY_EXTENSIONS = new Set(["pdf", "zip", "tar", "gz", "exe", "dll", "so", "dylib", "wasm"]);
++
++function getFileType(filePath: string): "image" | "binary" | "text" {
++	const ext = filePath.split(".").pop()?.toLowerCase();
++	if (!ext) return "text";
++	if (IMAGE_EXTENSIONS.has(ext)) return "image";
++	if (BINARY_EXTENSIONS.has(ext)) return "binary";
++	return "text";
++}
++
++export const readToolRenderer = {
++	renderCall(args: ReadRenderArgs, uiTheme: Theme): Component {
++		const rawPath = args.file_path || args.path || "";
++		const filePath = shortenPath(rawPath);
++		const offset = args.offset;
++		const limit = args.limit;
++
++		let pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", uiTheme.format.ellipsis);
++		if (offset !== undefined || limit !== undefined) {
++			const startLine = offset ?? 1;
++			const endLine = limit !== undefined ? startLine + limit - 1 : "";
++			pathDisplay += uiTheme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
++		}
++
++		const text = `${uiTheme.fg("toolTitle", uiTheme.bold("Read"))} ${pathDisplay}`;
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++		args?: ReadRenderArgs,
++	): Component {
++		const rawPath = args?.file_path || args?.path || "";
++		const fileType = getFileType(rawPath);
++		const details = result.details;
++		const lines: string[] = [];
++
++		const output = result.content?.find((c) => c.type === "text")?.text ?? "";
++
++		if (fileType === "image") {
++			lines.push(uiTheme.fg("muted", "Image rendered below"));
++		} else if (fileType === "binary") {
++			// Binary files just show the header from renderCall
++		} else {
++			// Text file
++			const lang = getLanguageFromPath(rawPath);
++			const contentLines = lang ? highlightCode(replaceTabs(output), lang) : output.split("\n");
++
++			if (expanded) {
++				lines.push(
++					...contentLines.map((line: string) =>
++						lang ? replaceTabs(line) : uiTheme.fg("toolOutput", replaceTabs(line)),
++					),
++				);
++			} else {
++				lines.push(uiTheme.fg("dim", `${uiTheme.nav.expand} Ctrl+O to show content`));
++			}
++
++			// Truncation warning
++			const truncation = details?.truncation;
++			if (truncation?.truncated) {
++				let warning: string;
++				if (truncation.firstLineExceedsLimit) {
++					warning = `First line exceeds ${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`;
++				} else if (truncation.truncatedBy === "lines") {
++					warning = `Truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)`;
++				} else {
++					warning = `Truncated: ${truncation.outputLines} lines (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`;
++				}
++				lines.push(uiTheme.fg("warning", wrapBrackets(warning, uiTheme)));
++			}
++		}
++
++		return new Text(lines.join("\n"), 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/core/tools/render-utils.ts b/packages/coding-agent/src/core/tools/render-utils.ts
+index 69a66d095..f7533147d 100644
+--- a/packages/coding-agent/src/core/tools/render-utils.ts
++++ b/packages/coding-agent/src/core/tools/render-utils.ts
+@@ -204,6 +204,247 @@ export function formatMoreItems(remaining: number, itemType: string, theme: Them
+ 	return `${theme.format.ellipsis} ${safeRemaining} more ${pluralize(itemType, safeRemaining)}`;
+ }
+ 
++export function formatMeta(meta: string[], theme: Theme): string {
++	return meta.length > 0 ? ` ${theme.fg("muted", meta.join(theme.sep.dot))}` : "";
++}
++
++export function formatScope(scopePath: string | undefined, theme: Theme): string {
++	return scopePath ? ` ${theme.fg("muted", `in ${scopePath}`)}` : "";
++}
++
++export function formatTruncationSuffix(truncated: boolean, theme: Theme): string {
++	return truncated ? theme.fg("warning", " (truncated)") : "";
++}
++
++export function formatErrorMessage(message: string | undefined, theme: Theme): string {
++	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
++	return `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${clean || "Unknown error"}`)}`;
++}
++
++export function formatEmptyMessage(message: string, theme: Theme): string {
++	return `${theme.styledSymbol("status.warning", "warning")} ${theme.fg("muted", message)}`;
++}
++
++// =============================================================================
++// Diagnostic Formatting
++// =============================================================================
++
++interface ParsedDiagnostic {
++	filePath: string;
++	line: number;
++	col: number;
++	severity: "error" | "warning" | "info" | "hint";
++	source?: string;
++	message: string;
++	code?: string;
++}
++
++function parseDiagnosticMessage(msg: string): ParsedDiagnostic | null {
++	const match = msg.match(/^(.+?):(\d+):(\d+)\s+\[(\w+)\]\s+(?:\[([^\]]+)\]\s+)?(.+?)(?:\s+\(([^)]+)\))?$/);
++	if (!match) return null;
++	return {
++		filePath: match[1],
++		line: parseInt(match[2], 10),
++		col: parseInt(match[3], 10),
++		severity: match[4] as ParsedDiagnostic["severity"],
++		source: match[5],
++		message: match[6],
++		code: match[7],
++	};
++}
++
++export function formatDiagnostics(
++	diag: { errored: boolean; summary: string; messages: string[] },
++	expanded: boolean,
++	theme: Theme,
++	getLangIcon: (filePath: string) => string,
++): string {
++	if (diag.messages.length === 0) return "";
++
++	const byFile = new Map<string, ParsedDiagnostic[]>();
++	const unparsed: string[] = [];
++
++	for (const msg of diag.messages) {
++		const parsed = parseDiagnosticMessage(msg);
++		if (parsed) {
++			const existing = byFile.get(parsed.filePath) ?? [];
++			existing.push(parsed);
++			byFile.set(parsed.filePath, existing);
++		} else {
++			unparsed.push(msg);
++		}
++	}
++
++	const headerIcon = diag.errored
++		? theme.styledSymbol("status.error", "error")
++		: theme.styledSymbol("status.warning", "warning");
++	let output = `\n\n${headerIcon} ${theme.fg("toolTitle", "Diagnostics")} ${theme.fg("dim", `(${diag.summary})`)}`;
++
++	const maxDiags = expanded ? diag.messages.length : 5;
++	let shown = 0;
++
++	const files = Array.from(byFile.entries());
++	for (let fi = 0; fi < files.length && shown < maxDiags; fi++) {
++		const [filePath, diagnostics] = files[fi];
++		const isLastFile = fi === files.length - 1 && unparsed.length === 0;
++		const fileBranch = isLastFile ? theme.tree.last : theme.tree.branch;
++
++		const fileIcon = theme.fg("muted", getLangIcon(filePath));
++		output += `\n ${theme.fg("dim", fileBranch)} ${fileIcon} ${theme.fg("accent", filePath)}`;
++		shown++;
++
++		for (let di = 0; di < diagnostics.length && shown < maxDiags; di++) {
++			const d = diagnostics[di];
++			const isLastDiag = di === diagnostics.length - 1;
++			const diagBranch = isLastFile
++				? isLastDiag
++					? `   ${theme.tree.last}`
++					: `   ${theme.tree.branch}`
++				: isLastDiag
++					? ` ${theme.tree.vertical} ${theme.tree.last}`
++					: ` ${theme.tree.vertical} ${theme.tree.branch}`;
++
++			const sevIcon =
++				d.severity === "error"
++					? theme.styledSymbol("status.error", "error")
++					: d.severity === "warning"
++						? theme.styledSymbol("status.warning", "warning")
++						: theme.styledSymbol("status.info", "muted");
++			const location = theme.fg("dim", `:${d.line}:${d.col}`);
++			const codeTag = d.code ? theme.fg("dim", ` (${d.code})`) : "";
++			const msgColor = d.severity === "error" ? "error" : d.severity === "warning" ? "warning" : "toolOutput";
++
++			output += `\n ${theme.fg("dim", diagBranch)} ${sevIcon}${location} ${theme.fg(msgColor, d.message)}${codeTag}`;
++			shown++;
++		}
++	}
++
++	for (const msg of unparsed) {
++		if (shown >= maxDiags) break;
++		const color = msg.includes("[error]") ? "error" : msg.includes("[warning]") ? "warning" : "dim";
++		output += `\n ${theme.fg("dim", theme.tree.branch)} ${theme.fg(color, msg)}`;
++		shown++;
++	}
++
++	if (diag.messages.length > shown) {
++		const remaining = diag.messages.length - shown;
++		output += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", `${theme.format.ellipsis} ${remaining} more`)} ${theme.fg("dim", "(Ctrl+O to expand)")}`;
++	}
++
++	return output;
++}
++
++// =============================================================================
++// Diff Utilities
++// =============================================================================
++
++export interface DiffStats {
++	added: number;
++	removed: number;
++	hunks: number;
++	lines: number;
++}
++
++export function getDiffStats(diffText: string): DiffStats {
++	const lines = diffText ? diffText.split("\n") : [];
++	let added = 0;
++	let removed = 0;
++	let hunks = 0;
++	let inHunk = false;
++
++	for (const line of lines) {
++		const isAdded = line.startsWith("+");
++		const isRemoved = line.startsWith("-");
++		const isChange = isAdded || isRemoved;
++
++		if (isAdded) added++;
++		if (isRemoved) removed++;
++
++		if (isChange && !inHunk) {
++			hunks++;
++			inHunk = true;
++		} else if (!isChange) {
++			inHunk = false;
++		}
++	}
++
++	return { added, removed, hunks, lines: lines.length };
++}
++
++export function formatDiffStats(added: number, removed: number, hunks: number, theme: Theme): string {
++	const parts: string[] = [];
++	if (added > 0) parts.push(theme.fg("success", `+${added}`));
++	if (removed > 0) parts.push(theme.fg("error", `-${removed}`));
++	if (hunks > 0) parts.push(theme.fg("dim", `${hunks} hunk${hunks !== 1 ? "s" : ""}`));
++	return parts.join(theme.fg("dim", " / "));
++}
++
++export function truncateDiffByHunk(
++	diffText: string,
++	maxHunks: number,
++	maxLines: number,
++): { text: string; hiddenHunks: number; hiddenLines: number } {
++	const lines = diffText ? diffText.split("\n") : [];
++	const totalStats = getDiffStats(diffText);
++	const kept: string[] = [];
++	let inHunk = false;
++	let currentHunks = 0;
++	let reachedLimit = false;
++
++	for (const line of lines) {
++		const isChange = line.startsWith("+") || line.startsWith("-");
++		if (isChange && !inHunk) {
++			currentHunks++;
++			inHunk = true;
++		}
++		if (!isChange) {
++			inHunk = false;
++		}
++
++		if (currentHunks > maxHunks) {
++			reachedLimit = true;
++			break;
++		}
++
++		kept.push(line);
++		if (kept.length >= maxLines) {
++			reachedLimit = true;
++			break;
++		}
++	}
++
++	if (!reachedLimit) {
++		return { text: diffText, hiddenHunks: 0, hiddenLines: 0 };
++	}
++
++	const keptStats = getDiffStats(kept.join("\n"));
++	return {
++		text: kept.join("\n"),
++		hiddenHunks: Math.max(0, totalStats.hunks - keptStats.hunks),
++		hiddenLines: Math.max(0, totalStats.lines - kept.length),
++	};
++}
++
++// =============================================================================
++// Path Utilities
++// =============================================================================
++
++export function shortenPath(filePath: string, homeDir?: string): string {
++	const home = homeDir ?? process.env.HOME ?? process.env.USERPROFILE;
++	if (home && filePath.startsWith(home)) {
++		return `~${filePath.slice(home.length)}`;
++	}
++	return filePath;
++}
++
++export function wrapBrackets(text: string, theme: Theme): string {
++	return `${theme.format.bracketLeft}${text}${theme.format.bracketRight}`;
++}
++
++export function replaceTabs(text: string): string {
++	return text.replace(/\t/g, "   ");
++}
++
+ function pluralize(label: string, count: number): string {
+ 	if (count === 1) return label;
+ 	if (/(?:ch|sh|s|x|z)$/i.test(label)) return `${label}es`;
+diff --git a/packages/coding-agent/src/core/tools/renderers.ts b/packages/coding-agent/src/core/tools/renderers.ts
+index f42069bd4..093a2e61c 100644
+--- a/packages/coding-agent/src/core/tools/renderers.ts
++++ b/packages/coding-agent/src/core/tools/renderers.ts
+@@ -5,844 +5,46 @@
+  */
+ 
+ import type { Component } from "@oh-my-pi/pi-tui";
+-import { Text } from "@oh-my-pi/pi-tui";
+-import { getLanguageFromPath, type Theme } from "../../modes/interactive/theme/theme";
++import type { Theme } from "../../modes/interactive/theme/theme";
+ import type { RenderResultOptions } from "../custom-tools/types";
+-import type { AskToolDetails } from "./ask";
+-import type { FindToolDetails } from "./find";
+-import type { GrepToolDetails } from "./grep";
+-import type { LsToolDetails } from "./ls";
+-import { renderCall as renderLspCall, renderResult as renderLspResult } from "./lsp/render";
+-import type { LspToolDetails } from "./lsp/types";
+-import type { NotebookToolDetails } from "./notebook";
+-import type { OutputToolDetails } from "./output";
+-import {
+-	formatBytes,
+-	formatCount,
+-	formatExpandHint,
+-	formatMoreItems,
+-	PREVIEW_LIMITS,
+-	TRUNCATE_LENGTHS,
+-	truncate,
+-} from "./render-utils";
+-import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./task/render";
+-import type { TaskToolDetails } from "./task/types";
+-import { renderWebFetchCall, renderWebFetchResult, type WebFetchToolDetails } from "./web-fetch";
+-import { renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./web-search/render";
++import { askToolRenderer } from "./ask";
++import { bashToolRenderer } from "./bash";
++import { editToolRenderer } from "./edit";
++import { findToolRenderer } from "./find";
++import { grepToolRenderer } from "./grep";
++import { lsToolRenderer } from "./ls";
++import { lspToolRenderer } from "./lsp/render";
++import { notebookToolRenderer } from "./notebook";
++import { outputToolRenderer } from "./output";
++import { readToolRenderer } from "./read";
++import { taskToolRenderer } from "./task/render";
++import { webFetchToolRenderer } from "./web-fetch";
++import { webSearchToolRenderer } from "./web-search/render";
++import { writeToolRenderer } from "./write";
+ 
+-// Tree drawing characters
+-
+-interface ToolRenderer<TArgs = any, TDetails = any> {
+-	renderCall(args: TArgs, theme: Theme): Component;
+-	renderResult(
+-		result: { content: Array<{ type: string; text?: string }>; details?: TDetails },
+-		options: RenderResultOptions,
++type ToolRenderer = {
++	renderCall: (args: unknown, theme: Theme) => Component;
++	renderResult: (
++		result: { content: Array<{ type: string; text?: string }>; details?: unknown; isError?: boolean },
++		options: RenderResultOptions & { renderContext?: Record<string, unknown> },
+ 		theme: Theme,
+-	): Component;
+-}
+-
+-const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
+-const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
+-
+-function formatMeta(meta: string[], theme: Theme): string {
+-	return meta.length > 0 ? ` ${theme.fg("muted", meta.join(theme.sep.dot))}` : "";
+-}
+-
+-function formatScope(scopePath: string | undefined, theme: Theme): string {
+-	return scopePath ? ` ${theme.fg("muted", `in ${scopePath}`)}` : "";
+-}
+-
+-function formatTruncationSuffix(truncated: boolean, theme: Theme): string {
+-	return truncated ? theme.fg("warning", " (truncated)") : "";
+-}
+-
+-function renderErrorMessage(_toolLabel: string, message: string, theme: Theme): Text {
+-	const clean = message.replace(/^Error:\s*/, "").trim();
+-	return new Text(
+-		`${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${clean || "Unknown error"}`)}`,
+-		0,
+-		0,
+-	);
+-}
+-
+-function renderEmptyMessage(_toolLabel: string, message: string, theme: Theme): Text {
+-	return new Text(`${theme.styledSymbol("status.warning", "warning")} ${theme.fg("muted", message)}`, 0, 0);
+-}
+-
+-// ============================================================================
+-// Grep Renderer
+-// ============================================================================
+-
+-interface GrepArgs {
+-	pattern: string;
+-	path?: string;
+-	glob?: string;
+-	type?: string;
+-	ignoreCase?: boolean;
+-	caseSensitive?: boolean;
+-	literal?: boolean;
+-	multiline?: boolean;
+-	context?: number;
+-	limit?: number;
+-	outputMode?: string;
+-}
+-
+-const grepRenderer: ToolRenderer<GrepArgs, GrepToolDetails> = {
+-	renderCall(args, theme) {
+-		const label = theme.fg("toolTitle", theme.bold("Grep"));
+-		let text = `${label} ${theme.fg("accent", args.pattern || "?")}`;
+-
+-		const meta: string[] = [];
+-		if (args.path) meta.push(`in ${args.path}`);
+-		if (args.glob) meta.push(`glob:${args.glob}`);
+-		if (args.type) meta.push(`type:${args.type}`);
+-		if (args.outputMode && args.outputMode !== "files_with_matches") meta.push(`mode:${args.outputMode}`);
+-		if (args.caseSensitive) {
+-			meta.push("case:sensitive");
+-		} else if (args.ignoreCase) {
+-			meta.push("case:insensitive");
+-		}
+-		if (args.literal) meta.push("literal");
+-		if (args.multiline) meta.push("multiline");
+-		if (args.context !== undefined) meta.push(`context:${args.context}`);
+-		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
+-
+-		text += formatMeta(meta, theme);
+-
+-		return new Text(text, 0, 0);
+-	},
+-
+-	renderResult(result, { expanded }, theme) {
+-		const label = "Grep";
+-		const details = result.details;
+-
+-		if (details?.error) {
+-			return renderErrorMessage(label, details.error, theme);
+-		}
+-
+-		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
+-
+-		if (!hasDetailedData) {
+-			const textContent = result.content?.find((c) => c.type === "text")?.text;
+-			if (!textContent || textContent === "No matches found") {
+-				return renderEmptyMessage(label, "No matches found", theme);
+-			}
+-
+-			const lines = textContent.split("\n").filter((line) => line.trim() !== "");
+-			const maxLines = expanded ? lines.length : Math.min(lines.length, COLLAPSED_TEXT_LIMIT);
+-			const displayLines = lines.slice(0, maxLines);
+-			const remaining = lines.length - maxLines;
+-			const hasMore = remaining > 0;
+-
+-			const icon = theme.styledSymbol("status.success", "success");
+-			const summary = formatCount("item", lines.length);
+-			const expandHint = formatExpandHint(expanded, hasMore, theme);
+-			let text = `${icon} ${theme.fg("dim", summary)}${expandHint}`;
+-
+-			for (let i = 0; i < displayLines.length; i++) {
+-				const isLast = i === displayLines.length - 1 && remaining === 0;
+-				const branch = isLast ? theme.tree.last : theme.tree.branch;
+-				text += `\n ${theme.fg("dim", branch)} ${theme.fg("toolOutput", displayLines[i])}`;
+-			}
+-
+-			if (remaining > 0) {
+-				text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-					"muted",
+-					formatMoreItems(remaining, "item", theme),
+-				)}`;
+-			}
+-
+-			return new Text(text, 0, 0);
+-		}
+-
+-		const matchCount = details?.matchCount ?? 0;
+-		const fileCount = details?.fileCount ?? 0;
+-		const mode = details?.mode ?? "files_with_matches";
+-		const truncated = details?.truncated ?? details?.truncation?.truncated ?? false;
+-		const files = details?.files ?? [];
+-
+-		if (matchCount === 0) {
+-			return renderEmptyMessage(label, "No matches found", theme);
+-		}
+-
+-		const icon = theme.styledSymbol("status.success", "success");
+-		const summaryParts =
+-			mode === "files_with_matches"
+-				? [formatCount("file", fileCount)]
+-				: [formatCount("match", matchCount), formatCount("file", fileCount)];
+-		const summaryText = summaryParts.join(theme.sep.dot);
+-		const scopeLabel = formatScope(details?.scopePath, theme);
+-
+-		const fileEntries: Array<{ path: string; count?: number }> = details?.fileMatches?.length
+-			? details.fileMatches.map((entry) => ({ path: entry.path, count: entry.count }))
+-			: files.map((path) => ({ path }));
+-		const maxFiles = expanded ? fileEntries.length : Math.min(fileEntries.length, COLLAPSED_LIST_LIMIT);
+-		const hasMoreFiles = fileEntries.length > maxFiles;
+-		const expandHint = formatExpandHint(expanded, hasMoreFiles, theme);
+-
+-		let text = `${icon} ${theme.fg("dim", summaryText)}${formatTruncationSuffix(
+-			truncated,
+-			theme,
+-		)}${scopeLabel}${expandHint}`;
+-
+-		const truncationReasons: string[] = [];
+-		if (details?.matchLimitReached) {
+-			truncationReasons.push(`limit ${details.matchLimitReached} matches`);
+-		}
+-		if (details?.headLimitReached) {
+-			truncationReasons.push(`head limit ${details.headLimitReached}`);
+-		}
+-		if (details?.truncation?.truncated) {
+-			truncationReasons.push("size limit");
+-		}
+-		if (details?.linesTruncated) {
+-			truncationReasons.push("line length");
+-		}
+-
+-		const hasTruncation = truncationReasons.length > 0;
+-
+-		if (fileEntries.length > 0) {
+-			for (let i = 0; i < maxFiles; i++) {
+-				const entry = fileEntries[i];
+-				const isLast = i === maxFiles - 1 && !hasMoreFiles && !hasTruncation;
+-				const branch = isLast ? theme.tree.last : theme.tree.branch;
+-				const isDir = entry.path.endsWith("/");
+-				const entryPath = isDir ? entry.path.slice(0, -1) : entry.path;
+-				const lang = isDir ? undefined : getLanguageFromPath(entryPath);
+-				const entryIcon = isDir
+-					? theme.fg("accent", theme.icon.folder)
+-					: theme.fg("muted", theme.getLangIcon(lang));
+-				const countLabel =
+-					entry.count !== undefined
+-						? ` ${theme.fg("dim", `(${entry.count} match${entry.count !== 1 ? "es" : ""})`)}`
+-						: "";
+-				text += `\n ${theme.fg("dim", branch)} ${entryIcon} ${theme.fg("accent", entry.path)}${countLabel}`;
+-			}
+-
+-			if (hasMoreFiles) {
+-				const moreFilesBranch = hasTruncation ? theme.tree.branch : theme.tree.last;
+-				text += `\n ${theme.fg("dim", moreFilesBranch)} ${theme.fg(
+-					"muted",
+-					formatMoreItems(fileEntries.length - maxFiles, "file", theme),
+-				)}`;
+-			}
+-		}
+-
+-		if (hasTruncation) {
+-			text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-				"warning",
+-				`truncated: ${truncationReasons.join(", ")}`,
+-			)}`;
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
++		args?: unknown,
++	) => Component;
+ };
+ 
+-// ============================================================================
+-// Find Renderer
+-// ============================================================================
+-
+-interface FindArgs {
+-	pattern: string;
+-	path?: string;
+-	type?: string;
+-	hidden?: boolean;
+-	sortByMtime?: boolean;
+-	limit?: number;
+-}
+-
+-const findRenderer: ToolRenderer<FindArgs, FindToolDetails> = {
+-	renderCall(args, theme) {
+-		const label = theme.fg("toolTitle", theme.bold("Find"));
+-		let text = `${label} ${theme.fg("accent", args.pattern || "*")}`;
+-
+-		const meta: string[] = [];
+-		if (args.path) meta.push(`in ${args.path}`);
+-		if (args.type && args.type !== "all") meta.push(`type:${args.type}`);
+-		if (args.hidden) meta.push("hidden");
+-		if (args.sortByMtime) meta.push("sort:mtime");
+-		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
+-
+-		text += formatMeta(meta, theme);
+-
+-		return new Text(text, 0, 0);
+-	},
+-
+-	renderResult(result, { expanded }, theme) {
+-		const label = "Find";
+-		const details = result.details;
+-
+-		if (details?.error) {
+-			return renderErrorMessage(label, details.error, theme);
+-		}
+-
+-		const hasDetailedData = details?.fileCount !== undefined;
+-		const textContent = result.content?.find((c) => c.type === "text")?.text;
+-
+-		if (!hasDetailedData) {
+-			if (!textContent || textContent.includes("No files matching") || textContent.trim() === "") {
+-				return renderEmptyMessage(label, "No files found", theme);
+-			}
+-
+-			const lines = textContent.split("\n").filter((l) => l.trim());
+-			const maxLines = expanded ? lines.length : Math.min(lines.length, COLLAPSED_LIST_LIMIT);
+-			const displayLines = lines.slice(0, maxLines);
+-			const remaining = lines.length - maxLines;
+-			const hasMore = remaining > 0;
+-
+-			const icon = theme.styledSymbol("status.success", "success");
+-			const summary = formatCount("file", lines.length);
+-			const expandHint = formatExpandHint(expanded, hasMore, theme);
+-			let text = `${icon} ${theme.fg("dim", summary)}${expandHint}`;
+-
+-			for (let i = 0; i < displayLines.length; i++) {
+-				const isLast = i === displayLines.length - 1 && remaining === 0;
+-				const branch = isLast ? theme.tree.last : theme.tree.branch;
+-				text += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", displayLines[i])}`;
+-			}
+-			if (remaining > 0) {
+-				text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-					"muted",
+-					formatMoreItems(remaining, "file", theme),
+-				)}`;
+-			}
+-			return new Text(text, 0, 0);
+-		}
+-
+-		const fileCount = details?.fileCount ?? 0;
+-		const truncated = details?.truncated ?? details?.truncation?.truncated ?? false;
+-		const files = details?.files ?? [];
+-
+-		if (fileCount === 0) {
+-			return renderEmptyMessage(label, "No files found", theme);
+-		}
+-
+-		const icon = theme.styledSymbol("status.success", "success");
+-		const summaryText = formatCount("file", fileCount);
+-		const scopeLabel = formatScope(details?.scopePath, theme);
+-		const maxFiles = expanded ? files.length : Math.min(files.length, COLLAPSED_LIST_LIMIT);
+-		const hasMoreFiles = files.length > maxFiles;
+-		const expandHint = formatExpandHint(expanded, hasMoreFiles, theme);
+-
+-		let text = `${icon} ${theme.fg("dim", summaryText)}${formatTruncationSuffix(
+-			truncated,
+-			theme,
+-		)}${scopeLabel}${expandHint}`;
+-
+-		const truncationReasons: string[] = [];
+-		if (details?.resultLimitReached) {
+-			truncationReasons.push(`limit ${details.resultLimitReached} results`);
+-		}
+-		if (details?.truncation?.truncated) {
+-			truncationReasons.push("size limit");
+-		}
+-
+-		const hasTruncation = truncationReasons.length > 0;
+-
+-		if (files.length > 0) {
+-			for (let i = 0; i < maxFiles; i++) {
+-				const isLast = i === maxFiles - 1 && !hasMoreFiles && !hasTruncation;
+-				const branch = isLast ? theme.tree.last : theme.tree.branch;
+-				const entry = files[i];
+-				const isDir = entry.endsWith("/");
+-				const entryPath = isDir ? entry.slice(0, -1) : entry;
+-				const lang = isDir ? undefined : getLanguageFromPath(entryPath);
+-				const entryIcon = isDir
+-					? theme.fg("accent", theme.icon.folder)
+-					: theme.fg("muted", theme.getLangIcon(lang));
+-				text += `\n ${theme.fg("dim", branch)} ${entryIcon} ${theme.fg("accent", entry)}`;
+-			}
+-
+-			if (hasMoreFiles) {
+-				const moreFilesBranch = hasTruncation ? theme.tree.branch : theme.tree.last;
+-				text += `\n ${theme.fg("dim", moreFilesBranch)} ${theme.fg(
+-					"muted",
+-					formatMoreItems(files.length - maxFiles, "file", theme),
+-				)}`;
+-			}
+-		}
+-
+-		if (hasTruncation) {
+-			text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-				"warning",
+-				`truncated: ${truncationReasons.join(", ")}`,
+-			)}`;
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
+-};
+-
+-// ============================================================================
+-// Notebook Renderer
+-// ============================================================================
+-
+-interface NotebookArgs {
+-	action: string;
+-	notebookPath: string;
+-	cellNumber?: number;
+-	cellType?: string;
+-	content?: string;
+-}
+-
+-function normalizeCellLines(lines: string[]): string[] {
+-	return lines.map((line) => (line.endsWith("\n") ? line.slice(0, -1) : line));
+-}
+-
+-function renderCellPreview(lines: string[], expanded: boolean, theme: Theme): string {
+-	const normalized = normalizeCellLines(lines);
+-	if (normalized.length === 0) {
+-		return `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", "(empty cell)")}`;
+-	}
+-
+-	const maxLines = expanded ? normalized.length : Math.min(normalized.length, COLLAPSED_TEXT_LIMIT);
+-	let text = "";
+-
+-	for (let i = 0; i < maxLines; i++) {
+-		const isLast = i === maxLines - 1 && (expanded || normalized.length <= maxLines);
+-		const branch = isLast ? theme.tree.last : theme.tree.branch;
+-		const line = normalized[i];
+-		text += `\n ${theme.fg("dim", branch)} ${theme.fg("toolOutput", line)}`;
+-	}
+-
+-	const remaining = normalized.length - maxLines;
+-	if (remaining > 0) {
+-		text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", formatMoreItems(remaining, "line", theme))}`;
+-	}
+-
+-	return text;
+-}
+-
+-const notebookRenderer: ToolRenderer<NotebookArgs, NotebookToolDetails> = {
+-	renderCall(args, theme) {
+-		const label = theme.fg("toolTitle", theme.bold("Notebook"));
+-		let text = `${label} ${theme.fg("accent", args.action || "?")}`;
+-
+-		const meta: string[] = [];
+-		meta.push(`in ${args.notebookPath || "?"}`);
+-		if (args.cellNumber !== undefined) meta.push(`cell:${args.cellNumber}`);
+-		if (args.cellType) meta.push(`type:${args.cellType}`);
+-
+-		text += formatMeta(meta, theme);
+-
+-		return new Text(text, 0, 0);
+-	},
+-
+-	renderResult(result, { expanded }, theme) {
+-		const label = "Notebook";
+-		const details = result.details;
+-
+-		const content = result.content?.[0];
+-		if (content?.type === "text" && content.text?.startsWith("Error:")) {
+-			return renderErrorMessage(label, content.text, theme);
+-		}
+-
+-		const action = details?.action ?? "edit";
+-		const cellIndex = details?.cellIndex;
+-		const cellType = details?.cellType;
+-		const totalCells = details?.totalCells;
+-		const cellSource = details?.cellSource;
+-		const lineCount = cellSource?.length;
+-		const canExpand = cellSource !== undefined && cellSource.length > COLLAPSED_TEXT_LIMIT;
+-
+-		const icon = theme.styledSymbol("status.success", "success");
+-		const actionLabel = action === "insert" ? "Inserted" : action === "delete" ? "Deleted" : "Edited";
+-		const cellLabel = cellType || "cell";
+-		const summaryParts = [`${actionLabel} ${cellLabel} at index ${cellIndex ?? "?"}`];
+-		if (lineCount !== undefined) summaryParts.push(formatCount("line", lineCount));
+-		if (totalCells !== undefined) summaryParts.push(`${totalCells} total`);
+-		const summaryText = summaryParts.join(theme.sep.dot);
+-
+-		const expandHint = formatExpandHint(expanded, canExpand, theme);
+-		let text = `${icon} ${theme.fg("dim", summaryText)}${expandHint}`;
+-
+-		if (cellSource) {
+-			text += renderCellPreview(cellSource, expanded, theme);
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
+-};
+-
+-// ============================================================================
+-// Ask Renderer
+-// ============================================================================
+-
+-interface AskArgs {
+-	question: string;
+-	options?: Array<{ label: string }>;
+-	multi?: boolean;
+-}
+-
+-const askRenderer: ToolRenderer<AskArgs, AskToolDetails> = {
+-	renderCall(args, theme) {
+-		if (!args.question) {
+-			return renderErrorMessage("Ask", "No question provided", theme);
+-		}
+-
+-		const label = theme.fg("toolTitle", theme.bold("Ask"));
+-		let text = `${label} ${theme.fg("accent", args.question)}`;
+-
+-		const meta: string[] = [];
+-		if (args.multi) meta.push("multi");
+-		if (args.options?.length) meta.push(`options:${args.options.length}`);
+-		text += formatMeta(meta, theme);
+-
+-		if (args.options?.length) {
+-			for (let i = 0; i < args.options.length; i++) {
+-				const opt = args.options[i];
+-				const isLast = i === args.options.length - 1;
+-				const branch = isLast ? theme.tree.last : theme.tree.branch;
+-				text += `\n ${theme.fg("dim", branch)} ${theme.fg(
+-					"dim",
+-					theme.checkbox.unchecked,
+-				)} ${theme.fg("muted", opt.label)}`;
+-			}
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
+-
+-	renderResult(result, _opts, theme) {
+-		const { details } = result;
+-		if (!details) {
+-			const txt = result.content[0];
+-			return new Text(txt?.type === "text" && txt.text ? txt.text : "", 0, 0);
+-		}
+-
+-		const hasSelection = details.customInput || details.selectedOptions.length > 0;
+-		const statusIcon = hasSelection
+-			? theme.styledSymbol("status.success", "success")
+-			: theme.styledSymbol("status.warning", "warning");
+-
+-		let text = `${statusIcon} ${theme.fg("accent", details.question)}`;
+-
+-		if (details.customInput) {
+-			text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.styledSymbol(
+-				"status.success",
+-				"success",
+-			)} ${theme.fg("toolOutput", details.customInput)}`;
+-		} else if (details.selectedOptions.length > 0) {
+-			const selected = details.selectedOptions;
+-			for (let i = 0; i < selected.length; i++) {
+-				const isLast = i === selected.length - 1;
+-				const branch = isLast ? theme.tree.last : theme.tree.branch;
+-				text += `\n ${theme.fg("dim", branch)} ${theme.fg(
+-					"success",
+-					theme.checkbox.checked,
+-				)} ${theme.fg("toolOutput", selected[i])}`;
+-			}
+-		} else {
+-			text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.styledSymbol(
+-				"status.warning",
+-				"warning",
+-			)} ${theme.fg("warning", "Cancelled")}`;
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
+-};
+-
+-// ============================================================================
+-// Export
+-// ============================================================================
+-
+-// ============================================================================
+-// LSP Renderer
+-// ============================================================================
+-
+-interface LspArgs {
+-	action: string;
+-	file?: string;
+-	files?: string[];
+-	line?: number;
+-	column?: number;
+-}
+-
+-const lspRenderer: ToolRenderer<LspArgs, LspToolDetails> = {
+-	renderCall: renderLspCall,
+-	renderResult: renderLspResult,
+-};
+-
+-// ============================================================================
+-// Output Renderer
+-// ============================================================================
+-
+-interface OutputArgs {
+-	ids: string[];
+-	format?: "raw" | "json" | "stripped";
+-	offset?: number;
+-	limit?: number;
+-}
+-
+-type OutputEntry = OutputToolDetails["outputs"][number];
+-
+-function formatOutputMeta(entry: OutputEntry, theme: Theme): string {
+-	const metaParts: string[] = [];
+-	if (entry.range) {
+-		metaParts.push(`lines ${entry.range.startLine}-${entry.range.endLine} of ${entry.range.totalLines}`);
+-	} else {
+-		metaParts.push(formatCount("line", entry.lineCount));
+-	}
+-	metaParts.push(formatBytes(entry.charCount));
+-	if (entry.provenance) {
+-		metaParts.push(`agent ${entry.provenance.agent}(${entry.provenance.index})`);
+-	}
+-	return theme.fg("dim", metaParts.join(theme.sep.dot));
+-}
+-
+-const outputRenderer: ToolRenderer<OutputArgs, OutputToolDetails> = {
+-	renderCall(args, theme) {
+-		const ids = args.ids?.join(", ") ?? "?";
+-		const label = theme.fg("toolTitle", theme.bold("Output"));
+-		let text = `${label} ${theme.fg("accent", ids)}`;
+-
+-		const meta: string[] = [];
+-		if (args.format && args.format !== "raw") meta.push(`format:${args.format}`);
+-		if (args.offset !== undefined) meta.push(`offset:${args.offset}`);
+-		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
+-		text += formatMeta(meta, theme);
+-
+-		return new Text(text, 0, 0);
+-	},
+-
+-	renderResult(result, { expanded }, theme) {
+-		const label = "Output";
+-		const details = result.details;
+-
+-		if (details?.notFound?.length) {
+-			const icon = theme.styledSymbol("status.error", "error");
+-			let text = `${icon} ${theme.fg("error", `Error: Not found: ${details.notFound.join(", ")}`)}`;
+-			if (details.availableIds?.length) {
+-				text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-					"muted",
+-					`Available: ${details.availableIds.join(", ")}`,
+-				)}`;
+-			} else {
+-				text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-					"muted",
+-					"No outputs available in current session",
+-				)}`;
+-			}
+-			return new Text(text, 0, 0);
+-		}
+-
+-		const outputs = details?.outputs ?? [];
+-
+-		if (outputs.length === 0) {
+-			const textContent = result.content?.find((c) => c.type === "text")?.text;
+-			return renderEmptyMessage(label, textContent || "No outputs", theme);
+-		}
+-
+-		const icon = theme.styledSymbol("status.success", "success");
+-		const summary = `read ${formatCount("output", outputs.length)}`;
+-		const previewLimit = expanded ? 3 : 1;
+-		const maxOutputs = expanded ? outputs.length : Math.min(outputs.length, 5);
+-		const hasMoreOutputs = outputs.length > maxOutputs;
+-		const hasMorePreview = outputs.some((o) => (o.previewLines?.length ?? 0) > previewLimit);
+-		const expandHint = formatExpandHint(expanded, hasMoreOutputs || hasMorePreview, theme);
+-		let text = `${icon} ${theme.fg("dim", summary)}${expandHint}`;
+-
+-		for (let i = 0; i < maxOutputs; i++) {
+-			const o = outputs[i];
+-			const isLast = i === maxOutputs - 1 && !hasMoreOutputs;
+-			const branch = isLast ? theme.tree.last : theme.tree.branch;
+-			text += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", o.id)} ${formatOutputMeta(o, theme)}`;
+-
+-			const previewLines = o.previewLines ?? [];
+-			const shownPreview = previewLines.slice(0, previewLimit);
+-			if (shownPreview.length > 0) {
+-				const childPrefix = isLast ? "   " : ` ${theme.fg("dim", theme.tree.vertical)} `;
+-				for (const line of shownPreview) {
+-					const previewText = truncate(line, TRUNCATE_LENGTHS.CONTENT, theme.format.ellipsis);
+-					text += `\n${childPrefix}${theme.fg("dim", theme.tree.hook)} ${theme.fg(
+-						"muted",
+-						"preview:",
+-					)} ${theme.fg("toolOutput", previewText)}`;
+-				}
+-			}
+-		}
+-
+-		if (hasMoreOutputs) {
+-			text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-				"muted",
+-				formatMoreItems(outputs.length - maxOutputs, "output", theme),
+-			)}`;
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
+-};
+-
+-// ============================================================================
+-// Task Renderer
+-// ============================================================================
+-
+-const taskRenderer: ToolRenderer<any, TaskToolDetails> = {
+-	renderCall: renderTaskCall,
+-	renderResult: renderTaskResult,
+-};
+-
+-// ============================================================================
+-// Ls Renderer
+-// ============================================================================
+-
+-interface LsArgs {
+-	path?: string;
+-	limit?: number;
+-}
+-
+-const lsRenderer: ToolRenderer<LsArgs, LsToolDetails> = {
+-	renderCall(args, theme) {
+-		const label = theme.fg("toolTitle", theme.bold("Ls"));
+-		let text = `${label} ${theme.fg("accent", args.path || ".")}`;
+-
+-		const meta: string[] = [];
+-		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
+-		text += formatMeta(meta, theme);
+-
+-		return new Text(text, 0, 0);
+-	},
+-
+-	renderResult(result, { expanded }, theme) {
+-		const label = "Ls";
+-		const details = result.details;
+-		const textContent = result.content?.find((c) => c.type === "text")?.text ?? "";
+-
+-		if (
+-			(!textContent || textContent.trim() === "" || textContent.trim() === "(empty directory)") &&
+-			(!details?.entries || details.entries.length === 0)
+-		) {
+-			return renderEmptyMessage(label, "Empty directory", theme);
+-		}
+-
+-		let entries: string[] = details?.entries ? [...details.entries] : [];
+-		if (entries.length === 0) {
+-			const rawLines = textContent.split("\n").filter((l: string) => l.trim());
+-			entries = rawLines.filter((line) => !/^\[.*\]$/.test(line.trim()));
+-		}
+-
+-		if (entries.length === 0) {
+-			return renderEmptyMessage(label, "Empty directory", theme);
+-		}
+-
+-		let dirCount = details?.dirCount;
+-		let fileCount = details?.fileCount;
+-		if (dirCount === undefined || fileCount === undefined) {
+-			dirCount = 0;
+-			fileCount = 0;
+-			for (const entry of entries) {
+-				if (entry.endsWith("/")) {
+-					dirCount += 1;
+-				} else {
+-					fileCount += 1;
+-				}
+-			}
+-		}
+-
+-		const truncated = Boolean(details?.truncation?.truncated || details?.entryLimitReached);
+-		const icon = truncated
+-			? theme.styledSymbol("status.warning", "warning")
+-			: theme.styledSymbol("status.success", "success");
+-
+-		const summaryText = [formatCount("dir", dirCount ?? 0), formatCount("file", fileCount ?? 0)].join(theme.sep.dot);
+-		const maxEntries = expanded ? entries.length : Math.min(entries.length, COLLAPSED_LIST_LIMIT);
+-		const hasMoreEntries = entries.length > maxEntries;
+-		const expandHint = formatExpandHint(expanded, hasMoreEntries, theme);
+-
+-		let text = `${icon} ${theme.fg("dim", summaryText)}${formatTruncationSuffix(truncated, theme)}${expandHint}`;
+-
+-		const truncationReasons: string[] = [];
+-		if (details?.entryLimitReached) {
+-			truncationReasons.push(`entry limit ${details.entryLimitReached}`);
+-		}
+-		if (details?.truncation?.truncated) {
+-			truncationReasons.push(`output cap ${formatBytes(details.truncation.maxBytes)}`);
+-		}
+-
+-		const hasTruncation = truncationReasons.length > 0;
+-
+-		for (let i = 0; i < maxEntries; i++) {
+-			const entry = entries[i];
+-			const isLast = i === maxEntries - 1 && !hasMoreEntries && !hasTruncation;
+-			const branch = isLast ? theme.tree.last : theme.tree.branch;
+-			const isDir = entry.endsWith("/");
+-			const entryPath = isDir ? entry.slice(0, -1) : entry;
+-			const lang = isDir ? undefined : getLanguageFromPath(entryPath);
+-			const entryIcon = isDir ? theme.fg("accent", theme.icon.folder) : theme.fg("muted", theme.getLangIcon(lang));
+-			const entryColor = isDir ? "accent" : "toolOutput";
+-			text += `\n ${theme.fg("dim", branch)} ${entryIcon} ${theme.fg(entryColor, entry)}`;
+-		}
+-
+-		if (hasMoreEntries) {
+-			const moreEntriesBranch = hasTruncation ? theme.tree.branch : theme.tree.last;
+-			text += `\n ${theme.fg("dim", moreEntriesBranch)} ${theme.fg(
+-				"muted",
+-				formatMoreItems(entries.length - maxEntries, "entry", theme),
+-			)}`;
+-		}
+-
+-		if (hasTruncation) {
+-			text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+-				"warning",
+-				`truncated: ${truncationReasons.join(", ")}`,
+-			)}`;
+-		}
+-
+-		return new Text(text, 0, 0);
+-	},
+-};
+-
+-// ============================================================================
+-// Web Fetch Renderer
+-// ============================================================================
+-
+-interface WebFetchArgs {
+-	url: string;
+-	timeout?: number;
+-	raw?: boolean;
+-}
+-
+-const webFetchRenderer: ToolRenderer<WebFetchArgs, WebFetchToolDetails> = {
+-	renderCall: renderWebFetchCall,
+-	renderResult: renderWebFetchResult,
+-};
+-
+-// ============================================================================
+-// Web Search Renderer
+-// ============================================================================
+-
+-interface WebSearchArgs {
+-	query: string;
+-	provider?: string;
+-	[key: string]: unknown;
+-}
+-
+-const webSearchRenderer: ToolRenderer<WebSearchArgs, WebSearchRenderDetails> = {
+-	renderCall: renderWebSearchCall,
+-	renderResult: renderWebSearchResult,
+-};
+-
+-// ============================================================================
+-// Export
+-// ============================================================================
+-
+-export const toolRenderers: Record<
+-	string,
+-	{
+-		renderCall: (args: any, theme: Theme) => Component;
+-		renderResult: (result: any, options: RenderResultOptions, theme: Theme) => Component;
+-	}
+-> = {
+-	ask: askRenderer,
+-	grep: grepRenderer,
+-	find: findRenderer,
+-	notebook: notebookRenderer,
+-	ls: lsRenderer,
+-	lsp: lspRenderer,
+-	output: outputRenderer,
+-	task: taskRenderer,
+-	web_fetch: webFetchRenderer,
+-	web_search: webSearchRenderer,
++export const toolRenderers: Record<string, ToolRenderer> = {
++	ask: askToolRenderer as ToolRenderer,
++	bash: bashToolRenderer as ToolRenderer,
++	edit: editToolRenderer as ToolRenderer,
++	find: findToolRenderer as ToolRenderer,
++	grep: grepToolRenderer as ToolRenderer,
++	ls: lsToolRenderer as ToolRenderer,
++	lsp: lspToolRenderer as ToolRenderer,
++	notebook: notebookToolRenderer as ToolRenderer,
++	output: outputToolRenderer as ToolRenderer,
++	read: readToolRenderer as ToolRenderer,
++	task: taskToolRenderer as ToolRenderer,
++	web_fetch: webFetchToolRenderer as ToolRenderer,
++	web_search: webSearchToolRenderer as ToolRenderer,
++	write: writeToolRenderer as ToolRenderer,
+ };
+diff --git a/packages/coding-agent/src/core/tools/task/render.ts b/packages/coding-agent/src/core/tools/task/render.ts
+index c839d574a..9698bd392 100644
+--- a/packages/coding-agent/src/core/tools/task/render.ts
++++ b/packages/coding-agent/src/core/tools/task/render.ts
+@@ -475,3 +475,8 @@ export function renderResult(
+ 
+ 	return new Text(lines.join("\n"), 0, 0);
+ }
++
++export const taskToolRenderer = {
++	renderCall,
++	renderResult,
++};
+diff --git a/packages/coding-agent/src/core/tools/web-fetch.ts b/packages/coding-agent/src/core/tools/web-fetch.ts
+index 07c929e3a..1cc660e08 100644
+--- a/packages/coding-agent/src/core/tools/web-fetch.ts
++++ b/packages/coding-agent/src/core/tools/web-fetch.ts
+@@ -2486,6 +2486,11 @@ export function renderWebFetchResult(
+ 	return new Text(text, 0, 0);
+ }
+ 
++export const webFetchToolRenderer = {
++	renderCall: renderWebFetchCall,
++	renderResult: renderWebFetchResult,
++};
++
+ type WebFetchParams = { url: string; timeout?: number; raw?: boolean };
+ 
+ /** Web fetch tool as CustomTool (for TUI rendering support) */
+diff --git a/packages/coding-agent/src/core/tools/web-search/providers/anthropic.ts b/packages/coding-agent/src/core/tools/web-search/providers/anthropic.ts
+index 793b71eea..643ddb7b7 100644
+--- a/packages/coding-agent/src/core/tools/web-search/providers/anthropic.ts
++++ b/packages/coding-agent/src/core/tools/web-search/providers/anthropic.ts
+@@ -37,7 +37,7 @@ async function callWebSearch(
+ 	model: string,
+ 	query: string,
+ 	systemPrompt?: string,
+-	maxTokens?: number
++	maxTokens?: number,
+ ): Promise<AnthropicApiResponse> {
+ 	const url = buildAnthropicUrl(auth);
+ 	const headers = buildAnthropicHeaders(auth);
+@@ -84,7 +84,7 @@ async function callWebSearch(
+ 		throw new WebSearchProviderError(
+ 			"anthropic",
+ 			`Anthropic API error (${response.status}): ${errorText}`,
+-			response.status
++			response.status,
+ 		);
+ 	}
+ 
+@@ -185,7 +185,7 @@ export async function searchAnthropic(params: AnthropicSearchParams): Promise<We
+ 	const auth = await findAnthropicAuth();
+ 	if (!auth) {
+ 		throw new Error(
+-			"No Anthropic credentials found. Set ANTHROPIC_API_KEY or configure OAuth in ~/.omp/agent/auth.json"
++			"No Anthropic credentials found. Set ANTHROPIC_API_KEY or configure OAuth in ~/.omp/agent/auth.json",
+ 		);
+ 	}
+ 
+diff --git a/packages/coding-agent/src/core/tools/web-search/render.ts b/packages/coding-agent/src/core/tools/web-search/render.ts
+index 73d2cc172..35f146abe 100644
+--- a/packages/coding-agent/src/core/tools/web-search/render.ts
++++ b/packages/coding-agent/src/core/tools/web-search/render.ts
+@@ -325,3 +325,8 @@ export function renderWebSearchCall(
+ 	const text = `${theme.fg("toolTitle", "Web Search")} ${theme.fg("dim", `(${provider})`)} ${theme.fg("muted", query)}`;
+ 	return new Text(text, 0, 0);
+ }
++
++export const webSearchToolRenderer = {
++	renderCall: renderWebSearchCall,
++	renderResult: renderWebSearchResult,
++};
+diff --git a/packages/coding-agent/src/core/tools/write.ts b/packages/coding-agent/src/core/tools/write.ts
+index 5eaf216ac..b5bda0d47 100644
+--- a/packages/coding-agent/src/core/tools/write.ts
++++ b/packages/coding-agent/src/core/tools/write.ts
+@@ -1,8 +1,13 @@
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { Component } from "@oh-my-pi/pi-tui";
++import { Text } from "@oh-my-pi/pi-tui";
+ import { Type } from "@sinclair/typebox";
++import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme";
+ import writeDescription from "../../prompts/tools/write.md" with { type: "text" };
++import type { RenderResultOptions } from "../custom-tools/types";
+ import { type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "./lsp/index";
+ import { resolveToCwd } from "./path-utils";
++import { formatDiagnostics, replaceTabs, shortenPath } from "./render-utils";
+ 
+ const writeSchema = Type.Object({
+ 	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
+@@ -61,3 +66,88 @@ export function createWriteTool(
+ 
+ /** Default write tool using process.cwd() - for backwards compatibility */
+ export const writeTool = createWriteTool(process.cwd());
++
++// =============================================================================
++// TUI Renderer
++// =============================================================================
++
++interface WriteRenderArgs {
++	path?: string;
++	file_path?: string;
++	content?: string;
++}
++
++function countLines(text: string): number {
++	if (!text) return 0;
++	return text.split("\n").length;
++}
++
++function formatMetadataLine(lineCount: number | null, language: string | undefined, uiTheme: Theme): string {
++	const icon = uiTheme.getLangIcon(language);
++	if (lineCount !== null) {
++		return uiTheme.fg("dim", `${icon} ${lineCount} lines`);
++	}
++	return uiTheme.fg("dim", `${icon}`);
++}
++
++export const writeToolRenderer = {
++	renderCall(args: WriteRenderArgs, uiTheme: Theme): Component {
++		const rawPath = args.file_path || args.path || "";
++		const filePath = shortenPath(rawPath);
++		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", uiTheme.format.ellipsis);
++		const text = `${uiTheme.fg("toolTitle", uiTheme.bold("Write"))} ${pathDisplay}`;
++		return new Text(text, 0, 0);
++	},
++
++	renderResult(
++		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails },
++		{ expanded }: RenderResultOptions,
++		uiTheme: Theme,
++		args?: WriteRenderArgs,
++	): Component {
++		const rawPath = args?.file_path || args?.path || "";
++		const fileContent = args?.content || "";
++		const lang = getLanguageFromPath(rawPath);
++		const contentLines = fileContent
++			? lang
++				? highlightCode(replaceTabs(fileContent), lang)
++				: fileContent.split("\n")
++			: [];
++		const totalLines = contentLines.length;
++		const outputLines: string[] = [];
++
++		outputLines.push(formatMetadataLine(countLines(fileContent), lang ?? "text", uiTheme));
++
++		if (fileContent) {
++			const maxLines = expanded ? contentLines.length : 10;
++			const displayLines = contentLines.slice(0, maxLines);
++			const remaining = contentLines.length - maxLines;
++
++			outputLines.push(
++				"",
++				...displayLines.map((line: string) =>
++					lang ? replaceTabs(line) : uiTheme.fg("toolOutput", replaceTabs(line)),
++				),
++			);
++			if (remaining > 0) {
++				outputLines.push(
++					uiTheme.fg(
++						"toolOutput",
++						`${uiTheme.format.ellipsis} (${remaining} more lines, ${totalLines} total) ${uiTheme.format.bracketLeft}Ctrl+O to expand${uiTheme.format.bracketRight}`,
++					),
++				);
++			}
++		}
++
++		// Show LSP diagnostics if available
++		if (result.details?.diagnostics) {
++			outputLines.push(
++				formatDiagnostics(result.details.diagnostics, expanded, uiTheme, (fp) =>
++					uiTheme.getLangIcon(getLanguageFromPath(fp)),
++				),
++			);
++		}
++
++		return new Text(outputLines.join("\n"), 0, 0);
++	},
++};
+diff --git a/packages/coding-agent/src/modes/interactive/components/tool-execution.ts b/packages/coding-agent/src/modes/interactive/components/tool-execution.ts
+index 57aa35abc..bb49c2598 100644
+--- a/packages/coding-agent/src/modes/interactive/components/tool-execution.ts
++++ b/packages/coding-agent/src/modes/interactive/components/tool-execution.ts
+@@ -1,4 +1,3 @@
+-import { homedir } from "node:os";
+ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+ import {
+ 	Box,
+@@ -14,10 +13,9 @@ import {
+ import stripAnsi from "strip-ansi";
+ import { computeEditDiff, type EditDiffError, type EditDiffResult } from "../../../core/tools/edit-diff";
+ import { toolRenderers } from "../../../core/tools/renderers";
+-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../../../core/tools/truncate";
+ import { convertToPng } from "../../../utils/image-convert";
+ import { sanitizeBinaryOutput } from "../../../utils/shell";
+-import { getLanguageFromPath, highlightCode, theme } from "../theme/theme";
++import { theme } from "../theme/theme";
+ import { renderDiff } from "./diff";
+ import { truncateToVisualLines } from "./visual-truncate";
+ 
+@@ -26,230 +24,6 @@ const BASH_PREVIEW_LINES = 5;
+ const GENERIC_PREVIEW_LINES = 6;
+ const GENERIC_ARG_PREVIEW = 6;
+ const GENERIC_VALUE_MAX = 80;
+-const EDIT_DIFF_PREVIEW_HUNKS = 2;
+-const EDIT_DIFF_PREVIEW_LINES = 24;
+-
+-function wrapBrackets(text: string): string {
+-	return `${theme.format.bracketLeft}${text}${theme.format.bracketRight}`;
+-}
+-
+-function countLines(text: string): number {
+-	if (!text) return 0;
+-	return text.split("\n").length;
+-}
+-
+-function formatMetadataLine(lineCount: number | null, language: string | undefined): string {
+-	const icon = theme.getLangIcon(language);
+-	if (lineCount !== null) {
+-		return theme.fg("dim", `${icon} ${lineCount} lines`);
+-	}
+-	return theme.fg("dim", `${icon}`);
+-}
+-
+-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff"]);
+-const BINARY_EXTENSIONS = new Set(["pdf", "zip", "tar", "gz", "exe", "dll", "so", "dylib", "wasm"]);
+-
+-function getFileType(filePath: string): "image" | "binary" | "text" {
+-	const ext = filePath.split(".").pop()?.toLowerCase();
+-	if (!ext) return "text";
+-	if (IMAGE_EXTENSIONS.has(ext)) return "image";
+-	if (BINARY_EXTENSIONS.has(ext)) return "binary";
+-	return "text";
+-}
+-
+-function formatDiffStats(added: number, removed: number, hunks: number): string {
+-	const parts: string[] = [];
+-	if (added > 0) parts.push(theme.fg("success", `+${added}`));
+-	if (removed > 0) parts.push(theme.fg("error", `-${removed}`));
+-	if (hunks > 0) parts.push(theme.fg("dim", `${hunks} hunk${hunks !== 1 ? "s" : ""}`));
+-	return parts.join(theme.fg("dim", " / "));
+-}
+-
+-type DiffStats = {
+-	added: number;
+-	removed: number;
+-	hunks: number;
+-	lines: number;
+-};
+-
+-function getDiffStats(diffText: string): DiffStats {
+-	const lines = diffText ? diffText.split("\n") : [];
+-	let added = 0;
+-	let removed = 0;
+-	let hunks = 0;
+-	let inHunk = false;
+-
+-	for (const line of lines) {
+-		const isAdded = line.startsWith("+");
+-		const isRemoved = line.startsWith("-");
+-		const isChange = isAdded || isRemoved;
+-
+-		if (isAdded) added++;
+-		if (isRemoved) removed++;
+-
+-		if (isChange && !inHunk) {
+-			hunks++;
+-			inHunk = true;
+-		} else if (!isChange) {
+-			inHunk = false;
+-		}
+-	}
+-
+-	return { added, removed, hunks, lines: lines.length };
+-}
+-
+-function truncateDiffByHunk(
+-	diffText: string,
+-	maxHunks: number,
+-	maxLines: number,
+-): { text: string; hiddenHunks: number; hiddenLines: number } {
+-	const lines = diffText ? diffText.split("\n") : [];
+-	const totalStats = getDiffStats(diffText);
+-	const kept: string[] = [];
+-	let inHunk = false;
+-	let currentHunks = 0;
+-	let reachedLimit = false;
+-
+-	for (const line of lines) {
+-		const isChange = line.startsWith("+") || line.startsWith("-");
+-		if (isChange && !inHunk) {
+-			currentHunks++;
+-			inHunk = true;
+-		}
+-		if (!isChange) {
+-			inHunk = false;
+-		}
+-
+-		if (currentHunks > maxHunks) {
+-			reachedLimit = true;
+-			break;
+-		}
+-
+-		kept.push(line);
+-		if (kept.length >= maxLines) {
+-			reachedLimit = true;
+-			break;
+-		}
+-	}
+-
+-	if (!reachedLimit) {
+-		return { text: diffText, hiddenHunks: 0, hiddenLines: 0 };
+-	}
+-
+-	const keptStats = getDiffStats(kept.join("\n"));
+-	return {
+-		text: kept.join("\n"),
+-		hiddenHunks: Math.max(0, totalStats.hunks - keptStats.hunks),
+-		hiddenLines: Math.max(0, totalStats.lines - kept.length),
+-	};
+-}
+-
+-interface ParsedDiagnostic {
+-	filePath: string;
+-	line: number;
+-	col: number;
+-	severity: "error" | "warning" | "info" | "hint";
+-	source?: string;
+-	message: string;
+-	code?: string;
+-}
+-
+-function parseDiagnosticMessage(msg: string): ParsedDiagnostic | null {
+-	// Format: filePath:line:col [severity] [source] message (code)
+-	const match = msg.match(/^(.+?):(\d+):(\d+)\s+\[(\w+)\]\s+(?:\[([^\]]+)\]\s+)?(.+?)(?:\s+\(([^)]+)\))?$/);
+-	if (!match) return null;
+-	return {
+-		filePath: match[1],
+-		line: parseInt(match[2], 10),
+-		col: parseInt(match[3], 10),
+-		severity: match[4] as ParsedDiagnostic["severity"],
+-		source: match[5],
+-		message: match[6],
+-		code: match[7],
+-	};
+-}
+-
+-function formatDiagnostics(diag: { errored: boolean; summary: string; messages: string[] }, expanded: boolean): string {
+-	if (diag.messages.length === 0) return "";
+-
+-	// Parse and group diagnostics by file
+-	const byFile = new Map<string, ParsedDiagnostic[]>();
+-	const unparsed: string[] = [];
+-
+-	for (const msg of diag.messages) {
+-		const parsed = parseDiagnosticMessage(msg);
+-		if (parsed) {
+-			const existing = byFile.get(parsed.filePath) ?? [];
+-			existing.push(parsed);
+-			byFile.set(parsed.filePath, existing);
+-		} else {
+-			unparsed.push(msg);
+-		}
+-	}
+-
+-	const headerIcon = diag.errored
+-		? theme.styledSymbol("status.error", "error")
+-		: theme.styledSymbol("status.warning", "warning");
+-	let output = `\n\n${headerIcon} ${theme.fg("toolTitle", "Diagnostics")} ${theme.fg("dim", `(${diag.summary})`)}`;
+-
+-	const maxDiags = expanded ? diag.messages.length : 5;
+-	let shown = 0;
+-
+-	// Render grouped diagnostics with file icons
+-	const files = Array.from(byFile.entries());
+-	for (let fi = 0; fi < files.length && shown < maxDiags; fi++) {
+-		const [filePath, diagnostics] = files[fi];
+-		const isLastFile = fi === files.length - 1 && unparsed.length === 0;
+-		const fileBranch = isLastFile ? theme.tree.last : theme.tree.branch;
+-
+-		// File header with icon
+-		const fileLang = getLanguageFromPath(filePath);
+-		const fileIcon = theme.fg("muted", theme.getLangIcon(fileLang));
+-		output += `\n ${theme.fg("dim", fileBranch)} ${fileIcon} ${theme.fg("accent", filePath)}`;
+-		shown++;
+-
+-		// Render diagnostics for this file
+-		for (let di = 0; di < diagnostics.length && shown < maxDiags; di++) {
+-			const d = diagnostics[di];
+-			const isLastDiag = di === diagnostics.length - 1;
+-			const diagBranch = isLastFile
+-				? isLastDiag
+-					? `   ${theme.tree.last}`
+-					: `   ${theme.tree.branch}`
+-				: isLastDiag
+-					? ` ${theme.tree.vertical} ${theme.tree.last}`
+-					: ` ${theme.tree.vertical} ${theme.tree.branch}`;
+-
+-			const sevIcon =
+-				d.severity === "error"
+-					? theme.styledSymbol("status.error", "error")
+-					: d.severity === "warning"
+-						? theme.styledSymbol("status.warning", "warning")
+-						: theme.styledSymbol("status.info", "muted");
+-			const location = theme.fg("dim", `:${d.line}:${d.col}`);
+-			const codeTag = d.code ? theme.fg("dim", ` (${d.code})`) : "";
+-			const msgColor = d.severity === "error" ? "error" : d.severity === "warning" ? "warning" : "toolOutput";
+-
+-			output += `\n ${theme.fg("dim", diagBranch)} ${sevIcon}${location} ${theme.fg(msgColor, d.message)}${codeTag}`;
+-			shown++;
+-		}
+-	}
+-
+-	// Render unparsed messages (fallback)
+-	for (const msg of unparsed) {
+-		if (shown >= maxDiags) break;
+-		const color = msg.includes("[error]") ? "error" : msg.includes("[warning]") ? "warning" : "dim";
+-		output += `\n ${theme.fg("dim", theme.tree.branch)} ${theme.fg(color, msg)}`;
+-		shown++;
+-	}
+-
+-	if (diag.messages.length > shown) {
+-		const remaining = diag.messages.length - shown;
+-		output += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", `${theme.format.ellipsis} ${remaining} more`)} ${theme.fg("dim", "(Ctrl+O to expand)")}`;
+-	}
+-
+-	return output;
+-}
+ 
+ function formatCompactValue(value: unknown, maxLength: number): string {
+ 	let rendered = "";
+@@ -309,24 +83,6 @@ function formatArgsPreview(
+ 	return { lines, remaining: Math.max(total - visible.length, 0), total };
+ }
+ 
+-/**
+- * Convert absolute path to tilde notation if it's in home directory
+- */
+-function shortenPath(path: string): string {
+-	const home = homedir();
+-	if (home && path.startsWith(home)) {
+-		return `~${path.slice(home.length)}`;
+-	}
+-	return path;
+-}
+-
+-/**
+- * Replace tabs with spaces for consistent rendering
+- */
+-function replaceTabs(text: string): string {
+-	return text.replace(/\t/g, "   ");
+-}
+-
+ export interface ToolExecutionOptions {
+ 	showImages?: boolean; // default: true (only used if terminal supports images)
+ }
+@@ -385,10 +141,10 @@ export class ToolExecutionComponent extends Container {
+ 		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
+ 		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
+ 
+-		// Use Box for custom tools, bash, or built-in tools that have renderers
++		// Use Box for custom tools or built-in tools that have renderers
+ 		const hasRenderer = toolName in toolRenderers;
+ 		const hasCustomRenderer = !!(tool?.renderCall || tool?.renderResult);
+-		if (hasCustomRenderer || toolName === "bash" || hasRenderer) {
++		if (hasCustomRenderer || hasRenderer) {
+ 			this.addChild(this.contentBox);
+ 		} else {
+ 			this.addChild(this.contentText);
+@@ -607,13 +363,8 @@ export class ToolExecutionComponent extends Container {
+ 					this.contentBox.addChild(new Text(theme.fg("toolOutput", output), 0, 0));
+ 				}
+ 			}
+-		} else if (this.toolName === "bash") {
+-			// Bash uses Box with visual line truncation
+-			this.contentBox.setBgFn(bgFn);
+-			this.contentBox.clear();
+-			this.renderBashContent();
+ 		} else if (this.toolName in toolRenderers) {
+-			// Built-in tools with custom renderers
++			// Built-in tools with renderers
+ 			const renderer = toolRenderers[this.toolName];
+ 			this.contentBox.setBgFn(bgFn);
+ 			this.contentBox.clear();
+@@ -637,10 +388,19 @@ export class ToolExecutionComponent extends Container {
+ 			// Render result component if we have a result
+ 			if (this.result) {
+ 				try {
++					// Build render context for tools that need extra state
++					const renderContext = this.buildRenderContext();
++
+ 					const resultComponent = renderer.renderResult(
+-						{ content: this.result.content as any, details: this.result.details },
+-						{ expanded: this.expanded, isPartial: this.isPartial, spinnerFrame: this.spinnerFrame },
++						{ content: this.result.content as any, details: this.result.details, isError: this.result.isError },
++						{
++							expanded: this.expanded,
++							isPartial: this.isPartial,
++							spinnerFrame: this.spinnerFrame,
++							renderContext,
++						},
+ 						theme,
++						this.args, // Pass args for tools that need them
+ 					);
+ 					if (resultComponent) {
+ 						// Ensure component has invalidate() method for Component interface
+@@ -708,86 +468,35 @@ export class ToolExecutionComponent extends Container {
+ 	}
+ 
+ 	/**
+-	 * Render bash content using visual line truncation (like bash-execution.ts)
++	 * Build render context for tools that need extra state (bash, edit)
+ 	 */
+-	private renderBashContent(): void {
+-		const command = this.args?.command || "";
++	private buildRenderContext(): Record<string, unknown> {
++		const context: Record<string, unknown> = {};
+ 
+-		// Header
+-		this.contentBox.addChild(
+-			new Text(
+-				theme.fg("toolTitle", theme.bold(`$ ${command || theme.fg("toolOutput", theme.format.ellipsis)}`)),
+-				0,
+-				0,
+-			),
+-		);
+-
+-		if (this.result) {
++		if (this.toolName === "bash" && this.result) {
++			// Bash needs visual line truncation context
+ 			const output = this.getTextOutput().trim();
+-
+-			if (output) {
+-				// Style each line for the output
++			if (output && !this.expanded) {
+ 				const styledOutput = output
+ 					.split("\n")
+ 					.map((line) => theme.fg("toolOutput", line))
+ 					.join("\n");
+-
+-				if (this.expanded) {
+-					// Show all lines when expanded
+-					this.contentBox.addChild(new Text(`\n${styledOutput}`, 0, 0));
+-				} else {
+-					// Use visual line truncation when collapsed
+-					// Box has paddingX=1, so content width = terminal.columns - 2
+-					const { visualLines, skippedCount } = truncateToVisualLines(
+-						`\n${styledOutput}`,
+-						BASH_PREVIEW_LINES,
+-						this.ui.terminal.columns - 2,
+-					);
+-
+-					const totalVisualLines = skippedCount + visualLines.length;
+-					if (skippedCount > 0) {
+-						this.contentBox.addChild(
+-							new Text(
+-								theme.fg(
+-									"dim",
+-									`\n${theme.format.ellipsis} (${skippedCount} earlier lines, showing ${visualLines.length} of ${totalVisualLines}) (ctrl+o to expand)`,
+-								),
+-								0,
+-								0,
+-							),
+-						);
+-					}
+-
+-					// Add pre-rendered visual lines as a raw component
+-					this.contentBox.addChild({
+-						render: () => visualLines,
+-						invalidate: () => {},
+-					});
+-				}
+-			}
+-
+-			// Truncation warnings
+-			const truncation = this.result.details?.truncation;
+-			const fullOutputPath = this.result.details?.fullOutputPath;
+-			if (truncation?.truncated || fullOutputPath) {
+-				const warnings: string[] = [];
+-				if (fullOutputPath) {
+-					warnings.push(`Full output: ${fullOutputPath}`);
+-				}
+-				if (truncation?.truncated) {
+-					if (truncation.truncatedBy === "lines") {
+-						warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
+-					} else {
+-						warnings.push(
+-							`Truncated: ${truncation.outputLines} lines shown (${formatSize(
+-								truncation.maxBytes ?? DEFAULT_MAX_BYTES,
+-							)} limit)`,
+-						);
+-					}
+-				}
+-				this.contentBox.addChild(new Text(`\n${theme.fg("warning", wrapBrackets(warnings.join(". ")))}`, 0, 0));
++				const { visualLines, skippedCount } = truncateToVisualLines(
++					`\n${styledOutput}`,
++					BASH_PREVIEW_LINES,
++					this.ui.terminal.columns - 2,
++				);
++				context.visualLines = visualLines;
++				context.skippedCount = skippedCount;
++				context.totalVisualLines = skippedCount + visualLines.length;
+ 			}
++		} else if (this.toolName === "edit") {
++			// Edit needs diff preview and renderDiff function
++			context.editDiffPreview = this.editDiffPreview;
++			context.renderDiff = renderDiff;
+ 		}
++
++		return context;
+ 	}
+ 
+ 	private getTextOutput(): string {
+@@ -817,214 +526,46 @@ export class ToolExecutionComponent extends Container {
+ 		return output;
+ 	}
+ 
++	/**
++	 * Format a generic tool execution (fallback for tools without custom renderers)
++	 */
+ 	private formatToolExecution(): string {
+-		let text = "";
++		let text = theme.fg("toolTitle", theme.bold(this.toolLabel));
+ 
+-		if (this.toolName === "read") {
+-			const rawPath = this.args?.file_path || this.args?.path || "";
+-			const path = shortenPath(rawPath);
+-			const offset = this.args?.offset;
+-			const limit = this.args?.limit;
+-			const fileType = getFileType(rawPath);
++		const argTotal =
++			this.args && typeof this.args === "object"
++				? Object.keys(this.args as Record<string, unknown>).length
++				: this.args === undefined
++					? 0
++					: 1;
++		const argPreviewLimit = this.expanded ? argTotal : GENERIC_ARG_PREVIEW;
++		const valueLimit = this.expanded ? 2000 : GENERIC_VALUE_MAX;
++		const argsPreview = formatArgsPreview(this.args, argPreviewLimit, valueLimit);
+ 
+-			let pathDisplay = path ? theme.fg("accent", path) : theme.fg("toolOutput", theme.format.ellipsis);
+-			if (offset !== undefined || limit !== undefined) {
+-				const startLine = offset ?? 1;
+-				const endLine = limit !== undefined ? startLine + limit - 1 : "";
+-				pathDisplay += theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
+-			}
++		text += `\n\n${theme.fg("toolTitle", "Args")} ${theme.fg("dim", `(${argsPreview.total})`)}`;
++		if (argsPreview.lines.length > 0) {
++			text += `\n${argsPreview.lines.join("\n")}`;
++		} else {
++			text += `\n${theme.fg("dim", "(none)")}`;
++		}
++		if (argsPreview.remaining > 0) {
++			text += theme.fg("dim", `\n${theme.format.ellipsis} (${argsPreview.remaining} more args) (ctrl+o to expand)`);
++		}
+ 
+-			text = `${theme.fg("toolTitle", theme.bold(this.toolLabel))} ${pathDisplay}`;
+-
+-			if (this.result) {
+-				const output = this.getTextOutput();
+-
+-				if (fileType === "image") {
+-					// Image file - use image icon
+-					const ext = rawPath.split(".").pop()?.toLowerCase() ?? "image";
+-					text += `${theme.sep.dot}${theme.fg("dim", theme.getLangIcon(ext))}`;
+-					// Images are rendered by the image component, just show hint
+-					text += `\n${theme.fg("muted", "Image rendered below")}`;
+-				} else if (fileType === "binary") {
+-					// Binary file - use binary/pdf/archive icon based on extension
+-					const ext = rawPath.split(".").pop()?.toLowerCase() ?? "binary";
+-					text += `${theme.sep.dot}${theme.fg("dim", theme.getLangIcon(ext))}`;
+-				} else {
+-					// Text file - show line count and language on same line
+-					const lang = getLanguageFromPath(rawPath);
+-					const lines = lang ? highlightCode(replaceTabs(output), lang) : output.split("\n");
+-					text += `${theme.sep.dot}${formatMetadataLine(null, lang)}`;
+-
+-					// Content is hidden by default, only shown when expanded
+-					if (this.expanded) {
+-						text +=
+-							"\n\n" +
+-							lines
+-								.map((line: string) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))))
+-								.join("\n");
+-					} else {
+-						text += `\n${theme.fg("dim", `${theme.nav.expand} Ctrl+O to show content`)}`;
+-					}
+-
+-					// Truncation warning
+-					const truncation = this.result.details?.truncation;
+-					if (truncation?.truncated) {
+-						let warning: string;
+-						if (truncation.firstLineExceedsLimit) {
+-							warning = `First line exceeds ${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`;
+-						} else if (truncation.truncatedBy === "lines") {
+-							warning = `Truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)`;
+-						} else {
+-							warning = `Truncated: ${truncation.outputLines} lines (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`;
+-						}
+-						text += `\n${theme.fg("warning", wrapBrackets(warning))}`;
+-					}
+-				}
+-			}
+-		} else if (this.toolName === "write") {
+-			const rawPath = this.args?.file_path || this.args?.path || "";
+-			const path = shortenPath(rawPath);
+-			const fileContent = this.args?.content || "";
+-			const lang = getLanguageFromPath(rawPath);
+-			const lines = fileContent
+-				? lang
+-					? highlightCode(replaceTabs(fileContent), lang)
+-					: fileContent.split("\n")
+-				: [];
+-			const totalLines = lines.length;
+-
+-			text =
+-				theme.fg("toolTitle", theme.bold(this.toolLabel)) +
+-				" " +
+-				(path ? theme.fg("accent", path) : theme.fg("toolOutput", theme.format.ellipsis));
+-
+-			text += `\n${formatMetadataLine(countLines(fileContent), lang ?? "text")}`;
+-
+-			if (fileContent) {
+-				const maxLines = this.expanded ? lines.length : 10;
+-				const displayLines = lines.slice(0, maxLines);
+-				const remaining = lines.length - maxLines;
+-
+-				text +=
+-					"\n\n" +
+-					displayLines
+-						.map((line: string) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))))
+-						.join("\n");
+-				if (remaining > 0) {
+-					text += theme.fg(
+-						"toolOutput",
+-						`\n${theme.format.ellipsis} (${remaining} more lines, ${totalLines} total) ${wrapBrackets("Ctrl+O to expand")}`,
+-					);
+-				}
+-			}
+-
+-			// Show LSP diagnostics if available
+-			if (this.result?.details?.diagnostics) {
+-				text += formatDiagnostics(this.result.details.diagnostics, this.expanded);
+-			}
+-		} else if (this.toolName === "edit") {
+-			const rawPath = this.args?.file_path || this.args?.path || "";
+-			const path = shortenPath(rawPath);
+-			const editLanguage = getLanguageFromPath(rawPath) ?? "text";
+-			const editIcon = theme.fg("muted", theme.getLangIcon(editLanguage));
+-
+-			// Build path display, appending :line if we have diff info
+-			let pathDisplay = path ? theme.fg("accent", path) : theme.fg("toolOutput", theme.format.ellipsis);
+-			const firstChangedLine =
+-				(this.editDiffPreview && "firstChangedLine" in this.editDiffPreview
+-					? this.editDiffPreview.firstChangedLine
+-					: undefined) ||
+-				(this.result && !this.result.isError ? this.result.details?.firstChangedLine : undefined);
+-			if (firstChangedLine) {
+-				pathDisplay += theme.fg("warning", `:${firstChangedLine}`);
+-			}
+-
+-			text = `${theme.fg("toolTitle", theme.bold(this.toolLabel))} ${editIcon} ${pathDisplay}`;
+-
+-			const editLineCount = countLines(this.args?.newText ?? this.args?.oldText ?? "");
+-			text += `\n${formatMetadataLine(editLineCount, editLanguage)}`;
+-
+-			if (this.result?.isError) {
+-				// Show error from result
+-				const errorText = this.getTextOutput();
+-				if (errorText) {
+-					text += `\n\n${theme.fg("error", errorText)}`;
+-				}
+-			} else if (this.editDiffPreview) {
+-				// Use cached diff preview (works both before and after execution)
+-				if ("error" in this.editDiffPreview) {
+-					text += `\n\n${theme.fg("error", this.editDiffPreview.error)}`;
+-				} else if (this.editDiffPreview.diff) {
+-					const diffStats = getDiffStats(this.editDiffPreview.diff);
+-					text += `\n${theme.fg("dim", theme.format.bracketLeft)}${formatDiffStats(diffStats.added, diffStats.removed, diffStats.hunks)}${theme.fg("dim", theme.format.bracketRight)}`;
+-
+-					const {
+-						text: diffText,
+-						hiddenHunks,
+-						hiddenLines,
+-					} = this.expanded
+-						? { text: this.editDiffPreview.diff, hiddenHunks: 0, hiddenLines: 0 }
+-						: truncateDiffByHunk(this.editDiffPreview.diff, EDIT_DIFF_PREVIEW_HUNKS, EDIT_DIFF_PREVIEW_LINES);
+-
+-					text += `\n\n${renderDiff(diffText, { filePath: rawPath })}`;
+-					if (!this.expanded && (hiddenHunks > 0 || hiddenLines > 0)) {
+-						const remainder: string[] = [];
+-						if (hiddenHunks > 0) remainder.push(`${hiddenHunks} more hunks`);
+-						if (hiddenLines > 0) remainder.push(`${hiddenLines} more lines`);
+-						text += theme.fg(
+-							"toolOutput",
+-							`\n${theme.format.ellipsis} (${remainder.join(", ")}) ${wrapBrackets("Ctrl+O to expand")}`,
+-						);
+-					}
+-				}
+-			}
+-
+-			// Show LSP diagnostics if available
+-			if (this.result?.details?.diagnostics) {
+-				text += formatDiagnostics(this.result.details.diagnostics, this.expanded);
++		const output = this.getTextOutput().trim();
++		text += `\n\n${theme.fg("toolTitle", "Output")}`;
++		if (output) {
++			const lines = output.split("\n");
++			const maxLines = this.expanded ? lines.length : GENERIC_PREVIEW_LINES;
++			const displayLines = lines.slice(-maxLines);
++			const remaining = lines.length - displayLines.length;
++			text += ` ${theme.fg("dim", `(${lines.length} lines)`)}`;
++			text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
++			if (remaining > 0) {
++				text += theme.fg("dim", `\n${theme.format.ellipsis} (${remaining} earlier lines) (ctrl+o to expand)`);
+ 			}
+ 		} else {
+-			// Generic tool (shouldn't reach here for custom tools)
+-			text = theme.fg("toolTitle", theme.bold(this.toolLabel));
+-
+-			const argTotal =
+-				this.args && typeof this.args === "object"
+-					? Object.keys(this.args as Record<string, unknown>).length
+-					: this.args === undefined
+-						? 0
+-						: 1;
+-			const argPreviewLimit = this.expanded ? argTotal : GENERIC_ARG_PREVIEW;
+-			const valueLimit = this.expanded ? 2000 : GENERIC_VALUE_MAX;
+-			const argsPreview = formatArgsPreview(this.args, argPreviewLimit, valueLimit);
+-
+-			text += `\n\n${theme.fg("toolTitle", "Args")} ${theme.fg("dim", `(${argsPreview.total})`)}`;
+-			if (argsPreview.lines.length > 0) {
+-				text += `\n${argsPreview.lines.join("\n")}`;
+-			} else {
+-				text += `\n${theme.fg("dim", "(none)")}`;
+-			}
+-			if (argsPreview.remaining > 0) {
+-				text += theme.fg(
+-					"dim",
+-					`\n${theme.format.ellipsis} (${argsPreview.remaining} more args) (ctrl+o to expand)`,
+-				);
+-			}
+-
+-			const output = this.getTextOutput().trim();
+-			text += `\n\n${theme.fg("toolTitle", "Output")}`;
+-			if (output) {
+-				const lines = output.split("\n");
+-				const maxLines = this.expanded ? lines.length : GENERIC_PREVIEW_LINES;
+-				const displayLines = lines.slice(-maxLines);
+-				const remaining = lines.length - displayLines.length;
+-				text += ` ${theme.fg("dim", `(${lines.length} lines)`)}`;
+-				text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
+-				if (remaining > 0) {
+-					text += theme.fg("dim", `\n${theme.format.ellipsis} (${remaining} earlier lines) (ctrl+o to expand)`);
+-				}
+-			} else {
+-				text += ` ${theme.fg("dim", "(empty)")}`;
+-			}
++			text += ` ${theme.fg("dim", "(empty)")}`;
+ 		}
+ 
+ 		return text;

@@ -1,0 +1,375 @@
+diff --git a/package-lock.json b/package-lock.json
+index da0c16f3a..c32e18a0e 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -938,9 +938,9 @@
+ 			}
+ 		},
+ 		"node_modules/@mariozechner/mini-lit": {
+-			"version": "0.1.9",
+-			"resolved": "https://registry.npmjs.org/@mariozechner/mini-lit/-/mini-lit-0.1.9.tgz",
+-			"integrity": "sha512-RT+9+76YnFowTLyjJKDk6Ll6JC9qJ0SAbttdcJcgC64B9YA03Fa/PC6UxcI0PEmE+QWUdPTEyXJ1U5UsgzQxTw==",
++			"version": "0.1.10",
++			"resolved": "https://registry.npmjs.org/@mariozechner/mini-lit/-/mini-lit-0.1.10.tgz",
++			"integrity": "sha512-lgz0IziFaT1iG2jG6fK2P8Z6J3A+XT+25C3A8YmHdHarY7u4RJE2kEtoP1LXH7seijdiq3X/iMBPRjPGDBoQFw==",
+ 			"dependencies": {
+ 				"@preact/signals-core": "^1.12.1",
+ 				"class-variance-authority": "^0.7.1",
+@@ -4849,9 +4849,9 @@
+ 			}
+ 		},
+ 		"node_modules/vite": {
+-			"version": "7.1.9",
+-			"resolved": "https://registry.npmjs.org/vite/-/vite-7.1.9.tgz",
+-			"integrity": "sha512-4nVGliEpxmhCL8DslSAUdxlB6+SMrhB0a1v5ijlh1xB1nEPuy1mxaHxysVucLHuWryAxLWg6a5ei+U4TLn/rFg==",
++			"version": "7.1.11",
++			"resolved": "https://registry.npmjs.org/vite/-/vite-7.1.11.tgz",
++			"integrity": "sha512-uzcxnSDVjAopEUjljkWh8EIrg6tlzrjFUfMcR1EVsRDGwf/ccef0qQPRyOrROwhrTDaApueq+ja+KLPlzR/zdg==",
+ 			"dev": true,
+ 			"license": "MIT",
+ 			"dependencies": {
+@@ -5246,11 +5246,11 @@
+ 		},
+ 		"packages/agent": {
+ 			"name": "@mariozechner/pi-agent",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-ai": "^0.5.44",
+-				"@mariozechner/pi-tui": "^0.5.44"
++				"@mariozechner/pi-tui": "^0.5.45"
+ 			},
+ 			"devDependencies": {
+ 				"@types/node": "^24.3.0",
+@@ -5263,7 +5263,7 @@
+ 		},
+ 		"packages/agent-old": {
+ 			"name": "@mariozechner/pi-agent-old",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-tui": "^0.5.44",
+@@ -5311,7 +5311,7 @@
+ 		},
+ 		"packages/ai": {
+ 			"name": "@mariozechner/pi-ai",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@anthropic-ai/sdk": "^0.61.0",
+@@ -5408,7 +5408,7 @@
+ 		},
+ 		"packages/coding-agent": {
+ 			"name": "@mariozechner/coding-agent",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-agent": "^0.5.44",
+@@ -5459,10 +5459,10 @@
+ 		},
+ 		"packages/pods": {
+ 			"name": "@mariozechner/pi",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-agent": "^0.5.44",
++				"@mariozechner/pi-agent": "^0.5.45",
+ 				"chalk": "^5.5.0"
+ 			},
+ 			"bin": {
+@@ -5487,7 +5487,7 @@
+ 		},
+ 		"packages/proxy": {
+ 			"name": "@mariozechner/pi-proxy",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"dependencies": {
+ 				"@hono/node-server": "^1.14.0",
+ 				"hono": "^4.6.16"
+@@ -5503,7 +5503,7 @@
+ 		},
+ 		"packages/tui": {
+ 			"name": "@mariozechner/pi-tui",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@types/mime-types": "^2.1.4",
+@@ -5543,11 +5543,11 @@
+ 		},
+ 		"packages/web-ui": {
+ 			"name": "@mariozechner/pi-web-ui",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/pi-ai": "^0.5.43",
+-				"@mariozechner/pi-tui": "^0.5.44",
++				"@mariozechner/pi-tui": "^0.5.45",
+ 				"docx-preview": "^0.3.7",
+ 				"jszip": "^3.10.1",
+ 				"lit": "^3.3.1",
+@@ -5557,13 +5557,13 @@
+ 				"xlsx": "^0.18.5"
+ 			},
+ 			"devDependencies": {
+-				"@mariozechner/mini-lit": "^0.1.9",
++				"@mariozechner/mini-lit": "^0.1.10",
+ 				"@tailwindcss/cli": "^4.0.0-beta.14",
+ 				"concurrently": "^9.2.1",
+ 				"typescript": "^5.7.3"
+ 			},
+ 			"peerDependencies": {
+-				"@mariozechner/mini-lit": "^0.1.9"
++				"@mariozechner/mini-lit": "^0.1.10"
+ 			}
+ 		}
+ 	}
+diff --git a/packages/agent-old/package-lock.json b/packages/agent-old/package-lock.json
+index 25b1f53cb..d1b4f7c24 100644
+--- a/packages/agent-old/package-lock.json
++++ b/packages/agent-old/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+ 	"name": "@mariozechner/pi-agent",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"lockfileVersion": 3,
+ 	"requires": true,
+ 	"packages": {
+ 		"": {
+ 			"name": "@mariozechner/pi-agent",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@mariozechner/tui": "^0.1.1",
+diff --git a/packages/agent-old/package.json b/packages/agent-old/package.json
+index 43fd0988a..727b677c3 100644
+--- a/packages/agent-old/package.json
++++ b/packages/agent-old/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-agent-old",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "General-purpose agent with tool calling and session persistence",
+ 	"type": "module",
+ 	"bin": {
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index 7c757e33f..59e819717 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-agent",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+@@ -19,7 +19,7 @@
+ 	},
+ 	"dependencies": {
+ 		"@mariozechner/pi-ai": "^0.5.44",
+-		"@mariozechner/pi-tui": "^0.5.44"
++		"@mariozechner/pi-tui": "^0.5.45"
+ 	},
+ 	"keywords": [
+ 		"ai",
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index 48b332998..b31d6ca62 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-ai",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+diff --git a/packages/ai/src/models.generated.ts b/packages/ai/src/models.generated.ts
+index 4c98e5ac6..5675aa22b 100644
+--- a/packages/ai/src/models.generated.ts
++++ b/packages/ai/src/models.generated.ts
+@@ -2634,8 +2634,8 @@ export const MODELS = {
+ 				cacheRead: 0,
+ 				cacheWrite: 0,
+ 			},
+-			contextWindow: 262144,
+-			maxTokens: 4096,
++			contextWindow: 262000,
++			maxTokens: 262000,
+ 		} satisfies Model<"openai-completions">,
+ 		"qwen/qwen3-coder": {
+ 			id: "qwen/qwen3-coder",
+@@ -3793,23 +3793,6 @@ export const MODELS = {
+ 			contextWindow: 65536,
+ 			maxTokens: 4096,
+ 		} satisfies Model<"openai-completions">,
+-		"meta-llama/llama-3.1-405b-instruct": {
+-			id: "meta-llama/llama-3.1-405b-instruct",
+-			name: "Meta: Llama 3.1 405B Instruct",
+-			api: "openai-completions",
+-			provider: "openrouter",
+-			baseUrl: "https://openrouter.ai/api/v1",
+-			reasoning: false,
+-			input: ["text"],
+-			cost: {
+-				input: 0.7999999999999999,
+-				output: 0.7999999999999999,
+-				cacheRead: 0,
+-				cacheWrite: 0,
+-			},
+-			contextWindow: 32768,
+-			maxTokens: 16384,
+-		} satisfies Model<"openai-completions">,
+ 		"meta-llama/llama-3.1-8b-instruct": {
+ 			id: "meta-llama/llama-3.1-8b-instruct",
+ 			name: "Meta: Llama 3.1 8B Instruct",
+@@ -3827,6 +3810,23 @@ export const MODELS = {
+ 			contextWindow: 16384,
+ 			maxTokens: 16384,
+ 		} satisfies Model<"openai-completions">,
++		"meta-llama/llama-3.1-405b-instruct": {
++			id: "meta-llama/llama-3.1-405b-instruct",
++			name: "Meta: Llama 3.1 405B Instruct",
++			api: "openai-completions",
++			provider: "openrouter",
++			baseUrl: "https://openrouter.ai/api/v1",
++			reasoning: false,
++			input: ["text"],
++			cost: {
++				input: 0.7999999999999999,
++				output: 0.7999999999999999,
++				cacheRead: 0,
++				cacheWrite: 0,
++			},
++			contextWindow: 32768,
++			maxTokens: 16384,
++		} satisfies Model<"openai-completions">,
+ 		"meta-llama/llama-3.1-70b-instruct": {
+ 			id: "meta-llama/llama-3.1-70b-instruct",
+ 			name: "Meta: Llama 3.1 70B Instruct",
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 70415d4f2..7bcbb7491 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/coding-agent",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"type": "module",
+ 	"bin": {
+diff --git a/packages/pods/package-lock.json b/packages/pods/package-lock.json
+index 632b4ac41..e12960c4d 100644
+--- a/packages/pods/package-lock.json
++++ b/packages/pods/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+ 	"name": "@mariozechner/pi",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"lockfileVersion": 3,
+ 	"requires": true,
+ 	"packages": {
+ 		"": {
+ 			"name": "@mariozechner/pi",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@ai-sdk/openai": "^2.0.5",
+diff --git a/packages/pods/package.json b/packages/pods/package.json
+index 531dc4691..a804c7e87 100644
+--- a/packages/pods/package.json
++++ b/packages/pods/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "CLI tool for managing vLLM deployments on GPU pods",
+ 	"type": "module",
+ 	"bin": {
+@@ -34,7 +34,7 @@
+ 		"node": ">=20.0.0"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent": "^0.5.44",
++		"@mariozechner/pi-agent": "^0.5.45",
+ 		"chalk": "^5.5.0"
+ 	},
+ 	"devDependencies": {}
+diff --git a/packages/proxy/package.json b/packages/proxy/package.json
+index 4ecbb60fb..6bd40d795 100644
+--- a/packages/proxy/package.json
++++ b/packages/proxy/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-proxy",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"type": "module",
+ 	"description": "CORS and authentication proxy for pi-ai",
+ 	"main": "dist/index.js",
+diff --git a/packages/tui/package-lock.json b/packages/tui/package-lock.json
+index da56828da..270b93843 100644
+--- a/packages/tui/package-lock.json
++++ b/packages/tui/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+ 	"name": "@mariozechner/tui",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"lockfileVersion": 3,
+ 	"requires": true,
+ 	"packages": {
+ 		"": {
+ 			"name": "@mariozechner/tui",
+-			"version": "0.5.44",
++			"version": "0.5.45",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@types/mime-types": "^2.1.4",
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 21ee8efc3..0abe74bfa 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-tui",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+diff --git a/packages/web-ui/package.json b/packages/web-ui/package.json
+index 4a462be53..37367eef7 100644
+--- a/packages/web-ui/package.json
++++ b/packages/web-ui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-web-ui",
+-	"version": "0.5.44",
++	"version": "0.5.45",
+ 	"description": "Reusable web UI components for AI chat interfaces powered by @mariozechner/pi-ai",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+@@ -18,7 +18,7 @@
+ 	},
+ 	"dependencies": {
+ 		"@mariozechner/pi-ai": "^0.5.43",
+-		"@mariozechner/pi-tui": "^0.5.44",
++		"@mariozechner/pi-tui": "^0.5.45",
+ 		"docx-preview": "^0.3.7",
+ 		"jszip": "^3.10.1",
+ 		"lit": "^3.3.1",

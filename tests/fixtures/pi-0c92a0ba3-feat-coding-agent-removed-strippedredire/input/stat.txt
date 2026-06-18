@@ -1,0 +1,5 @@
+ packages/coding-agent/CHANGELOG.md                 |  4 ++
+ packages/coding-agent/src/tools/bash-normalize.ts  | 23 +----------
+ .../coding-agent/test/python-tool-settings.test.ts | 19 ++++++---
+ .../coding-agent/test/tools/bash-normalize.test.ts | 46 +---------------------
+ 4 files changed, 21 insertions(+), 71 deletions(-)

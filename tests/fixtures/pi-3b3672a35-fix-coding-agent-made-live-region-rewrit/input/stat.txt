@@ -1,0 +1,4 @@
+ docs/tui-core-renderer.md                          |  11 ++-
+ .../src/modes/components/transcript-container.ts   |  31 +++---
+ .../test/tool-live-region-scrollback.test.ts       | 107 ++++++++++++++++++---
+ 3 files changed, 119 insertions(+), 30 deletions(-)

@@ -1,0 +1,7 @@
+ .../coding-agent/src/config/settings-schema.ts     | 10 +++++
+ .../src/modes/components/settings-selector.ts      |  2 +
+ .../src/modes/components/status-line.ts            |  5 ++-
+ .../src/modes/controllers/selector-controller.ts   |  7 ++++
+ .../coding-agent/src/modes/interactive-mode.ts     |  2 +-
+ .../coding-agent/test/status-line-overflow.test.ts | 45 +++++++++++++++++++++-
+ 6 files changed, 68 insertions(+), 3 deletions(-)

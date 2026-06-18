@@ -1,0 +1,43 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 8369fc1e0..3e46aef3c 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,10 +1,16 @@
+ # Changelog
+ 
+ ## [Unreleased]
++
+ ### Added
+ 
+ - Added `getAllServerNames()` method to MCPManager for enumerating all known servers
+ 
++### Changed
++
++- Changed default edit mode from `patch` to `hashline` for more precise code modifications
++- Changed `readHashLines` setting default from false to true to enable hash line reading by default
++
+ ### Fixed
+ 
+ - Fixed `omp setup` crashing with uncaught exception when no component argument provided; now shows help ([#35](https://github.com/can1357/oh-my-pi/issues/35))
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index e511e1dc0..9ce9ce075 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -249,7 +249,7 @@ export const SETTINGS_SCHEMA = {
+ 	},
+ 	readHashLines: {
+ 		type: "boolean",
+-		default: false,
++		default: true,
+ 		ui: {
+ 			tab: "config",
+ 			label: "Read hash lines",
+@@ -743,7 +743,7 @@ export const SETTINGS_SCHEMA = {
+ 	"edit.mode": {
+ 		type: "enum",
+ 		values: ["replace", "patch", "hashline"] as const,
+-		default: "patch",
++		default: "hashline",
+ 		ui: {
+ 			tab: "config",
+ 			label: "Edit mode",

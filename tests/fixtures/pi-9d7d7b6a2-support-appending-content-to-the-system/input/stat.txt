@@ -1,0 +1,3 @@
+ .gitignore                        |   3 +-
+ packages/coding-agent/src/main.ts | 109 +++++++++++++++++++++-----------------
+ 2 files changed, 62 insertions(+), 50 deletions(-)

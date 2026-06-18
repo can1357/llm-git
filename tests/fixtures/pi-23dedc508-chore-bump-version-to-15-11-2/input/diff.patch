@@ -1,0 +1,500 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 8f55284b1..109a82c19 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2330,7 +2330,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "pi-ast"
+-version = "15.11.1"
++version = "15.11.2"
+ dependencies = [
+  "anyhow",
+  "ast-grep-core",
+@@ -2398,7 +2398,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "pi-iso"
+-version = "15.11.1"
++version = "15.11.2"
+ dependencies = [
+  "async-trait",
+  "libc",
+@@ -2410,7 +2410,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "pi-natives"
+-version = "15.11.1"
++version = "15.11.2"
+ dependencies = [
+  "anyhow",
+  "arboard",
+@@ -2458,7 +2458,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "pi-shell"
+-version = "15.11.1"
++version = "15.11.2"
+ dependencies = [
+  "anyhow",
+  "brush-builtins",
+diff --git a/Cargo.toml b/Cargo.toml
+index 00ee25257..fff265aca 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -4,7 +4,7 @@ exclude = ["crates/brush-core-vendored", "crates/brush-builtins-vendored"]
+ resolver = "3"
+ 
+ [workspace.package]
+-version = "15.11.1"
++version = "15.11.2"
+ edition = "2024"
+ license = "MIT"
+ authors = ["Can Boluk"]
+diff --git a/bun.lock b/bun.lock
+index 7a1617b5a..90d72824d 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -15,7 +15,7 @@
+     },
+     "packages/agent": {
+       "name": "@oh-my-pi/pi-agent-core",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "@oh-my-pi/pi-ai": "catalog:",
+         "@oh-my-pi/pi-catalog": "catalog:",
+@@ -32,7 +32,7 @@
+     },
+     "packages/ai": {
+       "name": "@oh-my-pi/pi-ai",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "@bufbuild/protobuf": "catalog:",
+         "@oh-my-pi/pi-catalog": "catalog:",
+@@ -47,7 +47,7 @@
+     },
+     "packages/catalog": {
+       "name": "@oh-my-pi/pi-catalog",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "@bufbuild/protobuf": "catalog:",
+         "@oh-my-pi/pi-utils": "catalog:",
+@@ -60,7 +60,7 @@
+     },
+     "packages/coding-agent": {
+       "name": "@oh-my-pi/pi-coding-agent",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "bin": {
+         "omp": "src/cli.ts",
+       },
+@@ -108,7 +108,7 @@
+     },
+     "packages/hashline": {
+       "name": "@oh-my-pi/hashline",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "diff": "catalog:",
+         "lru-cache": "catalog:",
+@@ -119,7 +119,7 @@
+     },
+     "packages/mnemopi": {
+       "name": "@oh-my-pi/pi-mnemopi",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "bin": {
+         "mnemopi": "src/cli.ts",
+       },
+@@ -137,7 +137,7 @@
+     },
+     "packages/natives": {
+       "name": "@oh-my-pi/pi-natives",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "devDependencies": {
+         "@napi-rs/cli": "catalog:",
+         "@types/bun": "catalog:",
+@@ -145,7 +145,7 @@
+     },
+     "packages/snapcompact": {
+       "name": "@oh-my-pi/snapcompact",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "@oh-my-pi/pi-ai": "catalog:",
+         "@oh-my-pi/pi-natives": "catalog:",
+@@ -157,7 +157,7 @@
+     },
+     "packages/stats": {
+       "name": "@oh-my-pi/omp-stats",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "bin": {
+         "omp-stats": "./src/index.ts",
+       },
+@@ -183,7 +183,7 @@
+     },
+     "packages/swarm-extension": {
+       "name": "@oh-my-pi/swarm-extension",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "bin": {
+         "omp-swarm": "src/cli.ts",
+       },
+@@ -199,7 +199,7 @@
+     },
+     "packages/tui": {
+       "name": "@oh-my-pi/pi-tui",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "@oh-my-pi/pi-natives": "catalog:",
+         "@oh-my-pi/pi-utils": "catalog:",
+@@ -240,7 +240,7 @@
+     },
+     "packages/utils": {
+       "name": "@oh-my-pi/pi-utils",
+-      "version": "15.11.1",
++      "version": "15.11.2",
+       "dependencies": {
+         "@oh-my-pi/pi-natives": "catalog:",
+         "beautiful-mermaid": "catalog:",
+@@ -280,17 +280,17 @@
+     "@huggingface/transformers": "^4.2.0",
+     "@mozilla/readability": "^0.6.0",
+     "@napi-rs/cli": "3.7.0",
+-    "@oh-my-pi/hashline": "15.11.1",
+-    "@oh-my-pi/omp-stats": "15.11.1",
+-    "@oh-my-pi/pi-agent-core": "15.11.1",
+-    "@oh-my-pi/pi-ai": "15.11.1",
+-    "@oh-my-pi/pi-catalog": "15.11.1",
+-    "@oh-my-pi/pi-coding-agent": "15.11.1",
+-    "@oh-my-pi/pi-mnemopi": "15.11.1",
+-    "@oh-my-pi/pi-natives": "15.11.1",
+-    "@oh-my-pi/pi-tui": "15.11.1",
+-    "@oh-my-pi/pi-utils": "15.11.1",
+-    "@oh-my-pi/snapcompact": "15.11.1",
++    "@oh-my-pi/hashline": "15.11.2",
++    "@oh-my-pi/omp-stats": "15.11.2",
++    "@oh-my-pi/pi-agent-core": "15.11.2",
++    "@oh-my-pi/pi-ai": "15.11.2",
++    "@oh-my-pi/pi-catalog": "15.11.2",
++    "@oh-my-pi/pi-coding-agent": "15.11.2",
++    "@oh-my-pi/pi-mnemopi": "15.11.2",
++    "@oh-my-pi/pi-natives": "15.11.2",
++    "@oh-my-pi/pi-tui": "15.11.2",
++    "@oh-my-pi/pi-utils": "15.11.2",
++    "@oh-my-pi/snapcompact": "15.11.2",
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/context-async-hooks": "^2.7.1",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.218.0",
+@@ -1297,7 +1297,7 @@
+ 
+     "string-width": ["string-width@4.2.3", "", { "dependencies": { "emoji-regex": "^8.0.0", "is-fullwidth-code-point": "^3.0.0", "strip-ansi": "^6.0.1" } }, "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g=="],
+ 
+-    "string_decoder": ["string_decoder@1.3.0", "", { "dependencies": { "safe-buffer": "~5.2.0" } }, "sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA=="],
++    "string_decoder": ["string_decoder@1.1.1", "", { "dependencies": { "safe-buffer": "~5.1.0" } }, "sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg=="],
+ 
+     "strip-ansi": ["strip-ansi@7.2.0", "", { "dependencies": { "ansi-regex": "^6.2.2" } }, "sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w=="],
+ 
+@@ -1449,8 +1449,6 @@
+ 
+     "string-width/strip-ansi": ["strip-ansi@6.0.1", "", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
+ 
+-    "string_decoder/safe-buffer": ["safe-buffer@5.2.1", "", {}, "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ=="],
+-
+     "wrap-ansi/string-width": ["string-width@8.2.1", "", { "dependencies": { "get-east-asian-width": "^1.5.0", "strip-ansi": "^7.1.2" } }, "sha512-IIaP0g3iy9Cyy18w3M9YcaDudujEAVHKt3a3QJg1+sr/oX96TbaGUubG0hJyCjCBThFH+tFpcIyoUHUn1ogaLA=="],
+ 
+     "xml2js/xmlbuilder": ["xmlbuilder@11.0.1", "", {}, "sha512-fDlsI/kFEx7gLvbecc0/ohLG50fugQp8ryHzMTuW9vSa1GJ0XYWKnhsUx7oie3G98+r56aTQIUB4kht42R3JvA=="],
+@@ -1465,8 +1463,6 @@
+ 
+     "fastembed/onnxruntime-node/tar": ["tar@7.5.16", "", { "dependencies": { "@isaacs/fs-minipass": "^4.0.0", "chownr": "^3.0.0", "minipass": "^7.1.2", "minizlib": "^3.1.0", "yallist": "^5.0.0" } }, "sha512-56adEpPMouktRlBLXiaYFFzZ/3+JXa8P9n7WbR+ibIjtviN55mEaOkiysCnPnWm+7kkui1Dn8J9l+g6zV8731w=="],
+ 
+-    "jszip/readable-stream/string_decoder": ["string_decoder@1.1.1", "", { "dependencies": { "safe-buffer": "~5.1.0" } }, "sha512-n/ShnvDi6FHbbVfviro+WojiFzv+s8MPMHBczVePfUpDJLwoLT0ht1l4YwBCbi8pJAveEEdnkHyPyTP/mzRfwg=="],
+-
+     "log-update/slice-ansi/is-fullwidth-code-point": ["is-fullwidth-code-point@5.1.0", "", { "dependencies": { "get-east-asian-width": "^1.3.1" } }, "sha512-5XHYaSyiqADb4RnZ1Bdad6cPp8Toise4TzEjcOYDHZkTCbKgiUl7WTUCpNWHuxmDt91wnsZBc9xinNzopv3JMQ=="],
+ 
+     "log-update/wrap-ansi/string-width": ["string-width@7.2.0", "", { "dependencies": { "emoji-regex": "^10.3.0", "get-east-asian-width": "^1.0.0", "strip-ansi": "^7.1.0" } }, "sha512-tsaTIkKW9b4N+AEj+SVA+WhJzV7/zMhcSu78mLKWSk7cXMOSHsBKFWUs0fWwq8QyK3MgJBQRX6Gbi4kYbdvGkQ=="],
+diff --git a/crates/pi-natives/src/lib.rs b/crates/pi-natives/src/lib.rs
+index 86fd5c3e3..993c36dfc 100644
+--- a/crates/pi-natives/src/lib.rs
++++ b/crates/pi-natives/src/lib.rs
+@@ -71,7 +71,7 @@ use napi_derive::{module_init, napi};
+ /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
+ /// `packages/natives/native/index.js` (which derives the name from
+ /// `package.json#version`).
+-#[napi(js_name = "__piNativesV15_11_1")]
++#[napi(js_name = "__piNativesV15_11_2")]
+ pub const fn pi_natives_version_sentinel() {}
+ 
+ /// Native module entry point: install crash diagnostics before any tool can
+diff --git a/package.json b/package.json
+index 73126ba96..9a06bb99b 100644
+--- a/package.json
++++ b/package.json
+@@ -21,17 +21,17 @@
+       "@huggingface/transformers": "^4.2.0",
+       "@mozilla/readability": "^0.6.0",
+       "@napi-rs/cli": "3.7.0",
+-      "@oh-my-pi/hashline": "15.11.1",
+-      "@oh-my-pi/omp-stats": "15.11.1",
+-      "@oh-my-pi/pi-agent-core": "15.11.1",
+-      "@oh-my-pi/pi-ai": "15.11.1",
+-      "@oh-my-pi/pi-catalog": "15.11.1",
+-      "@oh-my-pi/pi-coding-agent": "15.11.1",
+-      "@oh-my-pi/pi-mnemopi": "15.11.1",
+-      "@oh-my-pi/pi-natives": "15.11.1",
+-      "@oh-my-pi/pi-tui": "15.11.1",
+-      "@oh-my-pi/pi-utils": "15.11.1",
+-      "@oh-my-pi/snapcompact": "15.11.1",
++      "@oh-my-pi/hashline": "15.11.2",
++      "@oh-my-pi/omp-stats": "15.11.2",
++      "@oh-my-pi/pi-agent-core": "15.11.2",
++      "@oh-my-pi/pi-ai": "15.11.2",
++      "@oh-my-pi/pi-catalog": "15.11.2",
++      "@oh-my-pi/pi-coding-agent": "15.11.2",
++      "@oh-my-pi/pi-mnemopi": "15.11.2",
++      "@oh-my-pi/pi-natives": "15.11.2",
++      "@oh-my-pi/pi-tui": "15.11.2",
++      "@oh-my-pi/pi-utils": "15.11.2",
++      "@oh-my-pi/snapcompact": "15.11.2",
+       "@opentelemetry/api": "^1.9.1",
+       "@opentelemetry/context-async-hooks": "^2.7.1",
+       "@opentelemetry/exporter-trace-otlp-proto": "^0.218.0",
+diff --git a/packages/agent/CHANGELOG.md b/packages/agent/CHANGELOG.md
+index 7b23b6759..1d9ab9a32 100644
+--- a/packages/agent/CHANGELOG.md
++++ b/packages/agent/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## [Unreleased]
+ 
++## [15.11.2] - 2026-06-11
++
+ ### Added
+ 
+ - `AgentTool.concurrency` now also accepts a per-call resolver function `(args) => "shared" | "exclusive"`, letting tools pick the scheduling mode from the call's arguments (a throwing resolver falls back to `"exclusive"`)
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index fdab360f0..fa03f00db 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-agent-core",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 30221f581..ff44771c3 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## [Unreleased]
+ 
++## [15.11.2] - 2026-06-11
++
+ ### Fixed
+ 
+ - Fixed Anthropic encoding of error tool results with whitespace-only content so requests no longer 400 with `tool_result: content cannot be empty if is_error is true`
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index e5f1c02d4..1a421619c 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-ai",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/catalog/package.json b/packages/catalog/package.json
+index 59301a186..1c582d93b 100644
+--- a/packages/catalog/package.json
++++ b/packages/catalog/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-catalog",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 29bc839ca..8fdbce5bc 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## [Unreleased]
+ 
++## [15.11.2] - 2026-06-11
++
+ ### Added
+ 
+ - Added the Expert Elixir language server (`expert`, invoked as `expert --stdio`) to the built-in LSP server list, auto-detected for Mix projects (`mix.exs`/`mix.lock`). When both are installed, `elixir-ls` remains the primary navigation server (Expert is ordered after it).
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 61d4eb93c..fde3e818e 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-coding-agent",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/hashline/package.json b/packages/hashline/package.json
+index 3d0fcbb66..fa5c67e8a 100644
+--- a/packages/hashline/package.json
++++ b/packages/hashline/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/hashline",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Hashline: a compact, line-anchored patch language and applier. Pluggable FS/IO so it works over disk, in-memory, or any custom backend.",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/mnemopi/package.json b/packages/mnemopi/package.json
+index 477b0f517..34d6bd786 100644
+--- a/packages/mnemopi/package.json
++++ b/packages/mnemopi/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-mnemopi",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Local SQLite memory engine for Oh My Pi agents",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/natives/native/index.d.ts b/packages/natives/native/index.d.ts
+index 8d7b9be35..9eb10cc32 100644
+--- a/packages/natives/native/index.d.ts
++++ b/packages/natives/native/index.d.ts
+@@ -136,7 +136,7 @@ export declare class Shell {
+  * `packages/natives/native/index.js` (which derives the name from
+  * `package.json#version`).
+  */
+-export declare function __piNativesV15_11_1(): void
++export declare function __piNativesV15_11_2(): void
+ 
+ /**
+  * Apply conservative pre-execution rewrites to a bash command.
+diff --git a/packages/natives/native/index.js b/packages/natives/native/index.js
+index 1ab9915d3..8634b19dd 100644
+--- a/packages/natives/native/index.js
++++ b/packages/natives/native/index.js
+@@ -23,7 +23,7 @@ export const PtySession = nativeBindings.PtySession;
+ export const Shell = nativeBindings.Shell;
+ 
+ // functions
+-export const __piNativesV15_11_1 = nativeBindings.__piNativesV15_11_1;
++export const __piNativesV15_11_2 = nativeBindings.__piNativesV15_11_2;
+ export const applyBashFixups = nativeBindings.applyBashFixups;
+ export const astEdit = nativeBindings.astEdit;
+ export const astGrep = nativeBindings.astGrep;
+diff --git a/packages/natives/package.json b/packages/natives/package.json
+index a0948d0d0..d003f2a04 100644
+--- a/packages/natives/package.json
++++ b/packages/natives/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@oh-my-pi/pi-natives",
+-  "version": "15.11.1",
++  "version": "15.11.2",
+   "description": "Native Rust bindings for grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
+   "type": "module",
+   "homepage": "https://omp.sh",
+diff --git a/packages/snapcompact/package.json b/packages/snapcompact/package.json
+index a61a482e3..89b7a85ec 100644
+--- a/packages/snapcompact/package.json
++++ b/packages/snapcompact/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/snapcompact",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Bitmap-frame context compression for vision-capable LLMs",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/stats/package.json b/packages/stats/package.json
+index 0b8b6bfa4..6fc42caf9 100644
+--- a/packages/stats/package.json
++++ b/packages/stats/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/omp-stats",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Local observability dashboard for pi AI usage statistics",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/swarm-extension/package.json b/packages/swarm-extension/package.json
+index 18e5648e9..3f9363b15 100644
+--- a/packages/swarm-extension/package.json
++++ b/packages/swarm-extension/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/swarm-extension",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Swarm orchestration extension for omp",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Derek Rynd",
+diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
+index 8c56c2ee8..01c99d6a5 100644
+--- a/packages/tui/CHANGELOG.md
++++ b/packages/tui/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## [Unreleased]
+ 
++## [15.11.2] - 2026-06-11
++
+ ### Fixed
+ 
+ - Fixed Ctrl+C/exit corrupting the parent shell on Windows: `emergencyTerminalRestore()` wrote `\x1b[?1049l` (leave alternate screen) unconditionally on every exit path, and conhost/Windows Terminal execute an unconditional cursor restore for it even when the alt buffer was never entered — with no prior save the cursor jumped to the viewport home, so the shell prompt landed on top of the dead frame. The leave sequence is now gated on tracked alt-screen state (set/cleared by the TUI's fullscreen-overlay enter/leave and stop paths).
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 4a6a00918..0f4be0cdd 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-tui",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",
+diff --git a/packages/utils/package.json b/packages/utils/package.json
+index 81d7e0787..8dc60d3c5 100644
+--- a/packages/utils/package.json
++++ b/packages/utils/package.json
+@@ -1,7 +1,7 @@
+ {
+ 	"type": "module",
+ 	"name": "@oh-my-pi/pi-utils",
+-	"version": "15.11.1",
++	"version": "15.11.2",
+ 	"description": "Shared utilities for pi packages",
+ 	"homepage": "https://omp.sh",
+ 	"author": "Can Boluk",

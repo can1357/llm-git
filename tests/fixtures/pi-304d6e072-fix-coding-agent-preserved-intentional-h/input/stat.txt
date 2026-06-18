@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md               |  2 +-
+ packages/coding-agent/src/hashline/apply.ts      |  9 +++++----
+ packages/coding-agent/test/core/hashline.test.ts | 10 +++++-----
+ 3 files changed, 11 insertions(+), 10 deletions(-)

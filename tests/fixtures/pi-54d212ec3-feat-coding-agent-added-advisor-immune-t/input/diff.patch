@@ -1,0 +1,273 @@
+diff --git a/docs/advisor-watchdog.md b/docs/advisor-watchdog.md
+index 9d19b49e1..0ed4768bf 100644
+--- a/docs/advisor-watchdog.md
++++ b/docs/advisor-watchdog.md
+@@ -95,6 +95,8 @@ note text
+ 
+ When you deliberately interrupt the agent (Esc, or a cancel from collab, ACP, RPC, the SDK, or an extension), the advisor stops auto-resuming it. An interrupting `concern`/`blocker` raised while the run is stopped is recorded as a visible advisor card instead of restarting the turn, and a concern already in flight when you interrupt is preserved the same way rather than driving a surprise resume. The advice re-enters context the next time you resume — a new message, the `.`/`c` continue shortcut, or a steer/follow-up. A normal yield is unaffected: the advisor can still steer and resume a run the agent ended on its own.
+ 
++`advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `1`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
++
+ ## Bounded catch-up with `advisor.syncBacklog`
+ 
+ `advisor.syncBacklog` is not lockstep turn execution. It is a bounded catch-up delay for the primary agent when the advisor falls behind.
+diff --git a/docs/settings.md b/docs/settings.md
+index 14c7acdb8..e3bf77181 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -321,6 +321,7 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
+ | `advisor.enabled` | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model. |
+ | `advisor.subagents` | boolean | `false` | Also enable advisor runtimes for spawned task/eval subagents. |
+ | `advisor.syncBacklog` | enum | `off` | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
++| `advisor.immuneTurns` | number | `1` | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns. |
+ 
+ ### Thinking
+ 
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 0ef4ef32c..e7883adc2 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -8,6 +8,7 @@
+ - Added automatic endpoint-mode support for google-antigravity provider calls so users can force production-only or sandbox-only usage
+ - Added `images.describeForTextModels` option (default `true`) to control automatic image description for attachments sent to models without vision input
+ - Added automatic vision fallback prompts to describe images for text-only models
++- Added `advisor.immuneTurns` setting (default `1`) to limit how often advisor `concern`/`blocker` notes can interrupt the primary agent.
+ 
+ ### Changed
+ 
+diff --git a/packages/coding-agent/src/advisor/__tests__/advisor.test.ts b/packages/coding-agent/src/advisor/__tests__/advisor.test.ts
+index e25668551..45f73a7bb 100644
+--- a/packages/coding-agent/src/advisor/__tests__/advisor.test.ts
++++ b/packages/coding-agent/src/advisor/__tests__/advisor.test.ts
+@@ -12,6 +12,7 @@ import {
+ 	AdvisorRuntime,
+ 	type AdvisorRuntimeHost,
+ 	formatAdvisorBatchContent,
++	isAdvisorInterruptImmuneTurnActive,
+ 	isInterruptingSeverity,
+ 	resolveAdvisorDeliveryChannel,
+ } from "..";
+@@ -124,6 +125,44 @@ describe("advisor", () => {
+ 			expect(isInterruptingSeverity(undefined)).toBe(false);
+ 		});
+ 
++		it("keeps the interrupt-immune turn fence half-open for the configured window", () => {
++			expect(
++				isAdvisorInterruptImmuneTurnActive({
++					completedTurns: 4,
++					immuneTurnStart: undefined,
++					immuneTurns: 2,
++				}),
++			).toBe(false);
++			expect(
++				isAdvisorInterruptImmuneTurnActive({
++					completedTurns: 4,
++					immuneTurnStart: 5,
++					immuneTurns: 0,
++				}),
++			).toBe(false);
++			expect(
++				isAdvisorInterruptImmuneTurnActive({
++					completedTurns: 4,
++					immuneTurnStart: 5,
++					immuneTurns: 2,
++				}),
++			).toBe(true);
++			expect(
++				isAdvisorInterruptImmuneTurnActive({
++					completedTurns: 6,
++					immuneTurnStart: 5,
++					immuneTurns: 2,
++				}),
++			).toBe(true);
++			expect(
++				isAdvisorInterruptImmuneTurnActive({
++					completedTurns: 7,
++					immuneTurnStart: 5,
++					immuneTurns: 2,
++				}),
++			).toBe(false);
++		});
++
+ 		it("wraps each note in an advisory tag with severity as an attribute and escapes the body", () => {
+ 			const content = formatAdvisorBatchContent([
+ 				{ note: "first note" },
+@@ -688,6 +727,26 @@ describe("advisor", () => {
+ 			}
+ 		});
+ 
++		it("routes interrupting notes to the aside queue during immune turns without overriding preservation", () => {
++			expect(
++				resolveAdvisorDeliveryChannel({
++					severity: "concern",
++					autoResumeSuppressed: false,
++					streaming: true,
++					aborting: false,
++					interruptImmuneTurnActive: true,
++				}),
++			).toBe("aside");
++			expect(
++				resolveAdvisorDeliveryChannel({
++					severity: "blocker",
++					autoResumeSuppressed: true,
++					streaming: false,
++					aborting: false,
++					interruptImmuneTurnActive: true,
++				}),
++			).toBe("preserve");
++		});
+ 		it("preserves an interrupting note while suppressed AND idle (no auto-resume of a stopped run)", () => {
+ 			for (const severity of ["concern", "blocker"] as const) {
+ 				expect(
+diff --git a/packages/coding-agent/src/advisor/advise-tool.ts b/packages/coding-agent/src/advisor/advise-tool.ts
+index 68d3bfc4f..ad3a3ef13 100644
+--- a/packages/coding-agent/src/advisor/advise-tool.ts
++++ b/packages/coding-agent/src/advisor/advise-tool.ts
+@@ -68,6 +68,15 @@ export function isInterruptingSeverity(severity: AdvisorSeverity | undefined): b
+ 
+ /** How an advisor note is routed to the primary. */
+ export type AdvisorDeliveryChannel = "aside" | "steer" | "preserve";
++/** Half-open turn-count fence for the post-interrupt cooldown. */
++export function isAdvisorInterruptImmuneTurnActive(opts: {
++	completedTurns: number;
++	immuneTurnStart: number | undefined;
++	immuneTurns: number;
++}): boolean {
++	if (opts.immuneTurnStart === undefined || opts.immuneTurns <= 0) return false;
++	return opts.completedTurns < opts.immuneTurnStart + opts.immuneTurns;
++}
+ 
+ /**
+  * Decide how one advisor note reaches the primary agent.
+@@ -84,15 +93,19 @@ export type AdvisorDeliveryChannel = "aside" | "steer" | "preserve";
+  *   auto-resume anything, so it is delivered live. Parking it during an active
+  *   run instead strands it (it never reaches the running agent) and the withheld
+  *   notes dump as one burst at the next user prompt — the bug this guards.
++ * - During the post-interrupt immune-turn window, further `concern`/`blocker`
++ *   notes are downgraded to asides; suppression preservation still wins.
+  */
+ export function resolveAdvisorDeliveryChannel(opts: {
+ 	severity: AdvisorSeverity | undefined;
+ 	autoResumeSuppressed: boolean;
+ 	streaming: boolean;
+ 	aborting: boolean;
++	interruptImmuneTurnActive?: boolean;
+ }): AdvisorDeliveryChannel {
+ 	if (!isInterruptingSeverity(opts.severity)) return "aside";
+ 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
++	if (opts.interruptImmuneTurnActive) return "aside";
+ 	return "steer";
+ }
+ 
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 37b74ca53..e2fe83e3f 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -415,6 +415,25 @@ export const SETTINGS_SCHEMA = {
+ 				"Pause the main agent for up to 30 seconds if the advisor falls behind by this many turns. Off disables catch-up delays.",
+ 		},
+ 	},
++	"advisor.immuneTurns": {
++		type: "number",
++		default: 1,
++		ui: {
++			tab: "model",
++			group: "Advisor",
++			label: "Advisor Immune Turns",
++			description:
++				"After an advisor concern or blocker interrupts, route further concerns/blockers non-interruptingly for this many primary turns.",
++			options: [
++				{ value: "0", label: "0 turns", description: "Allow every concern/blocker to interrupt." },
++				{ value: "1", label: "1 turn", description: "Default." },
++				{ value: "2", label: "2 turns" },
++				{ value: "3", label: "3 turns" },
++				{ value: "4", label: "4 turns" },
++				{ value: "5", label: "5 turns" },
++			],
++		},
++	},
+ 	shellPath: { type: "string", default: undefined },
+ 	"git.enabled": {
+ 		type: "boolean",
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index 9ae967215..01ab1b006 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -127,6 +127,8 @@ import {
+ 	AdvisorRuntime,
+ 	type AdvisorSeverity,
+ 	formatAdvisorBatchContent,
++	isAdvisorInterruptImmuneTurnActive,
++	isInterruptingSeverity,
+ 	resolveAdvisorDeliveryChannel,
+ } from "../advisor";
+ import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
+@@ -1082,6 +1084,8 @@ export class AgentSession {
+ 	 *  suppresses advisor concern/blocker auto-resume until the user next resumes.
+ 	 *  Advisor advice is still recorded into the transcript, just not auto-run. */
+ 	#advisorAutoResumeSuppressed = false;
++	#advisorPrimaryTurnsCompleted = 0;
++	#advisorInterruptImmuneTurnStart: number | undefined;
+ 	#planModeState: PlanModeState | undefined;
+ 	#goalModeState: GoalModeState | undefined;
+ 	#goalRuntime: GoalRuntime;
+@@ -1519,6 +1523,7 @@ export class AgentSession {
+ 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
+ 		this.agent.setOnTurnEnd(async (messages, signal) => {
+ 			if (signal?.aborted) return;
++			this.#advisorPrimaryTurnsCompleted++;
+ 			if (this.#advisorRuntime && !this.#advisorRuntime.disposed) {
+ 				this.#advisorRuntime.onTurnEnd(messages);
+ 				const syncBacklog = this.settings.get("advisor.syncBacklog");
+@@ -1651,6 +1656,27 @@ export class AgentSession {
+ 	// -------------------------------------------------------------------------
+ 	// Advisor runtime lifecycle
+ 	// -------------------------------------------------------------------------
++	#advisorImmuneTurnLimit(): number {
++		const immuneTurns = this.settings.get("advisor.immuneTurns") as number;
++		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
++		return Math.trunc(immuneTurns);
++	}
++
++	#isAdvisorInterruptImmuneTurnActive(): boolean {
++		return isAdvisorInterruptImmuneTurnActive({
++			completedTurns: this.#advisorPrimaryTurnsCompleted,
++			immuneTurnStart: this.#advisorInterruptImmuneTurnStart,
++			immuneTurns: this.#advisorImmuneTurnLimit(),
++		});
++	}
++
++	// The next primary turn number starts the immune-turn window. While the
++	// interrupting steer is still in flight, completedTurns is lower than this
++	// start, so duplicate concern/blocker advice is also downgraded.
++	#recordAdvisorInterruptDelivered(): void {
++		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
++	}
++
+ 	#buildAdvisorRuntime(seedToCurrent = false): boolean {
+ 		if (this.#isDisposed) return false;
+ 		if (this.#advisorRuntime) return true;
+@@ -1680,6 +1706,7 @@ export class AgentSession {
+ 		// strand the advice and dump the backlog as one burst at the next prompt. A
+ 		// plain nit always rides the non-interrupting YieldQueue aside.
+ 		const enqueueAdvice = (note: string, severity?: AdvisorSeverity) => {
++			const interrupting = isInterruptingSeverity(severity);
+ 			const channel = resolveAdvisorDeliveryChannel({
+ 				severity,
+ 				autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
+@@ -1690,6 +1717,7 @@ export class AgentSession {
+ 				// auto-resume it despite the user's interrupt.
+ 				streaming: this.agent.state.isStreaming,
+ 				aborting: this.#abortInProgress,
++				interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+ 			});
+ 			if (channel === "aside") {
+ 				this.yieldQueue.enqueue("advisor", { note, severity });
+@@ -1710,6 +1738,7 @@ export class AgentSession {
+ 				});
+ 				return;
+ 			}
++			this.#recordAdvisorInterruptDelivered();
+ 			void this.sendCustomMessage(
+ 				{ customType: "advisor", content, display: true, attribution: "agent", details },
+ 				{ deliverAs: "steer", triggerTurn: true },

@@ -1,0 +1,742 @@
+diff --git a/package-lock.json b/package-lock.json
+index de3dcce6d..677ba069e 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -2250,28 +2250,28 @@
+ 			}
+ 		},
+ 		"node_modules/@typescript/native-preview": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview/-/native-preview-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-RXuRj/zn2tWrria1eea1mzOVmUjNHdOZsxlcnXLy2BjXil+ncgdMFARWryeXP2+NPmGTwC+ERJ5YAuwU8n4nlg==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview/-/native-preview-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-uNPMu5+ElTN7AZRFJXsTPtSAQ2b7FIXMvpQbU/L0VD5PoBp5nMiQbgO1QFSvbFiIoTTma3I2TX3WSO5olIMTLQ==",
+ 			"dev": true,
+ 			"license": "Apache-2.0",
+ 			"bin": {
+ 				"tsgo": "bin/tsgo.js"
+ 			},
+ 			"optionalDependencies": {
+-				"@typescript/native-preview-darwin-arm64": "7.0.0-dev.20251211.1",
+-				"@typescript/native-preview-darwin-x64": "7.0.0-dev.20251211.1",
+-				"@typescript/native-preview-linux-arm": "7.0.0-dev.20251211.1",
+-				"@typescript/native-preview-linux-arm64": "7.0.0-dev.20251211.1",
+-				"@typescript/native-preview-linux-x64": "7.0.0-dev.20251211.1",
+-				"@typescript/native-preview-win32-arm64": "7.0.0-dev.20251211.1",
+-				"@typescript/native-preview-win32-x64": "7.0.0-dev.20251211.1"
++				"@typescript/native-preview-darwin-arm64": "7.0.0-dev.20251212.1",
++				"@typescript/native-preview-darwin-x64": "7.0.0-dev.20251212.1",
++				"@typescript/native-preview-linux-arm": "7.0.0-dev.20251212.1",
++				"@typescript/native-preview-linux-arm64": "7.0.0-dev.20251212.1",
++				"@typescript/native-preview-linux-x64": "7.0.0-dev.20251212.1",
++				"@typescript/native-preview-win32-arm64": "7.0.0-dev.20251212.1",
++				"@typescript/native-preview-win32-x64": "7.0.0-dev.20251212.1"
+ 			}
+ 		},
+ 		"node_modules/@typescript/native-preview-darwin-arm64": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-darwin-arm64/-/native-preview-darwin-arm64-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-0TSLj8s2M1eQXnQV0+DMFCnJF4vqNobTaeKzMpR8oHOsD2az93knOUixsZk0Nyf3jYzgszDakNXhp0K3fzWWAw==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-darwin-arm64/-/native-preview-darwin-arm64-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-5tof0OT01yPQ0mcoKPeSrGMxQ9Dl//gTjSKCMKwbLr5urrIPxX5bNRWUH0hxWaB4A3mXQvDvxSSrWR5TMOl2aQ==",
+ 			"cpu": [
+ 				"arm64"
+ 			],
+@@ -2283,9 +2283,9 @@
+ 			]
+ 		},
+ 		"node_modules/@typescript/native-preview-darwin-x64": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-darwin-x64/-/native-preview-darwin-x64-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-Nv6+4H1SxjkbOLQZjbAjivTtFmPpeGiXKXh/8/UwkQW3Bom/L+owCfJNffsMKalKdDa/eYRW0uaoAk0dcU4c4A==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-darwin-x64/-/native-preview-darwin-x64-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-zUgcCXmDfO2yo5fNZZ3wUCv8hdqc/Qbc1WZUEDYYo3ItnBUL9qp0lUtTwsLtNreL2WmHOCeTQuKWa/JQzdw89g==",
+ 			"cpu": [
+ 				"x64"
+ 			],
+@@ -2297,9 +2297,9 @@
+ 			]
+ 		},
+ 		"node_modules/@typescript/native-preview-linux-arm": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-linux-arm/-/native-preview-linux-arm-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-6Y6VqTMfgvt8f1P5FHNIT/O/L0lSw5MHOcVOnrZEfvOAUXE+cCmC5VvtFh1Paa1Zu+oTBnCu5EvIwemHl4V73A==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-linux-arm/-/native-preview-linux-arm-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-peQCeG2+XqMqs6/Sg6nbQPI3Kae91Esi5Qh1VyDETO4wjMbKeAzVjw8t3Qz5X6RDbWNrCpDmbk6chjukfGeWgQ==",
+ 			"cpu": [
+ 				"arm"
+ 			],
+@@ -2311,9 +2311,9 @@
+ 			]
+ 		},
+ 		"node_modules/@typescript/native-preview-linux-arm64": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-linux-arm64/-/native-preview-linux-arm64-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-sJapYFFiJnTeK/d2LmoQaTQKzMm8zquQAaAJaual+yu4sVKbP6sZRZ1GVS4FDISJvUrlajpLWxtfQTHR4dlgeQ==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-linux-arm64/-/native-preview-linux-arm64-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-0P59bGDFLppvkdpqQ8/kG+kU6R0iCdQiSLFRNrbrLnaflACBfIi40D3Ono3EmeSxqKsHqh/pNRu3BUJvoNGphw==",
+ 			"cpu": [
+ 				"arm64"
+ 			],
+@@ -2325,9 +2325,9 @@
+ 			]
+ 		},
+ 		"node_modules/@typescript/native-preview-linux-x64": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-linux-x64/-/native-preview-linux-x64-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-bJfieFUeJRGsjByfeShQYXbFRbJ4k14/Sp1HQ2Eu8yOd+hUpOj7fsax7b5B2XvE4cSuC+dRV2FVOCZQNaL4u2Q==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-linux-x64/-/native-preview-linux-x64-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-7QFyqcPe/Sz+IakvzCqh0d5WhQg7A7bKyQil38K7rKSTaPI42LrVwLA6mVtTRfQyS5Sy2XYVinyLNXnWM8ImQQ==",
+ 			"cpu": [
+ 				"x64"
+ 			],
+@@ -2339,9 +2339,9 @@
+ 			]
+ 		},
+ 		"node_modules/@typescript/native-preview-win32-arm64": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-win32-arm64/-/native-preview-win32-arm64-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-0vZ1NQmLyRf1bLaBjHFem1pLsJJnPMOCfScgM616cJpkbqqGEAgXfOnxKOUxiZ6X+hfx09gXn+5wq7zjaV0aag==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-win32-arm64/-/native-preview-win32-arm64-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-Y8mh0dPXAcYYNtSZVZYaNcqAOlxOlbJQopJBVATn+ItCxrY4RqBwygzrBWqg+gUo9xLmFI9XLuDVqm1ZAkAfwg==",
+ 			"cpu": [
+ 				"arm64"
+ 			],
+@@ -2353,9 +2353,9 @@
+ 			]
+ 		},
+ 		"node_modules/@typescript/native-preview-win32-x64": {
+-			"version": "7.0.0-dev.20251211.1",
+-			"resolved": "https://registry.npmjs.org/@typescript/native-preview-win32-x64/-/native-preview-win32-x64-7.0.0-dev.20251211.1.tgz",
+-			"integrity": "sha512-OUB0nNmzZeCl0KjxeG7R+Ey1gq8iaVoJJRJpwKiTj6Ws5voKOb6PxNoM2jMNqJV3R/d3PXfR7Y39/IINioa/CQ==",
++			"version": "7.0.0-dev.20251212.1",
++			"resolved": "https://registry.npmjs.org/@typescript/native-preview-win32-x64/-/native-preview-win32-x64-7.0.0-dev.20251212.1.tgz",
++			"integrity": "sha512-bUPWJgGhPdsoL3OR+I8nFF81P/+hwfqyMKaAWFxTg1zeRdEl61lVdrEfgNDBI7Px5Gr+uFGELlkCsDzy/7dAyw==",
+ 			"cpu": [
+ 				"x64"
+ 			],
+@@ -6538,11 +6538,11 @@
+ 		},
+ 		"packages/agent": {
+ 			"name": "@mariozechner/pi-agent-core",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-ai": "^0.18.4",
+-				"@mariozechner/pi-tui": "^0.18.4"
++				"@mariozechner/pi-ai": "^0.18.5",
++				"@mariozechner/pi-tui": "^0.18.5"
+ 			},
+ 			"devDependencies": {
+ 				"@types/node": "^24.3.0",
+@@ -6572,7 +6572,7 @@
+ 		},
+ 		"packages/ai": {
+ 			"name": "@mariozechner/pi-ai",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@anthropic-ai/sdk": "0.71.2",
+@@ -6614,12 +6614,12 @@
+ 		},
+ 		"packages/coding-agent": {
+ 			"name": "@mariozechner/pi-coding-agent",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-agent-core": "^0.18.4",
+-				"@mariozechner/pi-ai": "^0.18.4",
+-				"@mariozechner/pi-tui": "^0.18.4",
++				"@mariozechner/pi-agent-core": "^0.18.5",
++				"@mariozechner/pi-ai": "^0.18.5",
++				"@mariozechner/pi-tui": "^0.18.5",
+ 				"chalk": "^5.5.0",
+ 				"diff": "^8.0.2",
+ 				"glob": "^11.0.3",
+@@ -6657,13 +6657,13 @@
+ 		},
+ 		"packages/mom": {
+ 			"name": "@mariozechner/pi-mom",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@anthropic-ai/sandbox-runtime": "^0.0.16",
+-				"@mariozechner/pi-agent-core": "^0.18.4",
+-				"@mariozechner/pi-ai": "^0.18.4",
+-				"@mariozechner/pi-coding-agent": "^0.18.4",
++				"@mariozechner/pi-agent-core": "^0.18.5",
++				"@mariozechner/pi-ai": "^0.18.5",
++				"@mariozechner/pi-coding-agent": "^0.18.5",
+ 				"@sinclair/typebox": "^0.34.0",
+ 				"@slack/socket-mode": "^2.0.0",
+ 				"@slack/web-api": "^7.0.0",
+@@ -6701,10 +6701,10 @@
+ 		},
+ 		"packages/pods": {
+ 			"name": "@mariozechner/pi",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+-				"@mariozechner/pi-agent-core": "^0.18.4",
++				"@mariozechner/pi-agent-core": "^0.18.5",
+ 				"chalk": "^5.5.0"
+ 			},
+ 			"bin": {
+@@ -6717,7 +6717,7 @@
+ 		},
+ 		"packages/proxy": {
+ 			"name": "@mariozechner/pi-proxy",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"dependencies": {
+ 				"@hono/node-server": "^1.14.0",
+ 				"hono": "^4.6.16"
+@@ -6733,7 +6733,7 @@
+ 		},
+ 		"packages/tui": {
+ 			"name": "@mariozechner/pi-tui",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@types/mime-types": "^2.1.4",
+@@ -6777,12 +6777,12 @@
+ 		},
+ 		"packages/web-ui": {
+ 			"name": "@mariozechner/pi-web-ui",
+-			"version": "0.18.4",
++			"version": "0.18.5",
+ 			"license": "MIT",
+ 			"dependencies": {
+ 				"@lmstudio/sdk": "^1.5.0",
+-				"@mariozechner/pi-ai": "^0.18.4",
+-				"@mariozechner/pi-tui": "^0.18.4",
++				"@mariozechner/pi-ai": "^0.18.5",
++				"@mariozechner/pi-tui": "^0.18.5",
+ 				"docx-preview": "^0.3.7",
+ 				"jszip": "^3.10.1",
+ 				"lucide": "^0.544.0",
+@@ -6803,7 +6803,7 @@
+ 		},
+ 		"packages/web-ui/example": {
+ 			"name": "pi-web-ui-example",
+-			"version": "1.6.4",
++			"version": "1.6.5",
+ 			"dependencies": {
+ 				"@mariozechner/mini-lit": "^0.2.0",
+ 				"@mariozechner/pi-ai": "file:../../ai",
+diff --git a/packages/agent/package.json b/packages/agent/package.json
+index aaca17830..09e9caf6a 100644
+--- a/packages/agent/package.json
++++ b/packages/agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-agent-core",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+@@ -18,8 +18,8 @@
+ 		"prepublishOnly": "npm run clean && npm run build"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-ai": "^0.18.4",
+-		"@mariozechner/pi-tui": "^0.18.4"
++		"@mariozechner/pi-ai": "^0.18.5",
++		"@mariozechner/pi-tui": "^0.18.5"
+ 	},
+ 	"keywords": [
+ 		"ai",
+diff --git a/packages/ai/package.json b/packages/ai/package.json
+index 444cfeb3b..2f3a605f2 100644
+--- a/packages/ai/package.json
++++ b/packages/ai/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-ai",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "Unified LLM API with automatic model discovery and provider configuration",
+ 	"type": "module",
+ 	"main": "./dist/index.js",
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 8b8f15b6f..67e6c4d2b 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-coding-agent",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"type": "module",
+ 	"piConfig": {
+@@ -39,9 +39,9 @@
+ 		"prepublishOnly": "npm run clean && npm run build"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent-core": "^0.18.4",
+-		"@mariozechner/pi-ai": "^0.18.4",
+-		"@mariozechner/pi-tui": "^0.18.4",
++		"@mariozechner/pi-agent-core": "^0.18.5",
++		"@mariozechner/pi-ai": "^0.18.5",
++		"@mariozechner/pi-tui": "^0.18.5",
+ 		"chalk": "^5.5.0",
+ 		"diff": "^8.0.2",
+ 		"glob": "^11.0.3",
+diff --git a/packages/mom/CHANGELOG.md b/packages/mom/CHANGELOG.md
+index 34b97d8b2..968349b04 100644
+--- a/packages/mom/CHANGELOG.md
++++ b/packages/mom/CHANGELOG.md
+@@ -1,6 +1,14 @@
+ # Changelog
+ 
+-## [Unreleased]
++## [0.18.5] - 2025-12-12
++
++### Added
++
++- `--download <channel-id>` flag to download a channel's full history including thread replies as plain text
++
++### Fixed
++
++- Error handling: when agent returns `stopReason: "error"`, main message is updated to "Sorry, something went wrong" and error details are posted to the thread
+ 
+ ## [0.18.4] - 2025-12-11
+ 
+diff --git a/packages/mom/package.json b/packages/mom/package.json
+index 30ec90c36..b15592af4 100644
+--- a/packages/mom/package.json
++++ b/packages/mom/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-mom",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "Slack bot that delegates messages to the pi coding agent",
+ 	"type": "module",
+ 	"bin": {
+@@ -21,9 +21,9 @@
+ 	},
+ 	"dependencies": {
+ 		"@anthropic-ai/sandbox-runtime": "^0.0.16",
+-		"@mariozechner/pi-agent-core": "^0.18.4",
+-		"@mariozechner/pi-ai": "^0.18.4",
+-		"@mariozechner/pi-coding-agent": "^0.18.4",
++		"@mariozechner/pi-agent-core": "^0.18.5",
++		"@mariozechner/pi-ai": "^0.18.5",
++		"@mariozechner/pi-coding-agent": "^0.18.5",
+ 		"@sinclair/typebox": "^0.34.0",
+ 		"@slack/socket-mode": "^2.0.0",
+ 		"@slack/web-api": "^7.0.0",
+diff --git a/packages/mom/src/agent.ts b/packages/mom/src/agent.ts
+index 24cc4f8c6..79ccdb06c 100644
+--- a/packages/mom/src/agent.ts
++++ b/packages/mom/src/agent.ts
+@@ -42,7 +42,11 @@ export interface PendingMessage {
+ }
+ 
+ export interface AgentRunner {
+-	run(ctx: SlackContext, store: ChannelStore, pendingMessages?: PendingMessage[]): Promise<{ stopReason: string }>;
++	run(
++		ctx: SlackContext,
++		store: ChannelStore,
++		pendingMessages?: PendingMessage[],
++	): Promise<{ stopReason: string; errorMessage?: string }>;
+ 	abort(): void;
+ }
+ 
+@@ -346,6 +350,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
+ 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+ 		},
+ 		stopReason: "stop",
++		errorMessage: undefined as string | undefined,
+ 	};
+ 
+ 	// Subscribe to events ONCE
+@@ -412,6 +417,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
+ 				if (assistantMsg.stopReason) {
+ 					runState.stopReason = assistantMsg.stopReason;
+ 				}
++				if (assistantMsg.errorMessage) {
++					runState.errorMessage = assistantMsg.errorMessage;
++				}
+ 
+ 				if (assistantMsg.usage) {
+ 					runState.totalUsage.input += assistantMsg.usage.input;
+@@ -492,7 +500,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
+ 			ctx: SlackContext,
+ 			_store: ChannelStore,
+ 			_pendingMessages?: PendingMessage[],
+-		): Promise<{ stopReason: string }> {
++		): Promise<{ stopReason: string; errorMessage?: string }> {
+ 			// Ensure channel directory exists
+ 			await mkdir(channelDir, { recursive: true });
+ 
+@@ -538,6 +546,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
+ 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+ 			};
+ 			runState.stopReason = "stop";
++			runState.errorMessage = undefined;
+ 
+ 			// Create queue for this run
+ 			let queueChain = Promise.resolve();
+@@ -595,25 +604,36 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
+ 			// Wait for queued messages
+ 			await queueChain;
+ 
+-			// Final message update
+-			const messages = session.messages;
+-			const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
+-			const finalText =
+-				lastAssistant?.content
+-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+-					.map((c) => c.text)
+-					.join("\n") || "";
+-
+-			if (finalText.trim()) {
++			// Handle error case - update main message and post error to thread
++			if (runState.stopReason === "error" && runState.errorMessage) {
+ 				try {
+-					const mainText =
+-						finalText.length > SLACK_MAX_LENGTH
+-							? finalText.substring(0, SLACK_MAX_LENGTH - 50) + "\n\n_(see thread for full response)_"
+-							: finalText;
+-					await ctx.replaceMessage(mainText);
++					await ctx.replaceMessage("_Sorry, something went wrong_");
++					await ctx.respondInThread(`_Error: ${runState.errorMessage}_`);
+ 				} catch (err) {
+ 					const errMsg = err instanceof Error ? err.message : String(err);
+-					log.logWarning("Failed to replace message with final text", errMsg);
++					log.logWarning("Failed to post error message", errMsg);
++				}
++			} else {
++				// Final message update
++				const messages = session.messages;
++				const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
++				const finalText =
++					lastAssistant?.content
++						.filter((c): c is { type: "text"; text: string } => c.type === "text")
++						.map((c) => c.text)
++						.join("\n") || "";
++
++				if (finalText.trim()) {
++					try {
++						const mainText =
++							finalText.length > SLACK_MAX_LENGTH
++								? finalText.substring(0, SLACK_MAX_LENGTH - 50) + "\n\n_(see thread for full response)_"
++								: finalText;
++						await ctx.replaceMessage(mainText);
++					} catch (err) {
++						const errMsg = err instanceof Error ? err.message : String(err);
++						log.logWarning("Failed to replace message with final text", errMsg);
++					}
+ 				}
+ 			}
+ 
+@@ -644,7 +664,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
+ 			runState.logCtx = null;
+ 			runState.queue = null;
+ 
+-			return { stopReason: runState.stopReason };
++			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
+ 		},
+ 
+ 		abort(): void {
+diff --git a/packages/mom/src/download.ts b/packages/mom/src/download.ts
+new file mode 100644
+index 000000000..a4c12a936
+--- /dev/null
++++ b/packages/mom/src/download.ts
+@@ -0,0 +1,117 @@
++import { LogLevel, WebClient } from "@slack/web-api";
++
++interface Message {
++	ts: string;
++	user?: string;
++	text?: string;
++	thread_ts?: string;
++	reply_count?: number;
++	files?: Array<{ name: string; url_private?: string }>;
++}
++
++function formatTs(ts: string): string {
++	const date = new Date(parseFloat(ts) * 1000);
++	return date
++		.toISOString()
++		.replace("T", " ")
++		.replace(/\.\d+Z$/, "");
++}
++
++function formatMessage(ts: string, user: string, text: string, indent = ""): string {
++	const prefix = `[${formatTs(ts)}] ${user}: `;
++	const lines = text.split("\n");
++	const firstLine = `${indent}${prefix}${lines[0]}`;
++	if (lines.length === 1) return firstLine;
++	// All continuation lines get same indent as content start
++	const contentIndent = indent + " ".repeat(prefix.length);
++	return [firstLine, ...lines.slice(1).map((l) => contentIndent + l)].join("\n");
++}
++
++export async function downloadChannel(channelId: string, botToken: string): Promise<void> {
++	const client = new WebClient(botToken, { logLevel: LogLevel.ERROR });
++
++	console.error(`Fetching channel info for ${channelId}...`);
++
++	// Get channel info
++	let channelName = channelId;
++	try {
++		const info = await client.conversations.info({ channel: channelId });
++		channelName = (info.channel as any)?.name || channelId;
++	} catch {
++		// DM channels don't have names, that's fine
++	}
++
++	console.error(`Downloading history for #${channelName} (${channelId})...`);
++
++	// Fetch all messages
++	const messages: Message[] = [];
++	let cursor: string | undefined;
++
++	do {
++		const response = await client.conversations.history({
++			channel: channelId,
++			limit: 200,
++			cursor,
++		});
++
++		if (response.messages) {
++			messages.push(...(response.messages as Message[]));
++		}
++
++		cursor = response.response_metadata?.next_cursor;
++		console.error(`  Fetched ${messages.length} messages...`);
++	} while (cursor);
++
++	// Reverse to chronological order
++	messages.reverse();
++
++	// Build map of thread replies
++	const threadReplies = new Map<string, Message[]>();
++	const threadsToFetch = messages.filter((m) => m.reply_count && m.reply_count > 0);
++
++	console.error(`Fetching ${threadsToFetch.length} threads...`);
++
++	for (let i = 0; i < threadsToFetch.length; i++) {
++		const parent = threadsToFetch[i];
++		console.error(`  Thread ${i + 1}/${threadsToFetch.length} (${parent.reply_count} replies)...`);
++
++		const replies: Message[] = [];
++		let threadCursor: string | undefined;
++
++		do {
++			const response = await client.conversations.replies({
++				channel: channelId,
++				ts: parent.ts,
++				limit: 200,
++				cursor: threadCursor,
++			});
++
++			if (response.messages) {
++				// Skip the first message (it's the parent)
++				replies.push(...(response.messages as Message[]).slice(1));
++			}
++
++			threadCursor = response.response_metadata?.next_cursor;
++		} while (threadCursor);
++
++		threadReplies.set(parent.ts, replies);
++	}
++
++	// Output messages with thread replies interleaved
++	let totalReplies = 0;
++	for (const msg of messages) {
++		// Output the message
++		console.log(formatMessage(msg.ts, msg.user || "unknown", msg.text || ""));
++
++		// Output thread replies right after parent (indented)
++		const replies = threadReplies.get(msg.ts);
++		if (replies) {
++			for (const reply of replies) {
++				console.log(formatMessage(reply.ts, reply.user || "unknown", reply.text || "", "  "));
++				totalReplies++;
++			}
++		}
++	}
++
++	console.error(`Done! ${messages.length} messages, ${totalReplies} thread replies`);
++}
+diff --git a/packages/mom/src/main.ts b/packages/mom/src/main.ts
+index af0dd3f92..8898d73c6 100644
+--- a/packages/mom/src/main.ts
++++ b/packages/mom/src/main.ts
+@@ -3,6 +3,7 @@
+ import { join, resolve } from "path";
+ import { type AgentRunner, getOrCreateRunner } from "./agent.js";
+ import { syncLogToContext } from "./context.js";
++import { downloadChannel } from "./download.js";
+ import * as log from "./log.js";
+ import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
+ import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
+@@ -17,10 +18,17 @@ const MOM_SLACK_BOT_TOKEN = process.env.MOM_SLACK_BOT_TOKEN;
+ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+ const ANTHROPIC_OAUTH_TOKEN = process.env.ANTHROPIC_OAUTH_TOKEN;
+ 
+-function parseArgs(): { workingDir: string; sandbox: SandboxConfig } {
++interface ParsedArgs {
++	workingDir?: string;
++	sandbox: SandboxConfig;
++	downloadChannel?: string;
++}
++
++function parseArgs(): ParsedArgs {
+ 	const args = process.argv.slice(2);
+ 	let sandbox: SandboxConfig = { type: "host" };
+ 	let workingDir: string | undefined;
++	let downloadChannelId: string | undefined;
+ 
+ 	for (let i = 0; i < args.length; i++) {
+ 		const arg = args[i];
+@@ -28,20 +36,42 @@ function parseArgs(): { workingDir: string; sandbox: SandboxConfig } {
+ 			sandbox = parseSandboxArg(arg.slice("--sandbox=".length));
+ 		} else if (arg === "--sandbox") {
+ 			sandbox = parseSandboxArg(args[++i] || "");
++		} else if (arg.startsWith("--download=")) {
++			downloadChannelId = arg.slice("--download=".length);
++		} else if (arg === "--download") {
++			downloadChannelId = args[++i];
+ 		} else if (!arg.startsWith("-")) {
+ 			workingDir = arg;
+ 		}
+ 	}
+ 
+-	if (!workingDir) {
+-		console.error("Usage: mom [--sandbox=host|docker:<name>] <working-directory>");
+-		process.exit(1);
+-	}
+-
+-	return { workingDir: resolve(workingDir), sandbox };
++	return {
++		workingDir: workingDir ? resolve(workingDir) : undefined,
++		sandbox,
++		downloadChannel: downloadChannelId,
++	};
+ }
+ 
+-const { workingDir, sandbox } = parseArgs();
++const parsedArgs = parseArgs();
++
++// Handle --download mode
++if (parsedArgs.downloadChannel) {
++	if (!MOM_SLACK_BOT_TOKEN) {
++		console.error("Missing env: MOM_SLACK_BOT_TOKEN");
++		process.exit(1);
++	}
++	await downloadChannel(parsedArgs.downloadChannel, MOM_SLACK_BOT_TOKEN);
++	process.exit(0);
++}
++
++// Normal bot mode - require working dir
++if (!parsedArgs.workingDir) {
++	console.error("Usage: mom [--sandbox=host|docker:<name>] <working-directory>");
++	console.error("       mom --download <channel-id>");
++	process.exit(1);
++}
++
++const { workingDir, sandbox } = { workingDir: parsedArgs.workingDir, sandbox: parsedArgs.sandbox };
+ 
+ if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN || (!ANTHROPIC_API_KEY && !ANTHROPIC_OAUTH_TOKEN)) {
+ 	console.error("Missing env: MOM_SLACK_APP_TOKEN, MOM_SLACK_BOT_TOKEN, ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN");
+diff --git a/packages/pods/package.json b/packages/pods/package.json
+index 79d59acfa..bb592284f 100644
+--- a/packages/pods/package.json
++++ b/packages/pods/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "CLI tool for managing vLLM deployments on GPU pods",
+ 	"type": "module",
+ 	"bin": {
+@@ -34,7 +34,7 @@
+ 		"node": ">=20.0.0"
+ 	},
+ 	"dependencies": {
+-		"@mariozechner/pi-agent-core": "^0.18.4",
++		"@mariozechner/pi-agent-core": "^0.18.5",
+ 		"chalk": "^5.5.0"
+ 	},
+ 	"devDependencies": {}
+diff --git a/packages/proxy/package.json b/packages/proxy/package.json
+index 7da98b149..242b0fe30 100644
+--- a/packages/proxy/package.json
++++ b/packages/proxy/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-proxy",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"type": "module",
+ 	"description": "CORS and authentication proxy for pi-ai",
+ 	"main": "dist/index.js",
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+index 5dde71dca..744122c97 100644
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-tui",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+diff --git a/packages/web-ui/example/package.json b/packages/web-ui/example/package.json
+index b2ba992c8..26aa328fb 100644
+--- a/packages/web-ui/example/package.json
++++ b/packages/web-ui/example/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "pi-web-ui-example",
+-  "version": "1.6.4",
++  "version": "1.6.5",
+   "private": true,
+   "type": "module",
+   "scripts": {
+diff --git a/packages/web-ui/package.json b/packages/web-ui/package.json
+index 58e5ab039..5470ddf87 100644
+--- a/packages/web-ui/package.json
++++ b/packages/web-ui/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@mariozechner/pi-web-ui",
+-	"version": "0.18.4",
++	"version": "0.18.5",
+ 	"description": "Reusable web UI components for AI chat interfaces powered by @mariozechner/pi-ai",
+ 	"type": "module",
+ 	"main": "dist/index.js",
+@@ -18,8 +18,8 @@
+ 	},
+ 	"dependencies": {
+ 		"@lmstudio/sdk": "^1.5.0",
+-		"@mariozechner/pi-ai": "^0.18.4",
+-		"@mariozechner/pi-tui": "^0.18.4",
++		"@mariozechner/pi-ai": "^0.18.5",
++		"@mariozechner/pi-tui": "^0.18.5",
+ 		"docx-preview": "^0.3.7",
+ 		"jszip": "^3.10.1",
+ 		"lucide": "^0.544.0",

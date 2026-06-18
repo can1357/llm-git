@@ -1,35 +1,435 @@
-[fixtures.build-deps-rusqlite]
-description = "From commit bdd4d79"
-tags = []
-
-[fixtures.chore-version-bump]
-description = "From commit 69cdd06"
-tags = []
-
 [fixtures.large-python-migration]
 description = "From commit 16d24d07c"
 tags = []
 
-[fixtures.fix-staged-index-drift]
-description = "From commit 9bcac64"
+[fixtures.pi-3b3672a35-fix-coding-agent-made-live-region-rewrit]
+description = "From commit 3b3672a35704728438937cf1567ab5e6eb7380cb"
+tags = []
+
+[fixtures.pi-c08e6f8a1-ux-coding-agent-default-artifact-capture]
+description = "From commit c08e6f8a19a5a42d82f46ade0bbc745f3e3db4f0"
+tags = []
+
+[fixtures.pi-3f073b82d-chore-bump-version-to-15-5-10]
+description = "From commit 3f073b82deef081494701b9cfa10fdd304567e29"
+tags = []
+
+[fixtures.pi-9d7d7b6a2-support-appending-content-to-the-system]
+description = "From commit 9d7d7b6a25d276f73be2b6159efc4171f67b82df"
+tags = []
+
+[fixtures.pi-ba3b1529c-fix-auth-copied-setup-sign-in-urls]
+description = "From commit ba3b1529c18aa6aba50cd7862b79e125535475e9"
+tags = []
+
+[fixtures.pi-be5d7dd3a-feat-coding-agent-added-task-description]
+description = "From commit be5d7dd3a90f5d83d9c44f37be45e9b0f0cdb00d"
+tags = []
+
+[fixtures.pi-e22b31401-feat-packages-coding-agent-added-orchest]
+description = "From commit e22b31401b17fdd908fe52a5270b1838efab8a7a"
+tags = []
+
+[fixtures.pi-d62e7f469-chore-update-installation-command-in-upd]
+description = "From commit d62e7f469843be0cd1663a7822e2449deaf7c5f8"
+tags = []
+
+[fixtures.pi-33dfce738-fix-session-observer-remove-type-indirec]
+description = "From commit 33dfce7388272235c5b865d75e1385888de5582f"
+tags = []
+
+[fixtures.pi-030b81262-feat-ai-implemented-oauth-authentication]
+description = "From commit 030b812624e9716c766962cb94b61c781e514f6e"
+tags = []
+
+[fixtures.pi-ed55880f3-fix-ai-fixed-orphaned-tool-call-handling]
+description = "From commit ed55880f37842c45a8c283aecc543705622d7e6a"
+tags = []
+
+[fixtures.pi-f8a4c4021-fix-ai-corrected-retry-logic-to-detect-c]
+description = "From commit f8a4c40216484a5541f4063505c7b3d3ca78a8d4"
+tags = []
+
+[fixtures.pi-304a9346e-fix-tui-updated-structural-diff-handling]
+description = "From commit 304a9346e924764f460931da1d23ab42c25209f5"
+tags = []
+
+[fixtures.pi-a13d20b5a-chore-bump-version-to-3-9-1337]
+description = "From commit a13d20b5a3b3a327470f4d179819be9931156219"
 tags = []
 
 [fixtures.feat-hybrid-pq-signatures]
 description = "From commit cede01cef"
 tags = []
 
+[fixtures.pi-09eac286a-add-npm-run-dev-instructions-to-developm]
+description = "From commit 09eac286ae7bc7f905bd0c1e31bc0fbd4dd86c43"
+tags = []
+
+[fixtures.pi-2cd78dbf2-refactor-natives-configured-searcher-lin]
+description = "From commit 2cd78dbf247d770c6490d45498238d1c7b69abc5"
+tags = []
+
+[fixtures.pi-7ab3d33ae-feat-coding-agent-add-auto-compaction-to]
+description = "From commit 7ab3d33ae72df5752492c247a09ec9dffc758896"
+tags = []
+
+[fixtures.pi-b5582278a-feat-builtins-implemented-wait-for-pids]
+description = "From commit b5582278a0f5a19be6d02d157ba0d390d9799eb9"
+tags = []
+
+[fixtures.pi-d1920e9ca-refactor-coding-agent-edit-removed-redun]
+description = "From commit d1920e9ca545b937831a521a7654fd00841b139d"
+tags = []
+
+[fixtures.chore-version-bump]
+description = "From commit 69cdd06"
+tags = []
+
+[fixtures.pi-5f96a4eea-fix-tui-fix-input-buffering-in-iterm2-ca]
+description = "From commit 5f96a4eea4c12edd0fa6d4efc4b6f94eb88fecd8"
+tags = []
+
+[fixtures.pi-7f1d07184-feat-coding-agent-added-streaming-ndjson]
+description = "From commit 7f1d071843a1c976655f23c57f9383960c96b9eb"
+tags = []
+
 [fixtures.feat-whitespace-classification]
 description = "From commit a883c13"
 tags = []
 
-[fixtures.refactor-cell-to-controller]
-description = "From commit 7c8d1cf30"
+[fixtures.pi-2185f3236-fix-publish-packages-in-dependency-order]
+description = "From commit 2185f32363c2371894b2409f0f1c878c11e47157"
+tags = []
+
+[fixtures.pi-96d676a5e-refactor-coding-agent-migrated-tool-rend]
+description = "From commit 96d676a5e59a0664102364fe8deabc8d29c49cbe"
+tags = []
+
+[fixtures.pi-0e1a4ef15-feat-strict-mode-simplified-hashline-edi]
+description = "From commit 0e1a4ef15a1922a2242f5dc0da985d2557f66ba8"
+tags = []
+
+[fixtures.pi-46b1abff1-add-cursor-pointer-to-collapsible-header]
+description = "From commit 46b1abff1d3005cedf19d03da53ba5d94b08af1d"
+tags = []
+
+[fixtures.pi-4da04edc3-chore-bump-version-to-4-0-1]
+description = "From commit 4da04edc3eff873e56f09e07039566bf65782c88"
+tags = []
+
+[fixtures.pi-cae5aaa3c-feat-coding-agent-changed-default-edit-m]
+description = "From commit cae5aaa3cc6520dc94581197ea246baa81975ba9"
+tags = []
+
+[fixtures.pi-cea19b6eb-fix-coding-agent-exited-cleanly-when-dec]
+description = "From commit cea19b6ebf9cdd56c2aa42269fed53f6405b1ee9"
+tags = []
+
+[fixtures.pi-14f2589b3-fix-ci-drop-target-cpu-x86-64-v3-from-te]
+description = "From commit 14f2589b3a0b58b636146a8a27cddacd9c4f826b"
+tags = []
+
+[fixtures.fix-staged-index-drift]
+description = "From commit 9bcac64"
+tags = []
+
+[fixtures.pi-27a64294b-fix-coding-agent-core-fixed-python-prelu]
+description = "From commit 27a64294b1d187afd59183b63cf03ce441717b26"
+tags = []
+
+[fixtures.pi-4a3984eb0-fix-coding-agent-tools-fixed-markdown-ca]
+description = "From commit 4a3984eb0a3413cd68adbc6577bb433846584d25"
+tags = []
+
+[fixtures.pi-c0aa4e399-add-creation-hints-to-docs-and-update-sy]
+description = "From commit c0aa4e3993a94e44b0172b5aa704fde6bd7f6f15"
+tags = []
+
+[fixtures.pi-60f39f838-feat-coding-agent-added-cli-args-and-env]
+description = "From commit 60f39f83828dbc18f020123e77fa4e305314bc7c"
+tags = []
+
+[fixtures.pi-97eb81e4c-fix-ai-handled-opencode-zen-big-pickle-a]
+description = "From commit 97eb81e4cac6220e634741cfc48fda601d713b0a"
+tags = []
+
+[fixtures.pi-068aa50e2-refactor-coding-agent-commit-enhanced-sc]
+description = "From commit 068aa50e28135fd864a932d01d8b1d24d0dd5e31"
+tags = []
+
+[fixtures.pi-836025aa0-clarify-compaction-in-tree-format-marker]
+description = "From commit 836025aa055291d147a7bb4e05515bc16bd4bc0a"
+tags = []
+
+[fixtures.pi-c1f848abe-fix-ai-providers-adjusted-anthropic-clie]
+description = "From commit c1f848abe00095fa54a44b06a5fdca2634f64b05"
+tags = []
+
+[fixtures.pi-1f0560854-fix-pi-natives-shell-handled-case-insens]
+description = "From commit 1f0560854dfdd1fe6a253a97242f28d4139fad4c"
+tags = []
+
+[fixtures.pi-8e1f53fee-style-bun-run-fix]
+description = "From commit 8e1f53fee6e77fd4b3708d73873dc7820fe0068b"
+tags = []
+
+[fixtures.pi-e8c5c660b-feat-coding-agent-implemented-atom-repla]
+description = "From commit e8c5c660b675321c32b435262c8885f36103bfbe"
+tags = []
+
+[fixtures.pi-493c67aa6-test-tui-adjusted-tui-test-timings-for-c]
+description = "From commit 493c67aa6aa713142ac9fbd0322d54a898365f24"
+tags = []
+
+[fixtures.pi-638ad1947-fix-hashline-exhaustive-geteditanchors-s]
+description = "From commit 638ad1947cd3a986deefde39d43b7327243990fb"
+tags = []
+
+[fixtures.pi-eaf28b341-fix-ai-omp-commit-fails-with-http-400-on]
+description = "From commit eaf28b341daaad8734d0289740413711883b85b1"
+tags = []
+
+[fixtures.pi-ca1ccfc7e-support-multiple-messages-in-agent-promp]
+description = "From commit ca1ccfc7e2b997a9efa4edcf5e4f439406394fd1"
+tags = []
+
+[fixtures.pi-f17733570-perf-coding-agent-cached-bash-result-ren]
+description = "From commit f17733570e6f706da37c3c820912127748d826b4"
+tags = []
+
+[fixtures.pi-20663d0e0-feat-coding-agent-enhanced-system-prompt]
+description = "From commit 20663d0e0d0452dc3e41b38370e1e8f6e7036579"
+tags = []
+
+[fixtures.pi-5e2d1fa60-feat-coding-agent-added-toolcallcontext]
+description = "From commit 5e2d1fa6037ed9865298480533d677a3e26e6089"
+tags = []
+
+[fixtures.pi-5b4b682df-fix-ai-scope-cch-replacement-to-system-b]
+description = "From commit 5b4b682df7710272cd057f1ef873cfc6be9bc34b"
+tags = []
+
+[fixtures.pi-0c92a0ba3-feat-coding-agent-removed-strippedredire]
+description = "From commit 0c92a0ba35a9487b2df6c06b17c06c202c4db704"
+tags = []
+
+[fixtures.pi-93a60b796-downgrade-biome-to-2-3-5-to-fix-false-po]
+description = "From commit 93a60b796948e854aaae5d47a6eab7620243f7a2"
 tags = []
 
 [fixtures.style-rustfmt-format]
 description = "From commit 0bf9f23"
 tags = []
 
+[fixtures.pi-6bc098e57-html-artifacts-call-window-complete-when]
+description = "From commit 6bc098e57b6ecd4751728c68fc37077606d611e7"
+tags = []
+
+[fixtures.pi-ccc3533c4-fix-tui-differentiate-tree-empty-state-f]
+description = "From commit ccc3533c45979aed1a1ec29cf2a719aa07a83658"
+tags = []
+
+[fixtures.pi-2aec94bcd-fix-coding-agent-cleaner-properly-typed]
+description = "From commit 2aec94bcd43cbba2a0b69b206e65656a99e05b5d"
+tags = []
+
+[fixtures.pi-0c40e23a7-chore-bump-version-to-14-7-6]
+description = "From commit 0c40e23a7a7059bad9065db4d86131d659d2555c"
+tags = []
+
+[fixtures.pi-388deb1c1-chore-bump-version-to-15-9-4]
+description = "From commit 388deb1c14533e3e84e03a55aaad62c826404375"
+tags = []
+
+[fixtures.pi-2219269eb-refactor-pi-shell-hoist-shared-gh-glab-h]
+description = "From commit 2219269eb426607aeff727b39d351666c6bd1639"
+tags = []
+
+[fixtures.pi-2ae7302b7-feat-implemented-pragma-parsing-with-mod]
+description = "From commit 2ae7302b77268f9dd4d6abf6dc763ea1a83c544f"
+tags = []
+
+[fixtures.pi-752c021f3-fix-ai-restored-120s-idle-timeout-and-fi]
+description = "From commit 752c021f31e4cc62a679b0f76a3350f3ae1a6326"
+tags = []
+
+[fixtures.pi-4d9da4e4f-release-v0-22-5]
+description = "From commit 4d9da4e4f8399f6b034f71c02e26c492683a5db1"
+tags = []
+
+[fixtures.build-deps-rusqlite]
+description = "From commit bdd4d79"
+tags = []
+
+[fixtures.pi-e28ae2fd8-fix-ai-hoisted-images-out-of-error-anthr]
+description = "From commit e28ae2fd88d433481b2b1300730a4be120a44507"
+tags = []
+
+[fixtures.pi-efa20a003-chore-bump-version-to-12-17-1]
+description = "From commit efa20a00381c593531534a33bec5818dc9d5265f"
+tags = []
+
+[fixtures.pi-8b4810c82-fix-natives-enabled-cross-line-grep-and]
+description = "From commit 8b4810c82868e5bf6a162acca88f2f72ece90a3e"
+tags = []
+
+[fixtures.pi-f47113b88-docs-added-comprehensive-documentation-f]
+description = "From commit f47113b88f7d76966b209f5c5b20eee1bccb0f8c"
+tags = []
+
+[fixtures.pi-304d6e072-fix-coding-agent-preserved-intentional-h]
+description = "From commit 304d6e072242b039af4d6a7d1ecac53459502c8c"
+tags = []
+
+[fixtures.pi-3e4c57c08-chore-coding-agent-record-session-chain]
+description = "From commit 3e4c57c08daac08488943befcf774d11a8f52040"
+tags = []
+
+[fixtures.pi-0dc4aa36f-feat-ai-expose-provider-response-metadat]
+description = "From commit 0dc4aa36fdf67c2c175c52d5b2fa62c771f5d1c5"
+tags = []
+
+[fixtures.pi-512aacc51-fix-coding-agent-tools-corrected-collaps]
+description = "From commit 512aacc51783f3cc17cfc5b41632b70efd917cb3"
+tags = []
+
+[fixtures.pi-e7d90ff70-chore-bump-version-to-12-5-1]
+description = "From commit e7d90ff703794a81adc7f4883d6d990a1f5823e1"
+tags = []
+
+[fixtures.pi-fc5bbc26e-fix-ai-emit-orphan-tool-output-via-user]
+description = "From commit fc5bbc26e26768884ac86a7083b4bb9b3ac2cd9b"
+tags = []
+
+[fixtures.refactor-cell-to-controller]
+description = "From commit 7c8d1cf30"
+tags = []
+
+[fixtures.pi-51234ad92-fix-js-eval]
+description = "From commit 51234ad929caa46aca711164f7d7e0bc6d57a8e4"
+tags = []
+
+[fixtures.pi-36467c2a5-feat-coding-agent-added-git-context-to-s]
+description = "From commit 36467c2a572f23252a21b492d0a1fe9de9858719"
+tags = []
+
+[fixtures.pi-9edf773b8-feat-coding-agent-centralized-tool-filte]
+description = "From commit 9edf773b810ad633443db4ed7ee918e27277e093"
+tags = []
+
+[fixtures.pi-93adcf13f-feat-ai-bump-catalog-add-z-ai]
+description = "From commit 93adcf13f60cd0fd25d0b7c8bbabd0d2283ba24f"
+tags = []
+
+[fixtures.pi-c52096d86-fix-ai-prevent-double-api-version-path-i]
+description = "From commit c52096d86978851ee07359f4c82c274bf6a957d7"
+tags = []
+
+[fixtures.pi-23dedc508-chore-bump-version-to-15-11-2]
+description = "From commit 23dedc5086847ca01f039a1767307b7b007b064e"
+tags = []
+
+[fixtures.pi-54d212ec3-feat-coding-agent-added-advisor-immune-t]
+description = "From commit 54d212ec33c22a6aad5fc2dd0216794a90a4eb48"
+tags = []
+
+[fixtures.pi-9de59c640-release-v0-18-5]
+description = "From commit 9de59c640d054dd131d2be198d31fd1d6c0bdf24"
+tags = []
+
+[fixtures.pi-e08870e4a-docs-changelog-consolidate-profile-entri]
+description = "From commit e08870e4abb2138335db40aac92819d9f2f6803c"
+tags = []
+
+[fixtures.pi-fba068176-fix-coding-agent-map-ollama-chat-to-forc]
+description = "From commit fba068176764660967dfe107e5e2ab8b4a2fd17d"
+tags = []
+
+[fixtures.pi-277fd22d5-improve-before-compact-hook-add-messages]
+description = "From commit 277fd22d5fd5c83979376622f5fe60d6785f2457"
+tags = []
+
+[fixtures.pi-38a591f95-feat-added-maintainer-directive-flow-wit]
+description = "From commit 38a591f951feef7325a5e6534800259f6a9e37b3"
+tags = []
+
+[fixtures.pi-52719d1a7-refactor-restructured-monorepo-typescrip]
+description = "From commit 52719d1a7c8be060bd65bdc7bd85ae50ec2f6087"
+tags = []
+
+[fixtures.pi-395e2a150-fix-utils-reject-profiles-ending-with-do]
+description = "From commit 395e2a150497cca549e9df96de1ef063aac3a4b0"
+tags = []
+
+[fixtures.pi-5bbaaa077-formatting]
+description = "From commit 5bbaaa07732b93f3faedd354953e7bf1e0af7b85"
+tags = []
+
+[fixtures.pi-08a4fe78a-fix-coding-agent-modes-corrected-role-mo]
+description = "From commit 08a4fe78a2425ea987610048484ff7b446bb3cd3"
+tags = []
+
+[fixtures.pi-d64fa7e85-feat-coding-agent-preserve-results-on-is]
+description = "From commit d64fa7e85925d857f2556980dcef49d9f9a4651c"
+tags = []
+
 [fixtures.small-bugfix]
 description = "From commit f5b8a6ba1"
+tags = []
+
+[fixtures.pi-1136ba81a-fix-eval-exit-graceful-close-js-worker]
+description = "From commit 1136ba81a1bf0879f969a0d0bc0e37389e3ef908"
+tags = []
+
+[fixtures.pi-3a76cc4b3-chore-reformat]
+description = "From commit 3a76cc4b3de3cbac8e545ab527fe05cdff232803"
+tags = []
+
+[fixtures.pi-82d375caa-feat-coding-agent-exported-patch-utiliti]
+description = "From commit 82d375caa825254ef3d4ab793d81b146716c5fb7"
+tags = []
+
+[fixtures.pi-d26f759b8-chore-bump-version-to-8-4-0]
+description = "From commit d26f759b809411d926b7fb61636d89c370b87915"
+tags = []
+
+[fixtures.pi-072a199f4-fix-pi-shell-anchor-ls-long-format-parsi]
+description = "From commit 072a199f462512dd4c68318da3956dd6303d7d8a"
+tags = []
+
+[fixtures.pi-24b150cf8-feat-coding-agent-added-session-accent-t]
+description = "From commit 24b150cf8ec0684cc325b645c2cc197a339bc361"
+tags = []
+
+[fixtures.pi-34aed93f8-fix-win-deps]
+description = "From commit 34aed93f8ed5bd78ed31e00d5f86578d124b8928"
+tags = []
+
+[fixtures.pi-035adc610-fix-ai-restore-copilot-reasoning-control]
+description = "From commit 035adc610ca7bc694072825e9c5848fae65927b5"
+tags = []
+
+[fixtures.pi-4019acf1f-chore-bump-versions-to-0-7-1]
+description = "From commit 4019acf1f083e66c091174bb9edb2609a6481a40"
+tags = []
+
+[fixtures.pi-6c3580828-fix-ai-ensure-unique-tool-call-ids-in-go]
+description = "From commit 6c3580828dda12b7cd29b32cdd91ac70476c0fbe"
+tags = []
+
+[fixtures.pi-b20a87490-fix-improve-gemini-tool-selection-with-s]
+description = "From commit b20a874904e46d8c5591a63b6abb1eb5ee2a30d5"
+tags = []
+
+[fixtures.pi-38dd0aa9f-docs-coding-agent-prompts-documented-pro]
+description = "From commit 38dd0aa9ff4cfc7a6eee204ee63a51c28d6f431d"
+tags = []
+
+[fixtures.pi-a94b19e1d-fix-dependencies]
+description = "From commit a94b19e1dfa26114dca247a531e59921a00e488a"
+tags = []
+
+[fixtures.pi-222e1cd34-feat-edit-enabled-lid-and-lida-lidb-repl]
+description = "From commit 222e1cd348b5cdaecd2febac30ccc6b22a7e2e91"
 tags = []

@@ -1,0 +1,56 @@
+diff --git a/packages/agent/src/renderers/tui-renderer.ts b/packages/agent/src/renderers/tui-renderer.ts
+index 8e0a82777..e7d311005 100644
+--- a/packages/agent/src/renderers/tui-renderer.ts
++++ b/packages/agent/src/renderers/tui-renderer.ts
+@@ -315,7 +315,9 @@ export class TuiRenderer implements AgentEventReceiver {
+ 		this.tokenContainer.clear();
+ 
+ 		// Build token display text
+-		let tokenText = chalk.dim(`↑ ${this.lastInputTokens.toLocaleString()} ↓ ${this.lastOutputTokens.toLocaleString()}`);
++		let tokenText = chalk.dim(
++			`↑ ${this.lastInputTokens.toLocaleString()} ↓ ${this.lastOutputTokens.toLocaleString()}`,
++		);
+ 
+ 		// Add reasoning tokens if present
+ 		if (this.lastReasoningTokens > 0) {
+@@ -380,8 +382,9 @@ export class TuiRenderer implements AgentEventReceiver {
+ 	}
+ 
+ 	private showTokenUsage(): void {
+-
+-		let tokenText = chalk.dim(`Total usage\n   input: ${this.cumulativeInputTokens.toLocaleString()}\n   output: ${this.cumulativeOutputTokens.toLocaleString()}`);
++		let tokenText = chalk.dim(
++			`Total usage\n   input: ${this.cumulativeInputTokens.toLocaleString()}\n   output: ${this.cumulativeOutputTokens.toLocaleString()}`,
++		);
+ 
+ 		if (this.cumulativeReasoningTokens > 0) {
+ 			tokenText += chalk.dim(`\n   reasoning: ${this.cumulativeReasoningTokens.toLocaleString()}`);
+@@ -398,7 +401,6 @@ export class TuiRenderer implements AgentEventReceiver {
+ 			tokenText += chalk.dim(` ${cacheText.join(" ")}`);
+ 		}
+ 
+-
+ 		if (this.cumulativeToolCallCount > 0) {
+ 			tokenText += chalk.dim(`\n   tool calls: ${this.cumulativeToolCallCount}`);
+ 		}
+diff --git a/packages/tui/src/components/text-editor.ts b/packages/tui/src/components/text-editor.ts
+index 66714be35..dd1336152 100644
+--- a/packages/tui/src/components/text-editor.ts
++++ b/packages/tui/src/components/text-editor.ts
+@@ -658,7 +658,7 @@ export class TextEditor implements Component {
+ 		// For now, fall back to regular autocomplete (slash commands)
+ 		// This can be extended later to handle command-specific argument completion
+ 		this.tryTriggerAutocomplete(true);
+-}
++	}
+ 
+ 	private forceFileAutocomplete(): void {
+ 		if (!this.autocompleteProvider) return;
+@@ -685,7 +685,6 @@ export class TextEditor implements Component {
+ 		}
+ 	}
+ 
+-
+ 	private cancelAutocomplete(): void {
+ 		this.isAutocompleting = false;
+ 		this.autocompleteList = undefined as any;

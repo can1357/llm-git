@@ -1,0 +1,2 @@
+agent (67%, high confidence), coding-agent (33%, high confidence), coding-agent/core (33%, moderate confidence)
+Prefer 2-segment scopes marked 'high confidence'

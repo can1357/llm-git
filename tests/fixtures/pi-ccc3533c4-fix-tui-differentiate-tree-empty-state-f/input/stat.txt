@@ -1,0 +1,4 @@
+ packages/coding-agent/CHANGELOG.md                 |  4 +
+ .../src/modes/components/tree-selector.ts          | 33 +++++++-
+ .../tree-selector-empty-state-1909.test.ts         | 89 ++++++++++++++++++++++
+ 3 files changed, 124 insertions(+), 2 deletions(-)

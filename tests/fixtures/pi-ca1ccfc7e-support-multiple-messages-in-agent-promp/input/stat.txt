@@ -1,0 +1,5 @@
+ packages/agent/src/agent-loop.ts                | 12 +++++----
+ packages/agent/src/agent.ts                     | 34 ++++++++++++++-----------
+ packages/agent/test/agent-loop.test.ts          | 10 ++++----
+ packages/coding-agent/src/core/agent-session.ts | 28 ++++++++++++--------
+ 4 files changed, 48 insertions(+), 36 deletions(-)

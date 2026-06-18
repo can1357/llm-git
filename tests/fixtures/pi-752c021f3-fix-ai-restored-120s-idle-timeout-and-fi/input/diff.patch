@@ -1,0 +1,74 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index e6c9746b8..de43e48c9 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -12,8 +12,13 @@
+ - Added `buildOpenAiNativeHistory`, `getPreservedOpenAiRemoteCompactionData`, and `withOpenAiRemoteCompactionPreserveData` to construct OpenAI-native compaction payloads and persist compaction context across turns
+ - Added generic `requestRemoteCompaction` for POSTing `{systemPrompt,prompt}` to self-hosted compaction endpoints and retrieving `{summary, shortSummary}` responses
+ 
++### Changed
++
++- Restored the default steady-state stream idle timeout to 120s (regressed in 15.0.0). 30s was too aggressive for reasoning models, slow proxies, and tool-call planning gaps, surfacing as repeated `Provider stream stalled while waiting for the next event` errors. Existing `PI_STREAM_IDLE_TIMEOUT_MS` / `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` overrides are unchanged.
++
+ ### Fixed
+ 
++- Fixed lazy built-in provider streams (`anthropic-messages`, `bedrock-converse-stream`, `cursor-agent`, `google-*`, `ollama-chat`, `openai-*`) prematurely aborting slow first-token responses with `Provider stream stalled while waiting for the next event`. The lazy-stream watchdog wrapper was treating the synthetic `start` event (yielded immediately by every provider before the model emits any tokens) as the first real item, which caused the watchdog to drop from `firstItemTimeoutMs` (100s) to `idleTimeoutMs` (30s) before the upstream model had produced anything. The shared `iterateWithIdleTimeout` now keeps `awaitingFirstItem` true until a real progress item arrives, and the lazy-stream wrapper marks `start` as a non-progress keepalive ([#1073](https://github.com/can1357/oh-my-pi/pull/1073) regression).
+ - Heal leaked Kimi K2 chat-template tool-call tokens (`<|tool_calls_section_begin|>` … `<|tool_call_argument_begin|>` … `<|tool_calls_section_end|>`) that some hosts (native `kimi-code` API, OpenRouter, Fireworks, etc.) emit into `delta.content` instead of structured `tool_calls`. The OpenAI-completions stream consumer now strips the markers from visible text, reconstructs the embedded calls as proper `toolCall` content blocks (stream-aware, token-boundary-safe), and promotes `finish_reason: stop` to `toolUse` when calls were healed.
+ 
+ ## [15.0.2] - 2026-05-15
+diff --git a/packages/ai/src/providers/register-builtins.ts b/packages/ai/src/providers/register-builtins.ts
+index 9b2895cdb..ab463f7d6 100644
+--- a/packages/ai/src/providers/register-builtins.ts
++++ b/packages/ai/src/providers/register-builtins.ts
+@@ -184,6 +184,12 @@ function forwardStream<TApi extends Api>(
+ 				onIdle: () => abortTracker.abortLocally(new Error(LAZY_STREAM_IDLE_TIMEOUT_ERROR)),
+ 				onFirstItemTimeout: () => abortTracker.abortLocally(new Error(LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
+ 				abortSignal: options.signal,
++				// The synthetic `start` event is yielded immediately by every provider before
++				// the upstream model has emitted any tokens. Treating it as the first "real"
++				// item would flip the watchdog from `firstItemTimeoutMs` to the much shorter
++				// `idleTimeoutMs` while we're still legitimately waiting on the model's
++				// first response (slow first-token from reasoning models, cold proxies, etc.).
++				isProgressItem: event => (event as AssistantMessageEvent).type !== "start",
+ 			});
+ 
+ 			for await (const event of watchedSource) {
+diff --git a/packages/ai/src/utils/idle-iterator.ts b/packages/ai/src/utils/idle-iterator.ts
+index 61d06063e..648616972 100644
+--- a/packages/ai/src/utils/idle-iterator.ts
++++ b/packages/ai/src/utils/idle-iterator.ts
+@@ -1,6 +1,6 @@
+ import { $env } from "@oh-my-pi/pi-utils";
+ 
+-const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 30_000;
++const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
+ const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 100_000;
+ 
+ function normalizeIdleTimeoutMs(value: string | undefined, fallback: number): number | undefined {
+@@ -214,8 +214,13 @@ export async function* iterateWithIdleTimeout<T>(
+ 				return;
+ 			}
+ 			const item = outcome.result.value;
+-			markFirstItemReceived();
++			// Non-progress items (e.g. provider keepalives, synthetic `start` events that
++			// arrive before the model has produced any tokens) MUST NOT flip us out of
++			// `awaitingFirstItem`. Otherwise the next iteration switches from the (longer)
++			// first-item watchdog to the (shorter) idle watchdog while we're still waiting
++			// on the model's first real output.
+ 			if (isProgressItem(item)) {
++				markFirstItemReceived();
+ 				lastProgressAt = Date.now();
+ 			}
+ 			yield item;
+diff --git a/packages/ai/test/register-builtins.test.ts b/packages/ai/test/register-builtins.test.ts
+index 15bdf6a21..8e6628786 100644
+--- a/packages/ai/test/register-builtins.test.ts
++++ b/packages/ai/test/register-builtins.test.ts
+@@ -99,6 +99,7 @@ describe("register-builtins lazy streams", () => {
+ 		const source = {
+ 			async *[Symbol.asyncIterator]() {
+ 				yield { type: "start", partial: partialMessage } as const;
++				yield { type: "text_delta", contentIndex: 0, delta: "hello", partial: partialMessage } as const;
+ 				const { promise, reject } = Promise.withResolvers<never>();
+ 				if (providerSignal?.aborted) {
+ 					reject(new Error("Request was aborted"));

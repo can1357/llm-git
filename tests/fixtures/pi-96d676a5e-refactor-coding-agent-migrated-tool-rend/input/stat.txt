@@ -1,0 +1,25 @@
+ packages/ai/CHANGELOG.md                           |   6 +
+ packages/ai/scripts/generate-models.ts             | 311 +++++++-
+ packages/ai/src/models.generated.ts                | 519 ++++++++++--
+ .../providers/openai-codex/request-transformer.ts  |  18 +-
+ packages/coding-agent/CHANGELOG.md                 |   2 +
+ packages/coding-agent/src/core/system-prompt.ts    |  16 +-
+ packages/coding-agent/src/core/tools/ask.ts        |  89 ++-
+ packages/coding-agent/src/core/tools/bash.ts       | 106 +++
+ packages/coding-agent/src/core/tools/edit.ts       | 141 ++++
+ packages/coding-agent/src/core/tools/find.ts       | 155 ++++
+ packages/coding-agent/src/core/tools/grep.ts       | 191 +++++
+ packages/coding-agent/src/core/tools/ls.ts         | 135 +++-
+ packages/coding-agent/src/core/tools/lsp/render.ts |   5 +
+ packages/coding-agent/src/core/tools/notebook.ts   | 110 +++
+ packages/coding-agent/src/core/tools/output.ts     | 126 +++
+ packages/coding-agent/src/core/tools/read.ts       |  96 +++
+ .../coding-agent/src/core/tools/render-utils.ts    | 241 ++++++
+ packages/coding-agent/src/core/tools/renderers.ts  | 872 +--------------------
+ .../coding-agent/src/core/tools/task/render.ts     |   5 +
+ packages/coding-agent/src/core/tools/web-fetch.ts  |   5 +
+ .../core/tools/web-search/providers/anthropic.ts   |   6 +-
+ .../src/core/tools/web-search/render.ts            |   5 +
+ packages/coding-agent/src/core/tools/write.ts      |  90 +++
+ .../modes/interactive/components/tool-execution.ts | 597 ++------------
+ 24 files changed, 2385 insertions(+), 1462 deletions(-)

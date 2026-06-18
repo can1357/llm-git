@@ -1,0 +1,108 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 805c4a79c..e9ac366f0 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -1,6 +1,16 @@
+ # Changelog
+ 
+ ## [Unreleased]
++
++### Added
++
++- Added Gemma 3 27B model support for Google Generative AI
++
++### Changed
++
++- Updated Kwaipilot KAT-Coder-Pro V2 model display name and pricing information
++- Updated Kwaipilot KAT-Coder-Pro V2 context window from 222,222 to 256,000 tokens and max tokens from 8,888 to 80,000
++
+ ### Fixed
+ 
+ - Fixed normalizeAnthropicBaseUrl returning empty string instead of undefined when baseUrl is empty
+diff --git a/packages/ai/src/models.json b/packages/ai/src/models.json
+index 94f12181f..d43a6ed8f 100644
+--- a/packages/ai/src/models.json
++++ b/packages/ai/src/models.json
+@@ -6270,6 +6270,26 @@
+ 				"minLevel": "minimal",
+ 				"maxLevel": "high"
+ 			}
++		},
++		"gemma-3-27b-it": {
++			"id": "gemma-3-27b-it",
++			"name": "Gemma 3 27B",
++			"api": "google-generative-ai",
++			"provider": "google",
++			"baseUrl": "https://generativelanguage.googleapis.com/v1beta",
++			"reasoning": false,
++			"input": [
++				"text",
++				"image"
++			],
++			"cost": {
++				"input": 0,
++				"output": 0,
++				"cacheRead": 0,
++				"cacheWrite": 0
++			},
++			"contextWindow": 131072,
++			"maxTokens": 8192
+ 		}
+ 	},
+ 	"google-antigravity": {
+@@ -22027,7 +22047,7 @@
+ 		},
+ 		"kwaipilot/kat-coder-pro-v2": {
+ 			"id": "kwaipilot/kat-coder-pro-v2",
+-			"name": "kwaipilot/kat-coder-pro-v2",
++			"name": "Kwaipilot: KAT-Coder-Pro V2",
+ 			"api": "openai-completions",
+ 			"provider": "nanogpt",
+ 			"baseUrl": "https://nano-gpt.com/api/v1",
+@@ -22036,13 +22056,13 @@
+ 				"text"
+ 			],
+ 			"cost": {
+-				"input": 0,
+-				"output": 0,
+-				"cacheRead": 0,
++				"input": 0.3,
++				"output": 1.2,
++				"cacheRead": 0.06,
+ 				"cacheWrite": 0
+ 			},
+-			"contextWindow": 222222,
+-			"maxTokens": 8888
++			"contextWindow": 256000,
++			"maxTokens": 80000
+ 		},
+ 		"LatitudeGames/Wayfarer-Large-70B-Llama-3.3": {
+ 			"id": "LatitudeGames/Wayfarer-Large-70B-Llama-3.3",
+diff --git a/packages/ai/src/provider-models/descriptors.ts b/packages/ai/src/provider-models/descriptors.ts
+index 8bf418d0b..2ba939056 100644
+--- a/packages/ai/src/provider-models/descriptors.ts
++++ b/packages/ai/src/provider-models/descriptors.ts
+@@ -39,7 +39,7 @@ import {
+ 	xiaomiModelManagerOptions,
+ 	zenmuxModelManagerOptions,
+ } from "./openai-compat";
+-import { cursorModelManagerOptions } from "./special";
++import { cursorModelManagerOptions, zaiModelManagerOptions } from "./special";
+ 
+ /** Catalog discovery configuration for providers that support endpoint-based model listing. */
+ export interface CatalogDiscoveryConfig {
+@@ -257,6 +257,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
+ 		config => zenmuxModelManagerOptions(config),
+ 		catalog("ZenMux", ["ZENMUX_API_KEY"]),
+ 	),
++	catalogDescriptor("zai", "glm-4.6", config => zaiModelManagerOptions(config), catalog("zAI", ["ZAI_API_KEY"])),
+ 	descriptor("github-copilot", "gpt-4o", config => githubCopilotModelManagerOptions(config)),
+ 	descriptor("google", "gemini-2.5-pro", config => googleModelManagerOptions(config)),
+ 	catalogDescriptor(
+@@ -280,6 +281,5 @@ export const DEFAULT_MODEL_PER_PROVIDER: Record<KnownProvider, string> = {
+ 	"minimax-code": "MiniMax-M2.5",
+ 	"minimax-code-cn": "MiniMax-M2.5",
+ 	"openai-codex": "gpt-5.4",
+-	zai: "glm-4.6",
+ 	"gitlab-duo": "duo-chat-sonnet-4-5",
+ } as Record<KnownProvider, string>;

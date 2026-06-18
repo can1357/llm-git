@@ -1,0 +1,1380 @@
+diff --git a/src/robomp/config.py b/src/robomp/config.py
+index 57af6c11f..83588e985 100644
+--- a/src/robomp/config.py
++++ b/src/robomp/config.py
+@@ -10,7 +10,7 @@ from typing import Literal
+ from pydantic import Field, SecretStr, field_validator
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ 
+-ThinkingLevel = Literal["off", "low", "medium", "high"]
++ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh"]
+ 
+ 
+ class Settings(BaseSettings):
+diff --git a/src/robomp/dashboard.py b/src/robomp/dashboard.py
+index 2fd61ca0b..29cdece6c 100644
+--- a/src/robomp/dashboard.py
++++ b/src/robomp/dashboard.py
+@@ -312,11 +312,19 @@ function renderWorking(running, inflight) {
+     const started = e.started_at || e.received_at;
+     const elapsed = started ? fmtDuration((Date.now() - Date.parse(started)) / 1000) : "—";
+     const [repo, number] = (e.issue_key || "").split("#");
++    const model = e.model
++      ? `<code title="${esc(e.model)}">${esc(e.model)}</code>`
++      : '<span class="muted">—</span>';
++    const lastTool = e.last_tool
++      ? `<code>${esc(e.last_tool)}</code> <span class="muted">${esc(fmtAge(e.last_tool_ts))}</span>`
++      : '<span class="muted">—</span>';
+     return `<tr>
+       <td>${number ? issueLink(repo, number) : `<code>${esc(e.delivery_id.slice(0, 8))}</code>`}</td>
+       <td>${esc(e.event_type)}</td>
+       <td><span class="pill running">running</span></td>
+       <td>${elapsed}</td>
++      <td>${model}</td>
++      <td>${lastTool}</td>
+       <td class="muted">attempt ${e.attempts}</td>
+       <td>${CONFIG.replayEnabled
+         ? `<button class="small" data-cancel="${esc(e.delivery_id)}">cancel</button>`
+@@ -332,12 +340,14 @@ function renderWorking(running, inflight) {
+       <td class="muted">—</td>
+       <td><span class="pill running">inflight</span></td>
+       <td>—</td>
++      <td class="muted">—</td>
++      <td class="muted">—</td>
+       <td class="muted">held by pool</td>
+       <td><span class="muted">—</span></td>
+     </tr>`);
+   }
+   $("working").innerHTML =
+-    `<table><thead><tr><th>issue</th><th>event</th><th>state</th><th>elapsed</th><th></th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
++    `<table><thead><tr><th>issue</th><th>event</th><th>state</th><th>elapsed</th><th>model</th><th>last action</th><th></th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+ }
+ 
+ function renderIssues(issues) {
+diff --git a/src/robomp/db.py b/src/robomp/db.py
+index 663427423..01c2f967c 100644
+--- a/src/robomp/db.py
++++ b/src/robomp/db.py
+@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS events (
+   attempts      INTEGER NOT NULL DEFAULT 0,
+   last_error    TEXT,
+   started_at    TEXT,
+-  finished_at   TEXT
++  finished_at   TEXT,
++  model         TEXT
+ );
+ 
+ CREATE INDEX IF NOT EXISTS events_state_received
+@@ -142,9 +143,12 @@ class Database:
+ 
+     def _migrate(self) -> None:
+         # SQLite-friendly forward migrations. Each is idempotent.
+-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(issues)").fetchall()}
+-        if "classification" not in cols:
++        issue_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(issues)").fetchall()}
++        if "classification" not in issue_cols:
+             self._conn.execute("ALTER TABLE issues ADD COLUMN classification TEXT")
++        event_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
++        if "model" not in event_cols:
++            self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
+ 
+     def close(self) -> None:
+         with self._lock:
+@@ -238,6 +242,18 @@ class Database:
+                 (state, error, _utcnow(), delivery_id),
+             )
+ 
++    def set_event_model(self, delivery_id: str, model: str) -> None:
++        """Persist the model the worker actually picked for this event.
++
++        Called once per run, right after `pick_model()`, so the dashboard and
++        post-mortems can attribute behavior to the exact model used.
++        """
++        with self._lock:
++            self._conn.execute(
++                "UPDATE events SET model=? WHERE delivery_id=?",
++                (model, delivery_id),
++            )
++
+     def reset_stuck_running(self) -> int:
+         """Recover events that were running at shutdown."""
+         with self._lock:
+@@ -356,15 +372,30 @@ class Database:
+         return counts
+ 
+     def list_running_events(self) -> list[dict[str, Any]]:
+-        """Snapshot of currently-running events. Includes started_at for elapsed-time UI."""
++        """Snapshot of currently-running events.
++
++        Returns elapsed-time inputs (`started_at`) plus per-run telemetry:
++        - `model`: the omp model the worker picked for this run, set after
++          `pick_model()` so it reflects the actual pool selection.
++        - `last_tool` / `last_tool_ts`: the most recent host-tool call audited
++          on the same `issue_key` since `started_at`. Scoping by start time
++          prevents stale entries from a prior run on the same issue leaking
++          into the dashboard before this run has emitted any tool calls.
++        """
+         with self._lock:
+             rows = self._conn.execute(
+                 """
+-                SELECT delivery_id, event_type, repo, issue_key, received_at,
+-                       started_at, attempts
+-                FROM events
+-                WHERE state = 'running'
+-                ORDER BY COALESCE(started_at, received_at)
++                SELECT e.delivery_id, e.event_type, e.repo, e.issue_key, e.received_at,
++                       e.started_at, e.attempts, e.model,
++                       (SELECT tool FROM tool_calls
++                          WHERE issue_key = e.issue_key AND ts >= e.started_at
++                          ORDER BY ts DESC LIMIT 1) AS last_tool,
++                       (SELECT ts FROM tool_calls
++                          WHERE issue_key = e.issue_key AND ts >= e.started_at
++                          ORDER BY ts DESC LIMIT 1) AS last_tool_ts
++                FROM events e
++                WHERE e.state = 'running'
++                ORDER BY COALESCE(e.started_at, e.received_at)
+                 """
+             ).fetchall()
+         return [
+@@ -376,6 +407,9 @@ class Database:
+                 "received_at": r["received_at"],
+                 "started_at": r["started_at"],
+                 "attempts": int(r["attempts"]),
++                "model": r["model"],
++                "last_tool": r["last_tool"],
++                "last_tool_ts": r["last_tool_ts"],
+             }
+             for r in rows
+         ]
+diff --git a/src/robomp/github_events.py b/src/robomp/github_events.py
+index b5cd941e4..4d9dcadd2 100644
+--- a/src/robomp/github_events.py
++++ b/src/robomp/github_events.py
+@@ -11,6 +11,7 @@ from dataclasses import dataclass
+ from typing import Any, Literal
+ 
+ from robomp.db import issue_key
++from robomp.pragmas import parse_pragmas
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -29,6 +30,7 @@ class RouteDecision:
+     directive: bool = False
+     directive_body: str | None = None
+     directive_author: str | None = None
++    directive_pragmas: tuple[tuple[str, str], ...] = ()
+ 
+     @property
+     def should_queue(self) -> bool:
+@@ -175,13 +177,25 @@ def route(
+         if rb_login is not None:
+             # Reviewer bots like chatgpt-codex-connector speak authoritatively
+             # already — no `@bot` mention required; pass the full body through.
+-            return {"directive": True, "directive_body": body, "directive_author": rb_login}
++            cleaned, pragmas = parse_pragmas(body)
++            return {
++                "directive": True,
++                "directive_body": cleaned,
++                "directive_author": rb_login,
++                "directive_pragmas": pragmas,
++            }
+         if not is_maintainer(login, assoc, maintainers=maintainers):
+             return {}
+         stripped = extract_mention(body, bot_login)
+         if stripped is None:
+             return {}
+-        return {"directive": True, "directive_body": stripped, "directive_author": login}
++        cleaned, pragmas = parse_pragmas(stripped)
++        return {
++            "directive": True,
++            "directive_body": cleaned,
++            "directive_author": login,
++            "directive_pragmas": pragmas,
++        }
+ 
+     if event_type == "issues":
+         issue = payload.get("issue") or {}
+diff --git a/src/robomp/host_tools.py b/src/robomp/host_tools.py
+index ba7e0aafa..05b8b5819 100644
+--- a/src/robomp/host_tools.py
++++ b/src/robomp/host_tools.py
+@@ -44,11 +44,22 @@ class ToolBindings:
+     loop: asyncio.AbstractEventLoop
+     author_name: str
+     author_email: str
++    # Number of the GitHub thread the inbound webhook arrived on. For an
++    # issue comment this is the issue; for a PR conversation or review
++    # comment it's the PR. `gh_post_comment` defaults its target here so
++    # the agent's reply lands on the thread the human is actually reading.
++    # `None` for tasks with no inbound thread (e.g. initial triage), in
++    # which case the originating issue is used.
++    inbound_thread_number: int | None = None
+ 
+     @property
+     def issue_key(self) -> str:
+         return issue_key(self.issue.repo, self.issue.number)
+ 
++    @property
++    def default_comment_number(self) -> int:
++        return self.inbound_thread_number if self.inbound_thread_number is not None else self.issue.number
++
+ 
+ def _run_coro(loop: asyncio.AbstractEventLoop, coro: Any) -> Any:
+     """Block the agent thread until an async call completes on the worker loop."""
+@@ -250,7 +261,7 @@ def _build_post_comment(bindings: ToolBindings) -> HostTool[Any, Any]:
+         body = args.get("body")
+         if not isinstance(body, str) or not body.strip():
+             _raise_command("gh_post_comment requires a non-empty 'body'.")
+-        target_number = bindings.issue.number
++        target_number = bindings.default_comment_number
+         if isinstance(args.get("number"), int):
+             target_number = int(args["number"])
+         try:
+diff --git a/src/robomp/persona.py b/src/robomp/persona.py
+index f5737c23f..d000fe6bd 100644
+--- a/src/robomp/persona.py
++++ b/src/robomp/persona.py
+@@ -196,6 +196,19 @@ def kickoff_directive(
+     )
+ 
+ 
++def _inbound_scope(issue: IssueInfo, pr_number: int | None) -> dict[str, Any]:
++    """Describe the thread the inbound webhook arrived on.
++
++    For PR conversations and review comments `pr_number` is the PR; for
++    regular issue comments it's None and we fall back to the issue. The
++    `kind` field lets prompts say "PR" or "issue" without branching in the
++    template engine.
++    """
++    if pr_number is not None and pr_number != issue.number:
++        return {"kind": "PR", "number": pr_number}
++    return {"kind": "issue", "number": issue.number}
++
++
+ def followup_comment(
+     *,
+     repo: RepoInfo,
+@@ -203,6 +216,7 @@ def followup_comment(
+     comment: CommentInfo,
+     workspace: Workspace,
+     pr_status: str,
++    pr_number: int | None = None,
+ ) -> str:
+     return render(
+         _load("followup_comment.md"),
+@@ -212,6 +226,7 @@ def followup_comment(
+             "workspace": workspace,
+             "comment": comment,
+             "state": {"pr_status": pr_status},
++            "inbound": _inbound_scope(issue, pr_number),
+         },
+     )
+ 
+@@ -224,6 +239,7 @@ def directive(
+     workspace: Workspace,
+     directive: Any,
+     pr_status: str,
++    pr_number: int | None = None,
+ ) -> str:
+     """Follow-up flavor for a comment that is a maintainer directive."""
+     return render(
+@@ -236,6 +252,7 @@ def directive(
+             "directive": {"body": directive.body, "author": directive.author},
+             "thread": _render_thread(getattr(directive, "thread", ()) or ()),
+             "state": {"pr_status": pr_status},
++            "inbound": _inbound_scope(issue, pr_number),
+         },
+     )
+ 
+diff --git a/src/robomp/pragmas.py b/src/robomp/pragmas.py
+new file mode 100644
+index 000000000..1f5a9cd92
+--- /dev/null
++++ b/src/robomp/pragmas.py
+@@ -0,0 +1,181 @@
++"""Slash-command pragmas for maintainer directives.
++
++A *pragma* is a piece of structured metadata a maintainer attaches to a
++directive comment to steer the agent run. The wire syntax is slash-commands
++on their own line (chatops convention; identical surface to Slack / Discord
++/ Probot):
++
++```
++@robomp-bot /model gpt /thinking low
++fix the off-by-one in foo()
++```
++
++Or stacked:
++
++```
++@robomp-bot
++/model gpt
++/thinking low
++fix the off-by-one
++```
++
++Either `/key value` or `/key=value` form is accepted. A line is consumed
++**only** when every whitespace-separated token on it is a valid slash
++command — that way an inline `/path/to/file` reference in prose never
++accidentally tokenizes. Consumed lines are stripped from the body before the
++agent ever sees them. Non-directive comments (random users) carry no
++pragmas; this whole surface only applies once the comment is already trusted
++as a directive (reviewer-bot or maintainer-mention).
++
++Supported keys (today):
++
++- `/model <alias>` — pick the first id in `ROBOMP_MODEL` whose model id
++  contains `<alias>` (case-insensitive). Falls back to the normal random
++  pool selection if no member matches.
++- `/thinking <level>` — override `ROBOMP_THINKING` for this run. Accepts
++  `off|none|no`, `lo|low`, `med|medium`, `hi|high`, `xhi|xhigh`
++  (case-insensitive); anything else is ignored.
++
++Parser semantics:
++
++- Pure-command lines are stripped from the body.
++- Mixed lines (commands + prose) are NOT consumed: the line stays verbatim
++  and no pragmas are extracted from it. Put commands on their own line.
++- Duplicate keys keep insertion order; callers decide last-vs-first wins.
++"""
++
++from __future__ import annotations
++
++import re
++from typing import Literal
++
++ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh"]
++
++# Key = ascii lowercase / digit / dash / underscore, must start with a letter.
++# The value (when using `/key=value` form) runs to end-of-token.
++_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$", re.IGNORECASE)
++
++
++def _parse_command_line(line: str) -> tuple[tuple[str, str], ...] | None:
++    """Parse one line as a sequence of slash commands.
++
++    Returns the parsed `(key, value)` pairs, or `None` if the line is not a
++    pure command line (mixed content, malformed, or empty after trim).
++    """
++    stripped = line.strip()
++    if not stripped or not stripped.startswith("/"):
++        return None
++    tokens = stripped.split()
++    pairs: list[tuple[str, str]] = []
++    i = 0
++    while i < len(tokens):
++        tok = tokens[i]
++        if not tok.startswith("/") or len(tok) < 2:
++            return None
++        # `/key=value` form lives inside one token.
++        if "=" in tok:
++            key, _, value = tok[1:].partition("=")
++            if not _KEY_RE.match(key) or not value:
++                return None
++            pairs.append((key.lower(), value))
++            i += 1
++            continue
++        # `/key value` form needs the next token as value, which must not
++        # itself be a command (otherwise `/key` had no value).
++        key = tok[1:]
++        if not _KEY_RE.match(key):
++            return None
++        if i + 1 >= len(tokens) or tokens[i + 1].startswith("/"):
++            return None
++        pairs.append((key.lower(), tokens[i + 1]))
++        i += 2
++    return tuple(pairs) if pairs else None
++
++
++def parse_pragmas(body: str) -> tuple[str, tuple[tuple[str, str], ...]]:
++    """Split `body` into (cleaned_body, pragmas).
++
++    Scans line-by-line. Pure command lines are removed; everything else is
++    preserved verbatim, including blank lines between content. Leading and
++    trailing whitespace on the final body is trimmed.
++    """
++    if not body:
++        return body, ()
++    found: list[tuple[str, str]] = []
++    kept: list[str] = []
++    # `splitlines(keepends=True)` preserves the original line endings so we
++    # don't accidentally normalize CRLF.
++    for line in body.splitlines(keepends=True):
++        # Strip the trailing newline only for parsing; we'll drop the whole
++        # line on a match either way.
++        bare = line.rstrip("\r\n")
++        commands = _parse_command_line(bare)
++        if commands is None:
++            kept.append(line)
++            continue
++        found.extend(commands)
++    cleaned = "".join(kept).strip("\r\n")
++    return cleaned, tuple(found)
++
++
++def pragma_value(pragmas: tuple[tuple[str, str], ...], key: str) -> str | None:
++    """Return the last value for `key` (last-wins), or None if absent."""
++    target = key.lower()
++    result: str | None = None
++    for k, v in pragmas:
++        if k == target:
++            result = v
++    return result
++
++
++def resolve_model_alias(alias: str, pool: tuple[str, ...]) -> str | None:
++    """Case-insensitive match of `alias` against each member of `pool`.
++
++    Precedence: full-id exact > short-name-after-slash exact > substring.
++    Returns the first match in pool order, or None if nothing matches.
++    """
++    needle = alias.strip().lower()
++    if not needle:
++        return None
++    exact: str | None = None
++    partial: str | None = None
++    for model in pool:
++        lower = model.lower()
++        if lower == needle:
++            return model
++        if exact is None and lower.rsplit("/", 1)[-1] == needle:
++            exact = model
++        if partial is None and needle in lower:
++            partial = model
++    return exact or partial
++
++
++# Spelling aliases for the `/thinking` pragma. Lowercased; whitespace-stripped
++# input is looked up directly.
++_THINKING_ALIASES: dict[str, ThinkingLevel] = {
++    "off": "off",
++    "none": "off",
++    "no": "off",
++    "lo": "low",
++    "low": "low",
++    "med": "medium",
++    "medium": "medium",
++    "hi": "high",
++    "high": "high",
++    "xhi": "xhigh",
++    "xhigh": "xhigh",
++}
++
++
++def resolve_thinking_level(value: str) -> ThinkingLevel | None:
++    """Normalize a thinking pragma to a canonical level, or None if unknown."""
++    return _THINKING_ALIASES.get(value.strip().lower())
++
++
++__all__ = [
++    "ThinkingLevel",
++    "parse_pragmas",
++    "pragma_value",
++    "resolve_model_alias",
++    "resolve_thinking_level",
++]
+diff --git a/src/robomp/prompts/directive.md b/src/robomp/prompts/directive.md
+index f6f30e2ed..c464323c8 100644
+--- a/src/robomp/prompts/directive.md
++++ b/src/robomp/prompts/directive.md
+@@ -1,10 +1,11 @@
+-# Directive on {{repo.full_name}}#{{issue.number}}
++# Directive on {{repo.full_name}}#{{inbound.number}} ({{inbound.kind}})
+ 
+ **@{{directive.author}}** posted an authoritative directive on this
+-issue/PR. They're either a maintainer who tagged you (`@bot`) or a
+-configured reviewer bot whose comments you treat as binding. Current PR
+-state: `{{state.pr_status}}`. The directive overrides any prior plan
+-or seed todos.
++{{inbound.kind}} thread (originating issue #{{issue.number}}). They're
++either a maintainer who tagged you (`@bot`) or a configured reviewer bot
++whose comments you treat as binding. Current PR state:
++`{{state.pr_status}}`. The directive overrides any prior plan or seed
++todos.
+ 
+ ---
+ 
+diff --git a/src/robomp/prompts/followup_comment.md b/src/robomp/prompts/followup_comment.md
+index 649dfa201..bb85fa4de 100644
+--- a/src/robomp/prompts/followup_comment.md
++++ b/src/robomp/prompts/followup_comment.md
+@@ -1,7 +1,7 @@
+-# Follow-up on {{repo.full_name}}#{{issue.number}}
++# Follow-up on {{repo.full_name}}#{{inbound.number}} ({{inbound.kind}})
+ 
+-A new comment arrived on the issue. Current PR state:
+-`{{state.pr_status}}`.
++A new comment arrived on this {{inbound.kind}} thread (originating issue
++#{{issue.number}}). Current PR state: `{{state.pr_status}}`.
+ 
+ ## New comment by @{{comment.author}} ({{comment.created_at}})
+ 
+diff --git a/src/robomp/prompts/host_tools.toml b/src/robomp/prompts/host_tools.toml
+index fb6421321..61155a1de 100644
+--- a/src/robomp/prompts/host_tools.toml
++++ b/src/robomp/prompts/host_tools.toml
+@@ -1,9 +1,9 @@
+ [gh_post_comment]
+-description = "Post a comment on the originating issue or PR thread."
++description = "Post a comment on the GitHub thread. Defaults to whichever thread the inbound webhook arrived on (the PR for PR conversations and reviews; the issue otherwise). Pass `number` only when you need to post somewhere else."
+ 
+ [gh_post_comment.parameters]
+ body = "Markdown body of the comment."
+-number = "Optional issue/PR number. Defaults to the originating issue."
++number = "Optional issue/PR number override. Default is the inbound thread (PR for PR conversations/reviews, originating issue otherwise)."
+ 
+ [gh_push_branch]
+ description = "Push the workspace branch to origin. Uses credentials configured by the orchestrator."
+diff --git a/src/robomp/queue.py b/src/robomp/queue.py
+index 41d712866..42f76a497 100644
+--- a/src/robomp/queue.py
++++ b/src/robomp/queue.py
+@@ -188,6 +188,7 @@ class WorkerPool:
+                 github=self.github,
+                 sandbox=self.sandbox,
+                 payload=row.payload,
++                delivery_id=row.delivery_id,
+             )
+         elif event == "issue_comment" and action == "created":
+             issue = row.payload.get("issue") or {}
+@@ -198,6 +199,7 @@ class WorkerPool:
+                     github=self.github,
+                     sandbox=self.sandbox,
+                     payload=row.payload,
++                    delivery_id=row.delivery_id,
+                 )
+             else:
+                 await tasks.handle_comment(
+@@ -206,6 +208,7 @@ class WorkerPool:
+                     github=self.github,
+                     sandbox=self.sandbox,
+                     payload=row.payload,
++                    delivery_id=row.delivery_id,
+                 )
+         elif event == "pull_request_review_comment" and action == "created":
+             await tasks.handle_review(
+@@ -214,6 +217,7 @@ class WorkerPool:
+                 github=self.github,
+                 sandbox=self.sandbox,
+                 payload=row.payload,
++                delivery_id=row.delivery_id,
+             )
+         elif event == "issues" and action == "closed":
+             await tasks.cleanup_workspace(
+diff --git a/src/robomp/server.py b/src/robomp/server.py
+index 9213eee52..2dc4151d7 100644
+--- a/src/robomp/server.py
++++ b/src/robomp/server.py
+@@ -119,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+             payload["_robomp_directive"] = {
+                 "body": decision.directive_body,
+                 "author": decision.directive_author,
++                "pragmas": [list(item) for item in decision.directive_pragmas],
+             }
+ 
+         if not decision.should_queue:
+diff --git a/src/robomp/tasks.py b/src/robomp/tasks.py
+index c76d2e17a..2b1f956f0 100644
+--- a/src/robomp/tasks.py
++++ b/src/robomp/tasks.py
+@@ -54,7 +54,15 @@ def _directive_from_payload(payload: Mapping[str, Any]) -> DirectiveInfo | None:
+         return None
+     if not isinstance(author, str) or not author.strip():
+         return None
+-    return DirectiveInfo(body=body, author=author)
++    pragmas: list[tuple[str, str]] = []
++    raw_pragmas = raw.get("pragmas")
++    if isinstance(raw_pragmas, list):
++        for entry in raw_pragmas:
++            if isinstance(entry, (list, tuple)) and len(entry) == 2:
++                k, v = entry
++                if isinstance(k, str) and isinstance(v, str):
++                    pragmas.append((k, v))
++    return DirectiveInfo(body=body, author=author, pragmas=tuple(pragmas))
+ 
+ 
+ async def _fetch_thread(
+@@ -150,7 +158,7 @@ async def _attach_thread(
+     if directive is None:
+         return None
+     thread = await _fetch_thread(github, repo, number, is_pr=is_pr)
+-    return DirectiveInfo(body=directive.body, author=directive.author, thread=thread)
++    return DirectiveInfo(body=directive.body, author=directive.author, thread=thread, pragmas=directive.pragmas)
+ 
+ 
+ async def _resolve_repo_and_issue(
+@@ -174,6 +182,7 @@ async def triage_issue(
+     github: GitHubClient,
+     sandbox: SandboxManager,
+     payload: Mapping[str, Any],
++    delivery_id: str,
+ ) -> None:
+     repo, issue = await _resolve_repo_and_issue(github, payload)
+     if issue.is_pull_request:
+@@ -210,6 +219,7 @@ async def triage_issue(
+         repo=repo,
+         issue=issue,
+         workspace=workspace,
++        delivery_id=delivery_id,
+     )
+     await run_task(task_kind="triage_issue", inputs=inputs)
+ 
+@@ -221,6 +231,7 @@ async def handle_comment(
+     github: GitHubClient,
+     sandbox: SandboxManager,
+     payload: Mapping[str, Any],
++    delivery_id: str,
+ ) -> None:
+     repo, issue = await _resolve_repo_and_issue(github, payload)
+     key = issue_key(repo.full_name, issue.number)
+@@ -266,6 +277,7 @@ async def handle_comment(
+             repo=repo,
+             issue=issue,
+             workspace=workspace,
++            delivery_id=delivery_id,
+         )
+         directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
+         await run_task(task_kind="triage_issue", inputs=inputs, directive=directive)
+@@ -312,6 +324,7 @@ async def handle_comment(
+             repo=repo,
+             issue=issue,
+             workspace=workspace,
++            delivery_id=delivery_id,
+         )
+         directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
+         await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+@@ -334,6 +347,7 @@ async def handle_comment(
+         repo=repo,
+         issue=issue,
+         workspace=workspace,
++        delivery_id=delivery_id,
+     )
+     directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
+     await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
+@@ -346,6 +360,7 @@ async def handle_review(
+     github: GitHubClient,
+     sandbox: SandboxManager,
+     payload: Mapping[str, Any],
++    delivery_id: str,
+ ) -> None:
+     pr = payload.get("pull_request") or {}
+     pr_number = int(pr.get("number") or 0)
+@@ -400,6 +415,7 @@ async def handle_review(
+         repo=repo,
+         issue=issue,
+         workspace=workspace,
++        delivery_id=delivery_id,
+     )
+     await run_task(
+         task_kind="handle_review",
+@@ -416,6 +432,7 @@ async def handle_pr_conversation(
+     github: GitHubClient,
+     sandbox: SandboxManager,
+     payload: Mapping[str, Any],
++    delivery_id: str,
+ ) -> None:
+     """Handle a regular (non-review) comment on a bot-authored PR.
+ 
+@@ -501,6 +518,7 @@ async def handle_pr_conversation(
+         repo=repo,
+         issue=issue,
+         workspace=workspace,
++        delivery_id=delivery_id,
+     )
+     directive = await _attach_thread(github, directive, repo_full, pr_number, is_pr=True)
+     await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, pr_number=pr_number, directive=directive)
+diff --git a/src/robomp/worker.py b/src/robomp/worker.py
+index 6c03db05f..372aa8f81 100644
+--- a/src/robomp/worker.py
++++ b/src/robomp/worker.py
+@@ -24,7 +24,7 @@ from omp_rpc import (
+     ToolExecutionEndEvent,
+ )
+ 
+-from robomp import host_tools, persona
++from robomp import host_tools, persona, pragmas
+ from robomp.cancellation import register_cancel_hook, unregister_cancel_hook
+ from robomp.config import Settings
+ from robomp.db import Database, issue_key
+@@ -45,6 +45,7 @@ class TaskInputs:
+     repo: RepoInfo
+     issue: IssueInfo
+     workspace: Workspace
++    delivery_id: str
+ 
+ 
+ @dataclass(slots=True, frozen=True)
+@@ -71,6 +72,26 @@ class DirectiveInfo:
+     body: str
+     author: str
+     thread: tuple[ThreadMessage, ...] = ()
++    pragmas: tuple[tuple[str, str], ...] = ()
++
++
++def _resolve_pragma_overrides(
++    directive: DirectiveInfo | None,
++    settings: Settings,
++) -> tuple[str | None, pragmas.ThinkingLevel | None]:
++    """Return `(model_override, thinking_override)` for the current directive.
++
++    `None` for either means "no override, use the settings default". Aliases
++    that don't match anything in the pool / level set are dropped (caller logs
++    the discard at the callsite that has access to issue_key).
++    """
++    if directive is None or not directive.pragmas:
++        return None, None
++    model_value = pragmas.pragma_value(directive.pragmas, "model")
++    thinking_value = pragmas.pragma_value(directive.pragmas, "thinking")
++    model_override = pragmas.resolve_model_alias(model_value, settings.model_pool) if model_value else None
++    thinking_override = pragmas.resolve_thinking_level(thinking_value) if thinking_value else None
++    return model_override, thinking_override
+ 
+ 
+ def _build_extra_env(settings: Settings) -> dict[str, str]:
+@@ -118,6 +139,7 @@ def _build_prompt(
+                 comment=comment,
+                 directive=directive,
+                 pr_status=pr_status,
++                pr_number=pr_number,
+             )
+         return persona.followup_comment(
+             repo=inputs.repo,
+@@ -125,6 +147,7 @@ def _build_prompt(
+             workspace=inputs.workspace,
+             comment=comment,
+             pr_status=pr_status,
++            pr_number=pr_number,
+         )
+     if task_kind == "handle_review":
+         assert review_payload is not None
+@@ -158,6 +181,7 @@ def _run_rpc_blocking(
+     prompt: str,
+     loop: asyncio.AbstractEventLoop,
+     bindings: ToolBindings,
++    directive: DirectiveInfo | None = None,
+ ) -> str | None:
+     """Run a full RPC turn synchronously. Returns final assistant text (or None)."""
+     settings = inputs.settings
+@@ -182,15 +206,21 @@ def _run_rpc_blocking(
+             log.debug("delta", extra={"issue": bindings.issue_key, "delta": str(ev.get("delta", ""))[:200]})
+ 
+     rpc_env = _build_extra_env(settings)
+-    chosen_model = settings.pick_model()
++    model_override, thinking_override = _resolve_pragma_overrides(directive, settings)
++    chosen_model = model_override or settings.pick_model()
++    chosen_thinking = thinking_override or settings.thinking_level
+     log.info(
+         "rpc_model_pick",
+         extra={
+             "issue": bindings.issue_key,
+             "model": chosen_model,
+             "pool": list(settings.model_pool),
++            "thinking": chosen_thinking,
++            "pragma_model": model_override,
++            "pragma_thinking": thinking_override,
+         },
+     )
++    inputs.db.set_event_model(inputs.delivery_id, chosen_model)
+ 
+     with RpcClient(
+         executable=settings.omp_command,
+@@ -201,7 +231,7 @@ def _run_rpc_blocking(
+         no_title=True,
+         model=chosen_model,
+         provider=settings.provider,
+-        thinking=settings.thinking_level if settings.thinking_level != "off" else None,
++        thinking=chosen_thinking if chosen_thinking != "off" else None,
+         append_system_prompt=persona.system_append(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace),
+         custom_tools=host_tools.build(bindings),
+         request_timeout=settings.request_timeout_seconds,
+@@ -289,6 +319,7 @@ async def run_task(
+         loop=loop,
+         author_name=inputs.settings.resolved_author_name,
+         author_email=inputs.settings.git_author_email,
++        inbound_thread_number=pr_number,
+     )
+     prompt = _build_prompt(
+         task_kind, inputs, comment=comment, pr_number=pr_number, review_payload=review_payload, directive=directive
+@@ -300,6 +331,7 @@ async def run_task(
+         prompt=prompt,
+         loop=loop,
+         bindings=bindings,
++        directive=directive,
+     )
+ 
+ 
+diff --git a/tests/conftest.py b/tests/conftest.py
+index f1ccde3c8..d782d6893 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -32,7 +32,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, str]:
+     for key, value in env.items():
+         monkeypatch.setenv(key, value)
+     monkeypatch.delenv("ROBOMP_PROVIDER", raising=False)
+-    monkeypatch.delenv("ROBOMP_REPLAY_TOKEN", raising=False)
++    monkeypatch.setenv("ROBOMP_REPLAY_TOKEN", "")
+     reset_settings_cache()
+     yield env
+     reset_settings_cache()
+diff --git a/tests/test_db.py b/tests/test_db.py
+index 14e9fd796..f4ec88a22 100644
+--- a/tests/test_db.py
++++ b/tests/test_db.py
+@@ -180,6 +180,58 @@ def test_migration_adds_classification_to_existing_db(tmp_path: Path) -> None:
+     database.close()
+ 
+ 
++def test_set_event_model_persists_on_running_event(db: Database) -> None:
++    """`set_event_model` writes the picked model so the dashboard can attribute behavior."""
++    db.record_event(
++        delivery_id="d-model",
++        event_type="issues",
++        repo="octo/widget",
++        issue_key=issue_key("octo/widget", 42),
++        payload={"action": "opened"},
++    )
++    row = db.claim_next_event()
++    assert row is not None and row.delivery_id == "d-model"
++    db.set_event_model("d-model", "claude-sonnet-4-5")
++    running = db.list_running_events()
++    assert len(running) == 1
++    assert running[0]["model"] == "claude-sonnet-4-5"
++    # Setting a different model later (e.g. retry) overwrites in place.
++    db.set_event_model("d-model", "claude-opus-4-5")
++    running = db.list_running_events()
++    assert running[0]["model"] == "claude-opus-4-5"
++
++
++def test_list_running_events_surfaces_last_tool_since_start(db: Database) -> None:
++    """`list_running_events` joins the most recent tool_call newer than `started_at`.
++
++    Tool calls logged before the current run (e.g. an earlier triage on the same
++    issue) MUST NOT be reported as the current activity.
++    """
++    key = issue_key("octo/widget", 7)
++    db.upsert_issue(key=key, repo="octo/widget", number=7, state="reproducing")
++    # Stale tool call from a previous run (no started_at yet).
++    db.log_tool_call(issue_key=key, tool="stale_tool", args={})
++    db.record_event(
++        delivery_id="d-7",
++        event_type="issues",
++        repo="octo/widget",
++        issue_key=key,
++        payload={"action": "opened"},
++    )
++    db.claim_next_event()  # sets started_at
++    # Before any current-run tool call: last_tool must be NULL, not "stale_tool".
++    running = db.list_running_events()
++    assert len(running) == 1
++    assert running[0]["last_tool"] is None
++    assert running[0]["last_tool_ts"] is None
++    # New tool call after start → surfaces in the snapshot.
++    db.log_tool_call(issue_key=key, tool="gh_post_comment", args={"body": "hi"})
++    db.log_tool_call(issue_key=key, tool="set_issue_labels", args={"labels": ["bug"]})
++    running = db.list_running_events()
++    assert running[0]["last_tool"] == "set_issue_labels"  # latest by ts
++    assert running[0]["last_tool_ts"] is not None
++
++
+ def test_record_submission_dedupes_by_delivery(db: Database) -> None:
+     assert db.record_submission(delivery_id="d-1", login="Alice", repo="octo/widget")
+     # Retry of the same delivery id is a no-op (idempotent webhook delivery).
+diff --git a/tests/test_github_events.py b/tests/test_github_events.py
+index cdaa7a9c9..c2bf45e0a 100644
+--- a/tests/test_github_events.py
++++ b/tests/test_github_events.py
+@@ -668,3 +668,67 @@ def test_route_reviewer_bot_login_case_insensitive() -> None:
+     )
+     assert decision.directive is True
+     assert decision.directive_author == "chatgpt-codex-connector"
++
++
++def test_route_directive_strips_pragmas_from_maintainer_comment() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "can1357"},
++                "author_association": "OWNER",
++                "body": "@robomp-bot /model gpt /thinking low\nrefactor X",
++            },
++            "issue": {"number": 9},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++    )
++    assert decision.directive is True
++    assert decision.directive_body == "refactor X"
++    assert decision.directive_pragmas == (("model", "gpt"), ("thinking", "low"))
++
++
++def test_route_directive_strips_pragmas_from_reviewer_bot_comment() -> None:
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "chatgpt-codex-connector", "type": "Bot"},
++                "body": "/model claude\nLeak in foo()",
++            },
++            "issue": {"number": 9, "pull_request": {"url": "x"}},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++        reviewer_bots=frozenset({"chatgpt-codex-connector"}),
++        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
++    )
++    assert decision.directive is True
++    assert decision.directive_body == "Leak in foo()"
++    assert decision.directive_pragmas == (("model", "claude"),)
++
++
++def test_route_non_directive_comment_carries_no_pragmas() -> None:
++    # Random user pragmas must NOT propagate — only directive comments do.
++    decision = route(
++        "issue_comment",
++        {
++            "action": "created",
++            "comment": {
++                "user": {"login": "stranger"},
++                "author_association": "NONE",
++                "body": "/model gpt\nhello",
++            },
++            "issue": {"number": 9},
++            "repository": {"full_name": "octo/widget"},
++        },
++        allowlist=ALLOWLIST,
++        bot_login=BOT,
++    )
++    assert decision.directive is False
++    assert decision.directive_pragmas == ()
+diff --git a/tests/test_host_tools.py b/tests/test_host_tools.py
+index 748a5a75e..1b678ce48 100644
+--- a/tests/test_host_tools.py
++++ b/tests/test_host_tools.py
+@@ -136,6 +136,69 @@ def test_gh_post_comment_validates_body(db: Database, tmp_path: Path) -> None:
+         _stop_loop(loop, t)
+ 
+ 
++def test_gh_post_comment_defaults_to_inbound_pr_thread(db: Database, tmp_path: Path) -> None:
++    """PR conversation/review tasks set inbound_thread_number to the PR; the
++    agent's reply must land on that PR by default, not the originating issue."""
++    captured: dict[str, Any] = {}
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        captured["url"] = str(request.url)
++        return httpx.Response(201, json={"id": 7, "user": {"login": "robomp-bot"}, "body": "hi", "created_at": "t"})
++
++    transport = httpx.MockTransport(handler)
++    github = GitHubClient("token", transport=transport)
++    loop, thread = _make_loop_in_background()
++    bindings = ToolBindings(
++        db=db,
++        github=github,
++        repo=_stub_repo(),
++        issue=_stub_issue(),  # issue #42
++        workspace=_stub_workspace(tmp_path),
++        loop=loop,
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
++        inbound_thread_number=99,  # PR #99 that fixes issue #42
++    )
++    try:
++        tool = next(x for x in build(bindings) if x.name == "gh_post_comment")
++        tool.execute({"body": "hi"}, _ctx())
++    finally:
++        _stop_loop(loop, thread)
++
++    assert captured["url"].endswith("/repos/octo/widget/issues/99/comments"), captured["url"]
++
++
++def test_gh_post_comment_explicit_number_overrides_inbound(db: Database, tmp_path: Path) -> None:
++    """An explicit `number` arg still wins over the inbound default."""
++    captured: dict[str, Any] = {}
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        captured["url"] = str(request.url)
++        return httpx.Response(201, json={"id": 7, "user": {"login": "robomp-bot"}, "body": "hi", "created_at": "t"})
++
++    transport = httpx.MockTransport(handler)
++    github = GitHubClient("token", transport=transport)
++    loop, thread = _make_loop_in_background()
++    bindings = ToolBindings(
++        db=db,
++        github=github,
++        repo=_stub_repo(),
++        issue=_stub_issue(),
++        workspace=_stub_workspace(tmp_path),
++        loop=loop,
++        author_name="robomp-bot",
++        author_email="robomp-bot@example.invalid",
++        inbound_thread_number=99,
++    )
++    try:
++        tool = next(x for x in build(bindings) if x.name == "gh_post_comment")
++        tool.execute({"body": "hi", "number": 42}, _ctx())
++    finally:
++        _stop_loop(loop, thread)
++
++    assert captured["url"].endswith("/repos/octo/widget/issues/42/comments"), captured["url"]
++
++
+ def test_gh_post_comment_propagates_github_error(db: Database, tmp_path: Path) -> None:
+     transport = httpx.MockTransport(lambda r: httpx.Response(422, json={"message": "Validation failed"}))
+     bindings, loop, t = _bindings(db, tmp_path, transport)
+diff --git a/tests/test_pragmas.py b/tests/test_pragmas.py
+new file mode 100644
+index 000000000..c698ae2db
+--- /dev/null
++++ b/tests/test_pragmas.py
+@@ -0,0 +1,147 @@
++from __future__ import annotations
++
++from robomp.pragmas import (
++    parse_pragmas,
++    pragma_value,
++    resolve_model_alias,
++    resolve_thinking_level,
++)
++
++
++def test_parse_single_inline_command() -> None:
++    body = "/model gpt\nfix the off-by-one in foo()"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "fix the off-by-one in foo()"
++    assert pragmas == (("model", "gpt"),)
++
++
++def test_parse_multiple_commands_on_one_line() -> None:
++    body = "/model gpt /thinking low\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "run"
++    assert pragmas == (("model", "gpt"), ("thinking", "low"))
++
++
++def test_parse_stacked_commands() -> None:
++    body = "/model gpt\n/thinking low\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "run"
++    assert pragmas == (("model", "gpt"), ("thinking", "low"))
++
++
++def test_parse_equals_form() -> None:
++    body = "/model=gpt /thinking=low\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "run"
++    assert pragmas == (("model", "gpt"), ("thinking", "low"))
++
++
++def test_parse_indented_command_line() -> None:
++    body = "   /model gpt\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "run"
++    assert pragmas == (("model", "gpt"),)
++
++
++def test_mixed_line_is_not_consumed() -> None:
++    # Trailing prose after a command is part of the line — keep the line.
++    body = "/model gpt fix the bug"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "/model gpt fix the bug"
++    assert pragmas == ()
++
++
++def test_path_references_are_not_consumed() -> None:
++    body = "/src/foo.py:42 is the offender\n/model gpt\nfix it"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "/src/foo.py:42 is the offender\nfix it"
++    assert pragmas == (("model", "gpt"),)
++
++
++def test_command_without_value_is_not_consumed() -> None:
++    body = "/model\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "/model\nrun"
++    assert pragmas == ()
++
++
++def test_dangling_command_aborts_whole_line() -> None:
++    # `/model gpt /thinking` — second command has no value, so the WHOLE line
++    # is left untouched (atomic per-line consumption).
++    body = "/model gpt /thinking\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "/model gpt /thinking\nrun"
++    assert pragmas == ()
++
++
++def test_preserves_interior_blank_lines_after_strip() -> None:
++    body = "/model gpt\n\nbody one\n\nbody two"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "body one\n\nbody two"
++    assert pragmas == (("model", "gpt"),)
++
++
++def test_empty_body() -> None:
++    cleaned, pragmas = parse_pragmas("")
++    assert cleaned == ""
++    assert pragmas == ()
++
++
++def test_key_case_normalized_value_preserved() -> None:
++    body = "/MODEL GPT-5.5\nrun"
++    cleaned, pragmas = parse_pragmas(body)
++    assert cleaned == "run"
++    assert pragmas == (("model", "GPT-5.5"),)
++
++
++def test_pragma_value_last_wins() -> None:
++    assert pragma_value((("model", "a"), ("model", "b")), "model") == "b"
++    assert pragma_value((("model", "a"),), "MODEL") == "a"
++    assert pragma_value((), "model") is None
++
++
++def test_resolve_model_alias_precedence() -> None:
++    pool = ("p-anthropic/claude-sonnet-4-6", "p-openai/gpt-5.5", "p-openai/gpt-5.5-mini")
++    # Short-name-after-slash beats substring.
++    assert resolve_model_alias("gpt-5.5", pool) == "p-openai/gpt-5.5"
++    # Substring is fallback.
++    assert resolve_model_alias("gpt", pool) == "p-openai/gpt-5.5"
++    assert resolve_model_alias("claude", pool) == "p-anthropic/claude-sonnet-4-6"
++
++
++def test_resolve_model_alias_full_id() -> None:
++    pool = ("p-openai/gpt-5.5", "p-anthropic/claude-sonnet-4-6")
++    assert resolve_model_alias("p-openai/gpt-5.5", pool) == "p-openai/gpt-5.5"
++
++
++def test_resolve_model_alias_no_match() -> None:
++    pool = ("p-anthropic/claude-sonnet-4-6",)
++    assert resolve_model_alias("gpt", pool) is None
++    assert resolve_model_alias("", pool) is None
++
++
++def test_resolve_thinking_level_aliases() -> None:
++    # Spec from the user: xhi|xhigh|hi|high|med|medium|lo|low|none|off|no.
++    assert resolve_thinking_level("off") == "off"
++    assert resolve_thinking_level("none") == "off"
++    assert resolve_thinking_level("no") == "off"
++    assert resolve_thinking_level("lo") == "low"
++    assert resolve_thinking_level("low") == "low"
++    assert resolve_thinking_level("med") == "medium"
++    assert resolve_thinking_level("medium") == "medium"
++    assert resolve_thinking_level("hi") == "high"
++    assert resolve_thinking_level("high") == "high"
++    assert resolve_thinking_level("xhi") == "xhigh"
++    assert resolve_thinking_level("xhigh") == "xhigh"
++
++
++def test_resolve_thinking_level_case_insensitive() -> None:
++    assert resolve_thinking_level("HIGH") == "high"
++    assert resolve_thinking_level("  Hi  ") == "high"
++    assert resolve_thinking_level("XHi") == "xhigh"
++
++
++def test_resolve_thinking_level_rejects_unknown() -> None:
++    assert resolve_thinking_level("ultra") is None
++    assert resolve_thinking_level("") is None
++    assert resolve_thinking_level("minimal") is None
+diff --git a/tests/test_server.py b/tests/test_server.py
+index 2fbb18ff8..65f321abc 100644
+--- a/tests/test_server.py
++++ b/tests/test_server.py
+@@ -1159,7 +1159,7 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env) -> None
+     assert row is not None
+     assert row.state == "queued"
+     directive = row.payload.get("_robomp_directive")
+-    assert directive == {"body": "please refactor X", "author": "can1357"}
++    assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": []}
+ 
+ 
+ def test_webhook_maintainer_bypasses_rate_limit(
+@@ -1302,6 +1302,7 @@ async def test_handle_comment_directive_bootstraps_untriaged_issue(
+         github=GitHubClient("t"),
+         sandbox=sandbox,
+         payload=payload,
++        delivery_id="test-delivery-1",
+     )
+     assert len(stub_run_task) == 1
+     call = stub_run_task[0]
+@@ -1370,6 +1371,7 @@ async def test_handle_comment_directive_reopens_finalized_issue(
+         github=GitHubClient("t"),
+         sandbox=sandbox,
+         payload=payload,
++        delivery_id="test-delivery-2",
+     )
+     assert len(stub_run_task) == 1
+     call = stub_run_task[0]
+@@ -1442,6 +1444,7 @@ async def test_handle_comment_finalized_without_directive_still_replies(
+         github=GitHubClient("t"),
+         sandbox=sandbox,
+         payload=payload,
++        delivery_id="test-delivery-3",
+     )
+     assert stub_run_task == [], "must not invoke run_task on plain finalized comment"
+     assert post_comment_calls, "should post the finalized-issue reply"
+@@ -1518,6 +1521,7 @@ async def test_directive_handler_attaches_thread_from_github(
+         github=GitHubClient("t"),
+         sandbox=sandbox,
+         payload=payload,
++        delivery_id="test-delivery-4",
+     )
+ 
+     assert len(stub_run_task) == 1
+diff --git a/tests/test_tasks_directive.py b/tests/test_tasks_directive.py
+new file mode 100644
+index 000000000..f32ac8352
+--- /dev/null
++++ b/tests/test_tasks_directive.py
+@@ -0,0 +1,51 @@
++"""Verify pragmas survive the payload round-trip from server → durable queue → tasks."""
++
++from __future__ import annotations
++
++from robomp.tasks import _directive_from_payload
++
++
++def test_directive_from_payload_parses_pragmas() -> None:
++    directive = _directive_from_payload(
++        {
++            "_robomp_directive": {
++                "body": "do the thing",
++                "author": "can1357",
++                "pragmas": [["model", "gpt"], ["thinking", "low"]],
++            }
++        }
++    )
++    assert directive is not None
++    assert directive.body == "do the thing"
++    assert directive.author == "can1357"
++    assert directive.pragmas == (("model", "gpt"), ("thinking", "low"))
++
++
++def test_directive_from_payload_missing_pragmas_is_empty_tuple() -> None:
++    directive = _directive_from_payload({"_robomp_directive": {"body": "x", "author": "can1357"}})
++    assert directive is not None
++    assert directive.pragmas == ()
++
++
++def test_directive_from_payload_drops_malformed_pragma_entries() -> None:
++    directive = _directive_from_payload(
++        {
++            "_robomp_directive": {
++                "body": "x",
++                "author": "can1357",
++                "pragmas": [
++                    ["model", "gpt"],
++                    ["bad"],  # wrong arity
++                    [1, "v"],  # non-string key
++                    "string-instead-of-pair",
++                ],
++            }
++        }
++    )
++    assert directive is not None
++    assert directive.pragmas == (("model", "gpt"),)
++
++
++def test_directive_from_payload_returns_none_for_missing_directive() -> None:
++    assert _directive_from_payload({}) is None
++    assert _directive_from_payload({"_robomp_directive": "not-a-mapping"}) is None
+diff --git a/tests/test_worker_pragmas.py b/tests/test_worker_pragmas.py
+new file mode 100644
+index 000000000..80ed64852
+--- /dev/null
++++ b/tests/test_worker_pragmas.py
+@@ -0,0 +1,80 @@
++"""Worker-side pragma resolution: model + thinking overrides."""
++
++from __future__ import annotations
++
++import pytest
++
++from robomp.config import Settings, reset_settings_cache
++from robomp.worker import DirectiveInfo, _resolve_pragma_overrides
++
++
++@pytest.fixture
++def settings_with_pool(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> Settings:
++    monkeypatch.setenv(
++        "ROBOMP_MODEL",
++        "p-anthropic/claude-sonnet-4-6,p-openai/gpt-5.5,p-openai/gpt-5.5-mini",
++    )
++    reset_settings_cache()
++    return Settings()  # type: ignore[call-arg]
++
++
++def test_no_directive_means_no_override(settings_with_pool: Settings) -> None:
++    assert _resolve_pragma_overrides(None, settings_with_pool) == (None, None)
++
++
++def test_directive_without_pragmas_means_no_override(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(body="run it", author="can1357")
++    assert _resolve_pragma_overrides(directive, settings_with_pool) == (None, None)
++
++
++def test_model_pragma_resolves_to_pool_entry(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(body="run", author="can1357", pragmas=(("model", "gpt"),))
++    model_override, thinking_override = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert model_override == "p-openai/gpt-5.5"
++    assert thinking_override is None
++
++
++def test_model_alias_exact_short_name(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(body="run", author="can1357", pragmas=(("model", "gpt-5.5-mini"),))
++    model_override, _ = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert model_override == "p-openai/gpt-5.5-mini"
++
++
++def test_unmatched_model_alias_falls_back_to_random_pick(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(body="run", author="can1357", pragmas=(("model", "qwen"),))
++    model_override, _ = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert model_override is None
++
++
++def test_thinking_pragma_normalized(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(body="run", author="can1357", pragmas=(("thinking", "LOW"),))
++    model_override, thinking_override = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert model_override is None
++    assert thinking_override == "low"
++
++
++def test_unknown_thinking_level_dropped(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(body="run", author="can1357", pragmas=(("thinking", "ultra"),))
++    _, thinking_override = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert thinking_override is None
++
++
++def test_both_pragmas_resolved_together(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(
++        body="run",
++        author="can1357",
++        pragmas=(("model", "claude"), ("thinking", "medium")),
++    )
++    model_override, thinking_override = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert model_override == "p-anthropic/claude-sonnet-4-6"
++    assert thinking_override == "medium"
++
++
++def test_last_value_wins_for_duplicate_keys(settings_with_pool: Settings) -> None:
++    directive = DirectiveInfo(
++        body="run",
++        author="can1357",
++        pragmas=(("model", "claude"), ("model", "gpt")),
++    )
++    model_override, _ = _resolve_pragma_overrides(directive, settings_with_pool)
++    assert model_override == "p-openai/gpt-5.5"
+diff --git a/tests/test_worker_smoke.py b/tests/test_worker_smoke.py
+index 0f0709aa6..d3f65f298 100644
+--- a/tests/test_worker_smoke.py
++++ b/tests/test_worker_smoke.py
+@@ -173,6 +173,7 @@ def test_triage_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
+             github=github,
+             sandbox=sandbox,
+             payload=payload,
++            delivery_id="smoke-test",
+         )
+         row = db.get_issue("octo/widget#1")
+         assert row is not None, "issue row missing"

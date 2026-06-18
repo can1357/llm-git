@@ -1,0 +1,2029 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 2a4c42ff3..da26e4ac8 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -1,9 +1,10 @@
+ # Changelog
+ 
+ ## [Unreleased]
+-
+ ### Breaking Changes
+ 
++- Replaced the atom edit `sed` verb with `replace`, requiring `{ find, with, all? }` instead of `{ pat, rep, g? }`
++- Removed bracketed atom locators like `(anchor)` and `[anchor]`, so region block rewrites via `splice` are no longer supported and bare anchor `loc` values now target exactly one line
+ - Renamed MCP tool identifiers from the `mcp_<server>_<tool>` format to `mcp__<server>_<tool>` so custom tool names, active tool lists, and persisted MCP selections must be updated to the new prefix
+ - Renamed the built-in content-search tool from `grep` to `search`, including SDK/tool event names and settings keys (`search.enabled`, `search.contextBefore`, `search.contextAfter`), so integrations using `grep` and `grep.*` references must be updated
+ 
+@@ -14,6 +15,9 @@
+ 
+ ### Changed
+ 
++- Changed atom inline and file-wide replacements to perform literal substring substitution, with `all: true` replacing all matches on the line
++- Changed `loc` parsing so path-qualified atom edits correctly split `path:loc` when the locator suffix contains colons
++- Changed `replace` to reject multiline `find`/`with` values and require single-line operands
+ - Bumped default `read.defaultLimit` from 300 to 500 lines, and scaled the read tool's byte budget with the line limit (`max(50KB, lines * 512)`) so the configured line count is no longer truncated by the shared 50KB cap
+ 
+ ### Fixed
+diff --git a/packages/coding-agent/src/edit/block.ts b/packages/coding-agent/src/edit/block.ts
+deleted file mode 100644
+index 1ef11c82e..000000000
+--- a/packages/coding-agent/src/edit/block.ts
++++ /dev/null
+@@ -1,308 +0,0 @@
+-/**
+- * Block-balanced delimiter finder used by the `splice_block` verb.
+- *
+- * Tokenizes source text to skip strings and comments, then walks a stack of
+- * open delimiters to identify the enclosing balanced block for a target line.
+- *
+- * This is intentionally language-agnostic over the C-family (C, C++, Rust,
+- * Go, Java, JS/TS, C#, Swift, Kotlin, Scala, …): it understands `// line`,
+- * `/* block * /` comments, double-quoted, single-quoted, and backtick strings
+- * with backslash escapes. It does NOT attempt to parse raw string literals,
+- * Python triple-quoted strings, or YAML/Python indent-significant blocks —
+- * those are out of scope for v1.
+- */
+-
+-export type DelimiterKind = "{" | "(" | "[";
+-
+-export interface BlockRange {
+-	/** Byte/character offset of the opening delimiter. */
+-	openOffset: number;
+-	/** Byte/character offset just after the closing delimiter. */
+-	closeOffsetExclusive: number;
+-	/** Offset of first character after the opener (start of body). */
+-	bodyStart: number;
+-	/** Offset of the closing delimiter character. */
+-	bodyEnd: number;
+-	/** 1-indexed line number of the opener. */
+-	openLine: number;
+-	/** Byte/character offset of the opener line start. */
+-	openLineStart: number;
+-	/** 1-indexed line number of the closer. */
+-	closeLine: number;
+-	/** True when opener and closer are on the same line. */
+-	sameLine: boolean;
+-	/** Whitespace prefix of the opener's line. */
+-	openerLineIndent: string;
+-	/**
+-	 * Whitespace prefix of the first non-blank body line, or `null` when the
+-	 * body has no non-blank line.
+-	 */
+-	bodyLineIndent: string | null;
+-	/** Body text exactly as it appears between the delimiters. */
+-	bodyText: string;
+-	/** Total enclosing blocks of the requested kind before depth selection. */
+-	enclosingCount: number;
+-}
+-
+-interface BraceEvent {
+-	kind: DelimiterKind | ")" | "]" | "}";
+-	offset: number;
+-}
+-
+-const OPENERS: Record<DelimiterKind, string> = { "{": "{", "(": "(", "[": "[" };
+-const CLOSERS: Record<DelimiterKind, string> = { "{": "}", "(": ")", "[": "]" };
+-
+-/**
+- * Walk `text` and emit positions of opening and closing delimiters that lie
+- * outside strings and comments.
+- */
+-export function scanDelimiters(text: string): BraceEvent[] {
+-	const out: BraceEvent[] = [];
+-	const len = text.length;
+-	let i = 0;
+-	while (i < len) {
+-		const ch = text[i]!;
+-		// Line comment `// …` to end of line.
+-		if (ch === "/" && text[i + 1] === "/") {
+-			i += 2;
+-			while (i < len && text[i] !== "\n") i++;
+-			continue;
+-		}
+-		// Hash line comment `# …` for shell/Python-like — but only when at start
+-		// of a token, to avoid mangling C preprocessor lines (`#include`). We
+-		// treat any `#` at column 0 or after whitespace as a line comment, which
+-		// is a heuristic that's also fine for `#include` (no braces follow on
+-		// the same line in practice for our use case).
+-		if (ch === "#" && (i === 0 || text[i - 1] === "\n" || text[i - 1] === " " || text[i - 1] === "\t")) {
+-			// Not enabled: too aggressive for C/C++/Rust files. Skip.
+-		}
+-		// Block comment `/* … */`.
+-		if (ch === "/" && text[i + 1] === "*") {
+-			i += 2;
+-			while (i < len && !(text[i] === "*" && text[i + 1] === "/")) i++;
+-			if (i < len) i += 2;
+-			continue;
+-		}
+-		// String literals: ", ', `. Backslash-escape aware.
+-		if (ch === '"' || ch === "'" || ch === "`") {
+-			const quote = ch;
+-			i++;
+-			while (i < len) {
+-				const c = text[i]!;
+-				if (c === "\\") {
+-					i += 2;
+-					continue;
+-				}
+-				if (c === quote) {
+-					i++;
+-					break;
+-				}
+-				if (c === "\n" && (quote === '"' || quote === "'")) {
+-					// Unterminated string; stop scanning this literal so we
+-					// don't swallow the rest of the file.
+-					break;
+-				}
+-				i++;
+-			}
+-			continue;
+-		}
+-		if (ch === "{" || ch === "(" || ch === "[") {
+-			out.push({ kind: ch, offset: i });
+-		} else if (ch === "}" || ch === ")" || ch === "]") {
+-			out.push({ kind: ch, offset: i });
+-		}
+-		i++;
+-	}
+-	return out;
+-}
+-
+-interface OpenFrame {
+-	kind: DelimiterKind;
+-	offset: number;
+-}
+-
+-/**
+- * Build a list of balanced (open, close) ranges by walking the events from
+- * `scanDelimiters`. Mismatched closers are skipped (the file may be partially
+- * malformed), and unclosed openers at EOF are dropped.
+- */
+-function pairBlocks(events: BraceEvent[]): { open: OpenFrame; closeOffset: number }[] {
+-	const stack: OpenFrame[] = [];
+-	const pairs: { open: OpenFrame; closeOffset: number }[] = [];
+-	for (const ev of events) {
+-		if (ev.kind === "{" || ev.kind === "(" || ev.kind === "[") {
+-			stack.push({ kind: ev.kind, offset: ev.offset });
+-			continue;
+-		}
+-		// Closer.
+-		const expected: DelimiterKind | null =
+-			ev.kind === "}" ? "{" : ev.kind === ")" ? "(" : ev.kind === "]" ? "[" : null;
+-		if (!expected) continue;
+-		// Pop until we find the matching opener, but only commit pairs when
+-		// kinds match. This tolerates small skews from raw strings or other
+-		// unsupported constructs without exploding the search.
+-		const top = stack[stack.length - 1];
+-		if (top?.kind === expected) {
+-			stack.pop();
+-			pairs.push({ open: top, closeOffset: ev.offset });
+-		}
+-	}
+-	return pairs;
+-}
+-
+-function lineToOffset(text: string, line: number): number {
+-	let n = 1;
+-	let i = 0;
+-	while (i < text.length && n < line) {
+-		if (text[i] === "\n") n++;
+-		i++;
+-	}
+-	return i;
+-}
+-
+-function offsetToLine(text: string, offset: number): number {
+-	let n = 1;
+-	for (let i = 0; i < offset && i < text.length; i++) {
+-		if (text[i] === "\n") n++;
+-	}
+-	return n;
+-}
+-
+-function lineIndentAt(text: string, lineNumber: number): string {
+-	const start = lineToOffset(text, lineNumber);
+-	let i = start;
+-	while (i < text.length && (text[i] === " " || text[i] === "\t")) i++;
+-	return text.slice(start, i);
+-}
+-
+-function extractRange(text: string, start: number, end: number): string {
+-	return text.slice(start, end);
+-}
+-
+-export interface FindBlockOptions {
+-	kind?: DelimiterKind;
+-	depth?: number;
+-}
+-
+-export interface FindBlockError {
+-	message: string;
+-}
+-
+-/**
+- * Find the enclosing balanced block of `kind` containing `targetLine`
+- * (1-indexed), at the requested ancestor `depth` (0 = innermost).
+- *
+- * Returns an error object when no such block exists.
+- */
+-export function findEnclosingBlock(
+-	text: string,
+-	targetLine: number,
+-	options: FindBlockOptions = {},
+-): BlockRange | FindBlockError {
+-	const kind: DelimiterKind = options.kind ?? "{";
+-	const depth = Math.max(0, Math.floor(options.depth ?? 0));
+-
+-	const events = scanDelimiters(text);
+-	const pairs = pairBlocks(events);
+-
+-	// Lines (1-indexed) that bracket the target are considered to contain it.
+-	// This handles same-line `{ x }` blocks too (openLine == closeLine ==
+-	// targetLine).
+-	const enclosing = pairs
+-		.filter(p => p.open.kind === kind)
+-		.map(p => ({
+-			open: p.open,
+-			closeOffset: p.closeOffset,
+-			openLine: offsetToLine(text, p.open.offset),
+-			closeLine: offsetToLine(text, p.closeOffset),
+-		}))
+-		.filter(p => p.openLine <= targetLine && targetLine <= p.closeLine);
+-	if (enclosing.length === 0) {
+-		return {
+-			message: `No enclosing \`${kind}\` block contains line ${targetLine}.`,
+-		};
+-	}
+-	// Default ordering is innermost first (largest open offset among containers).
+-	// When both candidates are entirely on the target line, prefer the outermost
+-	// same-line block so anchoring a call line targets the containing call before
+-	// nested argument calls such as `int(port)`. Multi-line nesting keeps the
+-	// existing innermost-first behavior.
+-	enclosing.sort((a, b) => {
+-		const aSingle = a.openLine === targetLine && a.closeLine === targetLine;
+-		const bSingle = b.openLine === targetLine && b.closeLine === targetLine;
+-		if (aSingle && bSingle) return a.open.offset - b.open.offset;
+-		return b.open.offset - a.open.offset;
+-	});
+-	if (depth >= enclosing.length) {
+-		return {
+-			message: `Requested depth ${depth} exceeds available enclosing \`${kind}\` blocks (${enclosing.length}).`,
+-		};
+-	}
+-	const chosen = enclosing[depth]!;
+-	const openOffset = chosen.open.offset;
+-	const closeOffset = chosen.closeOffset;
+-	const bodyStart = openOffset + 1;
+-	const bodyEnd = closeOffset;
+-	const openLine = chosen.openLine;
+-	const closeLine = chosen.closeLine;
+-	const openLineStart = lineToOffset(text, openLine);
+-	const openerLineIndent = lineIndentAt(text, openLine);
+-	const bodyText = extractRange(text, bodyStart, bodyEnd);
+-	const bodyLineIndent = computeBodyLineIndent(text, bodyStart, bodyEnd);
+-	return {
+-		openOffset,
+-		closeOffsetExclusive: closeOffset + 1,
+-		bodyStart,
+-		bodyEnd,
+-		openLine,
+-		openLineStart,
+-		closeLine,
+-		sameLine: openLine === closeLine,
+-		openerLineIndent,
+-		bodyLineIndent,
+-		bodyText,
+-		enclosingCount: enclosing.length,
+-	};
+-}
+-
+-function computeBodyLineIndent(text: string, bodyStart: number, bodyEnd: number): string | null {
+-	// Scan body for the first line whose non-whitespace character lives within
+-	// [bodyStart, bodyEnd). Return that line's leading whitespace prefix.
+-	let i = bodyStart;
+-	// Step over the rest of the opener's line (it may contain trailing
+-	// whitespace but not body content we want to use as the indent reference).
+-	while (i < bodyEnd && text[i] !== "\n") i++;
+-	while (i < bodyEnd) {
+-		// At line boundary; skip the newline.
+-		if (text[i] === "\n") i++;
+-		const lineStart = i;
+-		while (i < bodyEnd && (text[i] === " " || text[i] === "\t")) i++;
+-		// Skip blank lines.
+-		if (i < bodyEnd && text[i] !== "\n") {
+-			return text.slice(lineStart, i);
+-		}
+-		// Skip to end of line.
+-		while (i < bodyEnd && text[i] !== "\n") i++;
+-	}
+-	return null;
+-}
+-
+-/**
+- * Verify that the agent's body has balanced delimiters of `kind`. Returns an
+- * error message when unbalanced, or `null` when fine.
+- */
+-export function checkBodyBraceBalance(body: string, kind: DelimiterKind): string | null {
+-	const events = scanDelimiters(body);
+-	let opens = 0;
+-	let closes = 0;
+-	const opener = OPENERS[kind];
+-	const closer = CLOSERS[kind];
+-	for (const e of events) {
+-		if (e.kind === opener) opens++;
+-		else if (e.kind === closer) closes++;
+-	}
+-	if (opens !== closes) {
+-		return `Replacement body has unbalanced \`${opener}\`/\`${closer}\` (open=${opens}, close=${closes}).`;
+-	}
+-	return null;
+-}
+diff --git a/packages/coding-agent/src/edit/indent.ts b/packages/coding-agent/src/edit/indent.ts
+deleted file mode 100644
+index e1a9e8379..000000000
+--- a/packages/coding-agent/src/edit/indent.ts
++++ /dev/null
+@@ -1,150 +0,0 @@
+-/**
+- * Indent helpers used by `splice_block`.
+- *
+- * Pure functions: take strings/lines, return strings/lines. No I/O. Designed
+- * to be easy to unit-test in isolation.
+- */
+-
+-export interface IndentStyle {
+-	kind: "tab" | "space";
+-	width: number;
+-}
+-
+-const SAMPLE_LINES_FOR_DETECTION = 256;
+-
+-/**
+- * Detect whether the file uses tab or space indentation, and the indent width
+- * for spaces. Sampling-based; defaults to {kind: "tab", width: 1} when nothing
+- * is conclusive.
+- */
+-export function detectIndentStyle(text: string): IndentStyle {
+-	const lines = text.split("\n", SAMPLE_LINES_FOR_DETECTION + 1).slice(0, SAMPLE_LINES_FOR_DETECTION);
+-	let tabIndented = 0;
+-	let spaceIndented = 0;
+-	const spaceWidthCounts = new Map<number, number>();
+-	for (const line of lines) {
+-		if (line.length === 0) continue;
+-		const ch0 = line[0];
+-		if (ch0 === "\t") {
+-			tabIndented++;
+-			continue;
+-		}
+-		if (ch0 !== " ") continue;
+-		let count = 0;
+-		while (count < line.length && line[count] === " ") count++;
+-		// Skip lines whose entire content is whitespace (no signal).
+-		if (count === line.length) continue;
+-		spaceIndented++;
+-		// Record indent step. Try common values 2, 4, 8 by GCD-ish.
+-		spaceWidthCounts.set(count, (spaceWidthCounts.get(count) ?? 0) + 1);
+-	}
+-	if (tabIndented > spaceIndented) return { kind: "tab", width: 1 };
+-	if (spaceIndented === 0) return { kind: "tab", width: 1 };
+-
+-	// Pick the most common nonzero indent width that divides the others well.
+-	const candidates = [2, 4, 8];
+-	let bestCandidate = 4;
+-	let bestScore = -1;
+-	for (const cand of candidates) {
+-		let score = 0;
+-		for (const [width, count] of spaceWidthCounts) {
+-			if (width % cand === 0) score += count;
+-		}
+-		if (score > bestScore) {
+-			bestScore = score;
+-			bestCandidate = cand;
+-		}
+-	}
+-	return { kind: "space", width: bestCandidate };
+-}
+-
+-/**
+- * Strip the common leading whitespace prefix from every non-empty line.
+- * Blank/whitespace-only lines pass through unchanged.
+- *
+- * Tab and space whitespace count as a single character each here; we look at
+- * raw prefix bytes. The block executor re-applies destination indent later,
+- * so tab/space mismatches in the agent's own input are normalized by
+- * `applyIndent` rather than here.
+- */
+-export function stripCommonIndent(lines: readonly string[]): string[] {
+-	let common: string | null = null;
+-	for (const line of lines) {
+-		if (line.trim().length === 0) continue;
+-		const m = /^[\t ]*/.exec(line);
+-		const prefix = m ? m[0] : "";
+-		if (common === null) {
+-			common = prefix;
+-			continue;
+-		}
+-		// Reduce to the longest shared prefix.
+-		let i = 0;
+-		const limit = Math.min(common.length, prefix.length);
+-		while (i < limit && common[i] === prefix[i]) i++;
+-		common = common.slice(0, i);
+-		if (common.length === 0) break;
+-	}
+-	if (!common) return [...lines];
+-	return lines.map(line => (line.startsWith(common!) ? line.slice(common!.length) : line));
+-}
+-
+-/**
+- * Re-index leading whitespace of `lines` from the source style to the
+- * destination style, then prepend `prefix` to every non-empty line.
+- *
+- * - Source style is detected from the lines themselves.
+- * - Tab→space and space→tab conversion is applied to the *relative*
+- *   indentation (everything past the common prefix has already been stripped
+- *   by `stripCommonIndent`, so all leading whitespace here is "extra" indent).
+- * - Blank lines stay empty (no trailing whitespace).
+- */
+-export function applyIndent(lines: readonly string[], prefix: string, destStyle: IndentStyle): string[] {
+-	const sourceStyle = detectIndentStyle(lines.join("\n"));
+-	return lines.map(line => {
+-		if (line.trim().length === 0) return "";
+-		const m = /^[\t ]*/.exec(line);
+-		const leading = m ? m[0] : "";
+-		const rest = line.slice(leading.length);
+-		const normalized = normalizeIndent(leading, sourceStyle, destStyle);
+-		return prefix + normalized + rest;
+-	});
+-}
+-
+-function normalizeIndent(leading: string, source: IndentStyle, dest: IndentStyle): string {
+-	if (leading.length === 0) return leading;
+-	// Compute total visual columns of the leading run, treating tabs in the
+-	// source as `source.width` columns (or 1 column for tab-indented files,
+-	// where the destination decides the visible width).
+-	let columns = 0;
+-	for (const ch of leading) {
+-		if (ch === "\t") {
+-			// Treat a source tab as one indent unit. Width = source.width or
+-			// fallback 4 when source is tab style.
+-			columns += source.kind === "tab" ? 1 : Math.max(1, Math.floor(source.width));
+-		} else {
+-			columns += 1;
+-		}
+-	}
+-	if (dest.kind === "tab") {
+-		// Convert visual columns to whole tabs. When source was space-indented,
+-		// columns is in spaces; divide by source.width to get logical levels.
+-		let levels: number;
+-		if (source.kind === "tab") {
+-			levels = columns;
+-		} else {
+-			const w = Math.max(1, source.width);
+-			levels = Math.round(columns / w);
+-		}
+-		return "\t".repeat(Math.max(0, levels));
+-	}
+-	// Destination is spaces. Convert to dest.width columns per level.
+-	let levels: number;
+-	if (source.kind === "tab") {
+-		levels = columns; // tabs were 1 column each here
+-	} else {
+-		const w = Math.max(1, source.width);
+-		levels = Math.round(columns / w);
+-	}
+-	const out = " ".repeat(Math.max(0, levels) * Math.max(1, dest.width));
+-	return out;
+-}
+diff --git a/packages/coding-agent/src/edit/modes/atom.ts b/packages/coding-agent/src/edit/modes/atom.ts
+index 835e91ac8..81b4b1e71 100644
+--- a/packages/coding-agent/src/edit/modes/atom.ts
++++ b/packages/coding-agent/src/edit/modes/atom.ts
+@@ -1,24 +1,17 @@
+ /**
+  *
+  * Flat locator + verb edit mode backed by hashline anchors. Each entry carries
+- * one shared `loc` selector plus one or more verbs (`pre`, `splice`, `post`, `sed`).
+- * The runtime resolves those verbs into internal anchor-scoped edits and still
+- * reuses hashline's staleness scheme (`computeLineHash`) verbatim.
++ * one shared `loc` selector plus one or more verbs (`pre`, `splice`, `post`,
++ * `replace`). The runtime resolves those verbs into internal anchor-scoped
++ * edits and reuses hashline's staleness scheme (`computeLineHash`) verbatim.
+  *
+  * External shapes (one entry):
+- *   { path, loc: "5th",      splice:  ["..."] }                          // line replace
+- *   { path, loc: "(5th)",    splice:  ["..."] }                          // block body replace
+- *   { path, loc: "[5th]",    splice:  ["..."] }                          // whole node replace
+- *   { path, loc: "[5th",     splice:  ["..."] }                          // anchor (incl) → closer-1
+- *   { path, loc: "5th]",     splice:  ["..."] }                          // opener+1 → anchor (incl)
+- *   { path, loc: "5th",      pre: [...], splice: [...], post: [...] }    // line verbs combinable
+- *   { path, loc: "$",        pre: [...] | post: [...] | sed: {...} }    // file-scoped
++ *   { path, loc: "5th",  splice: ["..."] }                    // line replace
++ *   { path, loc: "5th",  pre: [...], splice: [...], post: [...] } // line verbs combinable
++ *   { path, loc: "5th",  replace: { find: "x", with: "y" } }  // literal substring on the line
++ *   { path, loc: "$",    pre: [...] | post: [...] | replace: {...} }  // file-scoped
+  *
+- * `splice: []` deletes; `splice: [""]` replaces with a single blank line. These
+- * apply uniformly to single-line and bracketed (region) locators.
+- *
+- * Bracket forms in `loc` are reserved for `splice` (region replacement). `pre`,
+- * `post`, and `sed` reject bracketed locators — they are line-only.
++ * `splice: []` deletes; `splice: [""]` replaces with a single blank line.
+  *
+  * For deleting or moving files, the agent should use bash.
+  */
+@@ -31,9 +24,7 @@ import { assertEditableFileContent } from "../../tools/auto-generated-guard";
+ import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
+ import { outputMeta } from "../../tools/output-meta";
+ import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
+-import { checkBodyBraceBalance, type DelimiterKind, findEnclosingBlock } from "../block";
+ import { generateDiffString } from "../diff";
+-import { applyIndent, detectIndentStyle, stripCommonIndent } from "../indent";
+ import { computeLineHash, HASHLINE_BIGRAM_RE_SRC, HASHLINE_CONTENT_SEPARATOR } from "../line-hash";
+ import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../normalize";
+ import type { EditToolDetails, LspBatchRequest } from "../renderer";
+@@ -69,12 +60,12 @@ export const atomEditSchema = Type.Object(
+ 		splice: Type.Optional(textSchema),
+ 		pre: Type.Optional(textSchema),
+ 		post: Type.Optional(textSchema),
+-		sed: Type.Optional(
++		replace: Type.Optional(
+ 			Type.Object(
+ 				{
+-					pat: Type.String({ description: "regex" }),
+-					rep: Type.String({ description: "expression to replace with" }),
+-					g: Type.Optional(Type.Boolean({ description: "global flag", default: false })),
++					find: Type.String({ description: "literal substring to find" }),
++					with: Type.String({ description: "literal substring to substitute" }),
++					all: Type.Optional(Type.Boolean({ description: "replace every occurrence (default: first only)", default: false })),
+ 				},
+ 				{
+ 					additionalProperties: false,
+@@ -107,49 +98,20 @@ export type AtomEdit =
+ 	| { op: "del"; pos: Anchor }
+ 	| { op: "append_file"; lines: string[] }
+ 	| { op: "prepend_file"; lines: string[] }
+-	| { op: "sed"; pos: Anchor; spec: SedSpec; expression: string }
+-	| { op: "sed_file"; spec: SedSpec; expression: string }
+-	| { op: "splice_block"; pos: Anchor; spec: SpliceBlockSpec; bracket: BracketShape };
++	| { op: "replace"; pos: Anchor; spec: ReplaceSpec; expression: string }
++	| { op: "replace_file"; spec: ReplaceSpec; expression: string };
+ 
+-export interface SedSpec {
+-	pattern: string;
+-	replacement: string;
+-	global: boolean;
+-}
+-
+-export interface SpliceBlockSpec {
+-	body: string[];
+-	kind: DelimiterKind;
+-}
+-
+-type BracketShape = "none" | "body" | "node" | "left_incl" | "left_excl" | "right_incl" | "right_excl";
+-
+-// File-extension lookup for the block delimiter family used when `loc`
+-// has bracket forms. Most languages are brace-family; lisp-family uses `(`.
+-// Anything not listed defaults to `{` (covers the long tail of brace-style
+-// languages without enumerating every extension).
+-const LISP_EXTENSIONS = new Set(["clj", "cljs", "cljc", "edn", "lisp", "lsp", "el", "scm", "ss", "rkt", "fnl"]);
+-
+-function fileExtension(path: string | undefined): string | undefined {
+-	if (!path) return undefined;
+-	const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+-	const base = slash >= 0 ? path.slice(slash + 1) : path;
+-	const dot = base.lastIndexOf(".");
+-	if (dot <= 0) return undefined;
+-	return base.slice(dot + 1).toLowerCase();
+-}
+-
+-function resolveBlockDelimiterForPath(path: string | undefined): DelimiterKind {
+-	const ext = fileExtension(path);
+-	if (ext && LISP_EXTENSIONS.has(ext)) return "(";
+-	return "{";
++export interface ReplaceSpec {
++	find: string;
++	with: string;
++	all: boolean;
+ }
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+ // Param guards
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+-const ATOM_VERB_KEYS = ["splice", "pre", "post", "sed"] as const;
++const ATOM_VERB_KEYS = ["splice", "pre", "post", "replace"] as const;
+ type AtomOptionalKey = "loc" | (typeof ATOM_VERB_KEYS)[number];
+ const ATOM_OPTIONAL_KEYS = ["loc", ...ATOM_VERB_KEYS] as const satisfies readonly AtomOptionalKey[];
+ 
+@@ -159,16 +121,13 @@ const ATOM_OPTIONAL_KEYS = ["loc", ...ATOM_VERB_KEYS] as const satisfies readonl
+ const ANCHOR_PREFIX_RE = new RegExp(`^\\s*[>+-]*\\s*\\d+${HASHLINE_BIGRAM_RE_SRC}`);
+ 
+ // Splits `path:loc` references where the right side starts with a valid anchor
+-// (single `\d+<bigram>` or `<anchor>-<anchor>` range, optionally followed by a
+-// content suffix using `|` or `:`). The non-greedy `(.+?)` picks the leftmost
+-// colon whose RHS is a real anchor, so colons inside the loc's content suffix
+-// (TS type annotations, etc.) don't break the split. Drive-letter prefixes like
+-// `C:\path\a.ts:160sr` still resolve correctly because the first colon's RHS
+-// fails the anchor pattern.
++// (single `\d+<bigram>`, optionally followed by a content suffix using `|` or
++// `:`). The non-greedy `(.+?)` picks the leftmost colon whose RHS is a real
++// anchor, so colons inside the loc's content suffix (TS type annotations, etc.)
++// don't break the split. Drive-letter prefixes like `C:\path\a.ts:160sr` still
++// resolve correctly because the first colon's RHS fails the anchor pattern.
+ const ANCHOR_TAG_RE_SRC = `\\s*[>+-]*\\s*\\d+${HASHLINE_BIGRAM_RE_SRC}`;
+-const PATH_LOC_SPLIT_RE = new RegExp(
+-	`^(.+?):([\\[(]?${ANCHOR_TAG_RE_SRC}(?:-${ANCHOR_TAG_RE_SRC})?(?:[|:].*)?[\\])]?)$`,
+-);
++const PATH_LOC_SPLIT_RE = new RegExp(`^(.+?):(${ANCHOR_TAG_RE_SRC}(?:[|:].*)?)$`);
+ 
+ function stripNullAtomFields(edit: AtomToolEdit): AtomToolEdit {
+ 	let next: Record<string, unknown> | undefined;
+@@ -181,7 +140,7 @@ function stripNullAtomFields(edit: AtomToolEdit): AtomToolEdit {
+ 	return (next ?? fields) as AtomToolEdit;
+ }
+ 
+-type ParsedAtomLoc = { kind: "anchor"; pos: Anchor; bracket: BracketShape } | { kind: "file" };
++type ParsedAtomLoc = { kind: "anchor"; pos: Anchor } | { kind: "file" };
+ 
+ // ═══════════════════════════════════════════════════════════════════════════
+ // Resolution
+@@ -220,14 +179,6 @@ function parseAnchor(raw: string, opName: string): Anchor {
+ 	}
+ }
+ 
+-function tryParseAtomTag(raw: string): Anchor | undefined {
+-	try {
+-		return parseTag(raw);
+-	} catch {
+-		return undefined;
+-	}
+-}
+-
+ function resolveAtomEntryPath(
+ 	edit: AtomToolEdit,
+ 	topLevelPath: string | undefined,
+@@ -263,49 +214,19 @@ function parseLoc(raw: string, editIndex: number): ParsedAtomLoc {
+ 	const trimmed = raw.trim();
+ 	if (trimmed === "$") return { kind: "file" };
+ 
+-	const leading = trimmed[0];
+-	const trailing = trimmed[trimmed.length - 1];
+-	const hasLeading = leading === "[" || leading === "(";
+-	const hasTrailing = trailing === "]" || trailing === ")";
+-	if ((leading === "(" && trailing === "]") || (leading === "[" && trailing === ")")) {
+-		throw new Error(
+-			`Edit ${editIndex}: mixed bracket inclusivity in loc is ambiguous; use [anchor, (anchor, anchor], anchor), [anchor], or a bare anchor.`,
+-		);
+-	}
+-
+-	let inner = trimmed;
+-	if (hasLeading) inner = inner.slice(1);
+-	if (hasTrailing) inner = inner.slice(0, -1);
+-
+-	// Detect range syntax explicitly: "<anchor>-<anchor>". A bare `-` inside the
+-	// loc (e.g. line content like `i--`) should not trigger the range error.
+-	const dash = inner.indexOf("-");
+-	if (dash > 0) {
+-		const left = inner.slice(0, dash);
+-		const right = inner.slice(dash + 1);
+-		if (tryParseAtomTag(left) !== undefined && tryParseAtomTag(right) !== undefined) {
+-			throw new Error(
+-				`Edit ${editIndex}: atom loc does not support line ranges. Use a single anchor like "160sr" or "$".`,
+-			);
+-		}
+-	}
+-	const pos = parseAnchor(inner, "loc");
++	const pos = parseAnchor(trimmed, "loc");
+ 	// Capture an optional content suffix after the anchor: `82zu|  for (...)`.
+ 	// The suffix acts as a hint for anchor disambiguation when the model's hash
+ 	// is wrong but the content reveals the intended line.
+-	const hint = extractAnchorContentHint(inner);
++	const hint = extractAnchorContentHint(trimmed);
+ 	if (hint !== undefined) {
+ 		pos.contentHint = hint;
+ 	}
+ 
+-	let bracket: BracketShape = "none";
+-	if (leading === "[" && trailing === "]") bracket = "node";
+-	else if (leading === "[") bracket = "left_incl";
+-	else if (leading === "(" && trailing === ")") bracket = "body";
+-	else if (leading === "(") bracket = "left_excl";
+-	else if (trailing === "]") bracket = "right_incl";
+-	else if (trailing === ")") bracket = "right_excl";
+-	return { kind: "anchor", pos, bracket };
++	if (pos.line < 1) {
++		throw new Error(`Edit ${editIndex}: invalid line number in loc "${raw}".`);
++	}
++	return { kind: "anchor", pos };
+ }
+ 
+ function extractAnchorContentHint(raw: string): string | undefined {
+@@ -321,104 +242,65 @@ function extractAnchorContentHint(raw: string): string | undefined {
+ 	return hint;
+ }
+ 
+-function parseSedSpec(input: unknown, editIndex: number): SedSpec {
++function parseReplaceSpec(input: unknown, editIndex: number): ReplaceSpec {
+ 	if (input === null || typeof input !== "object" || Array.isArray(input)) {
+-		throw new Error(`Edit ${editIndex}: sed must be an object with shape {pat, rep, g?}.`);
++		throw new Error(`Edit ${editIndex}: replace must be an object with shape {find, with, all?}.`);
+ 	}
+ 	const obj = input as Record<string, unknown>;
+-	const pat = obj.pat;
+-	const rep = obj.rep;
+-	if (typeof pat !== "string" || pat.length === 0) {
+-		throw new Error(`Edit ${editIndex}: sed.pat must be a non-empty string.`);
++	const find = obj.find;
++	const withVal = obj.with;
++	if (typeof find !== "string" || find.length === 0) {
++		throw new Error(`Edit ${editIndex}: replace.find must be a non-empty string.`);
+ 	}
+-	if (pat.includes("\n")) {
++	if (find.includes("\n")) {
+ 		throw new Error(
+-			`Edit ${editIndex}: sed.pat must be a single line; contains a newline. Use \`splice\` to replace multiple lines, anchoring the first changed line and listing replacement lines in the array.`,
++			`Edit ${editIndex}: replace.find must be a single line; contains a newline. Use \`splice\` to replace multiple lines, anchoring the first changed line and listing replacement lines in the array.`,
+ 		);
+ 	}
+-	if (typeof rep !== "string") {
+-		throw new Error(`Edit ${editIndex}: sed.rep must be a string.`);
++	if (typeof withVal !== "string") {
++		throw new Error(`Edit ${editIndex}: replace.with must be a string.`);
+ 	}
+-	const rawGlobal = obj.g;
+-	let global = false;
+-	if (rawGlobal !== undefined) {
+-		if (typeof rawGlobal !== "boolean") {
+-			throw new Error(`Edit ${editIndex}: sed.g must be a boolean when provided.`);
++	if (withVal.includes("\n")) {
++		throw new Error(
++			`Edit ${editIndex}: replace.with must be a single line; contains a newline. Use \`splice\` for multi-line replacements.`,
++		);
++	}
++	const rawAll = obj.all;
++	let all = false;
++	if (rawAll !== undefined) {
++		if (typeof rawAll !== "boolean") {
++			throw new Error(`Edit ${editIndex}: replace.all must be a boolean when provided.`);
+ 		}
+-		global = rawGlobal;
++		all = rawAll;
+ 	}
+-	return { pattern: pat, replacement: rep, global };
++	return { find, with: withVal, all };
+ }
+ 
+-function formatSedExpression(spec: SedSpec): string {
+-	const obj: { pat: string; rep: string; g?: boolean } = {
+-		pat: spec.pattern,
+-		rep: spec.replacement,
+-	};
+-	// Only emit non-default flags so error messages stay compact (g defaults false).
+-	if (spec.global) obj.g = true;
++function formatReplaceExpression(spec: ReplaceSpec): string {
++	const obj: { find: string; with: string; all?: boolean } = { find: spec.find, with: spec.with };
++	if (spec.all) obj.all = true;
+ 	return JSON.stringify(obj);
+ }
+ 
+-function applyLiteralSed(currentLine: string, spec: SedSpec): { result: string; matched: boolean } {
+-	const idx = currentLine.indexOf(spec.pattern);
++function applyReplaceToLine(currentLine: string, spec: ReplaceSpec): { result: string; matched: boolean } {
++	const idx = currentLine.indexOf(spec.find);
+ 	if (idx === -1) return { result: currentLine, matched: false };
+-	if (spec.global) {
+-		return { result: currentLine.split(spec.pattern).join(spec.replacement), matched: true };
++	if (spec.all) {
++		return { result: currentLine.split(spec.find).join(spec.with), matched: true };
+ 	}
+ 	return {
+-		result: currentLine.slice(0, idx) + spec.replacement + currentLine.slice(idx + spec.pattern.length),
++		result: currentLine.slice(0, idx) + spec.with + currentLine.slice(idx + spec.find.length),
+ 		matched: true,
+ 	};
+ }
+ 
+-function applySedToLine(
+-	currentLine: string,
+-	spec: SedSpec,
+-): { result: string; matched: boolean; error?: string; literalFallback?: boolean } {
+-	let flags = "";
+-	if (spec.global) flags += "g";
+-	let re: RegExp | undefined;
+-	let compileError: string | undefined;
+-	try {
+-		re = new RegExp(spec.pattern, flags);
+-	} catch (e) {
+-		compileError = (e as Error).message;
+-	}
+-	if (re?.test(currentLine)) {
+-		re.lastIndex = 0;
+-		const probe = re.exec(currentLine);
+-		re.lastIndex = 0;
+-		// Zero-length matches (e.g. `()`, `(?=…)`, `^`, `$`) cause `String.replace` to
+-		// insert the replacement at the match position rather than substitute. When that
+-		// happens, fall through to the literal-substring fallback below — the model almost
+-		// always meant the pattern literally (`()` is the parens, `^` is a caret, etc.).
+-		if (!probe || probe[0].length > 0) {
+-			return { result: currentLine.replace(re, spec.replacement), matched: true };
+-		}
+-	}
+-	// Fall back to literal substring match. Models frequently send sed patterns
+-	// containing unescaped regex metacharacters (parentheses, `?`, `.`) that they
+-	// intend as literal code. Trying a literal match before reporting failure
+-	// recovers the obvious intent without changing semantics for patterns that
+-	// already match as regex.
+-	const literal = applyLiteralSed(currentLine, spec);
+-	if (literal.matched) {
+-		return { ...literal, literalFallback: true };
+-	}
+-	if (compileError !== undefined) {
+-		return { result: currentLine, matched: false, error: compileError };
+-	}
+-	return { result: currentLine, matched: false };
+-}
+-
+ function classifyAtomEdit(edit: AtomToolEdit): string {
+ 	const entry = stripNullAtomFields(edit);
+ 	const verbs = ATOM_VERB_KEYS.filter(k => entry[k] !== undefined);
+ 	return verbs.length > 0 ? verbs.join("+") : "unknown";
+ }
+ 
+-function resolveAtomToolEdit(edit: AtomToolEdit, editIndex = 0, path?: string): AtomEdit[] {
++function resolveAtomToolEdit(edit: AtomToolEdit, editIndex = 0, _path?: string): AtomEdit[] {
+ 	const entry = stripNullAtomFields(edit);
+ 	const verbKeysPresent = ATOM_VERB_KEYS.filter(k => entry[k] !== undefined);
+ 	if (verbKeysPresent.length === 0) {
+@@ -435,7 +317,7 @@ function resolveAtomToolEdit(edit: AtomToolEdit, editIndex = 0, path?: string):
+ 
+ 	if (loc.kind === "file") {
+ 		if (entry.splice !== undefined) {
+-			throw new Error(`Edit ${editIndex}: loc "$" supports pre, post, and sed (not splice).`);
++			throw new Error(`Edit ${editIndex}: loc "$" supports pre, post, and replace (not splice).`);
+ 		}
+ 		if (entry.pre !== undefined) {
+ 			resolved.push({ op: "prepend_file", lines: hashlineParseText(entry.pre) });
+@@ -443,42 +325,23 @@ function resolveAtomToolEdit(edit: AtomToolEdit, editIndex = 0, path?: string):
+ 		if (entry.post !== undefined) {
+ 			resolved.push({ op: "append_file", lines: hashlineParseText(entry.post) });
+ 		}
+-		if (entry.sed !== undefined) {
+-			const spec = parseSedSpec(entry.sed, editIndex);
+-			resolved.push({ op: "sed_file", spec, expression: formatSedExpression(spec) });
++		if (entry.replace !== undefined) {
++			const spec = parseReplaceSpec(entry.replace, editIndex);
++			resolved.push({ op: "replace_file", spec, expression: formatReplaceExpression(spec) });
+ 		}
+ 		return resolved;
+ 	}
+ 
+-	if (loc.bracket !== "none") {
+-		// Bracketed locator: only `splice` is meaningful (region replacement).
+-		const hasInvalidVerb = entry.pre !== undefined || entry.post !== undefined || entry.sed !== undefined;
+-		if (hasInvalidVerb) {
+-			throw new Error(
+-				`Edit ${editIndex}: bracket forms in loc are splice-only; remove pre/post/sed or use a bare anchor.`,
+-			);
+-		}
+-		if (entry.splice === undefined) {
+-			throw new Error(
+-				`Edit ${editIndex}: bracket loc requires \`splice\`. Bare anchors are line-only; brackets address a region.`,
+-			);
+-		}
+-		const kind = resolveBlockDelimiterForPath(path);
+-		const body = hashlineParseText(entry.splice);
+-		resolved.push({ op: "splice_block", pos: loc.pos, spec: { body, kind }, bracket: loc.bracket });
+-		return resolved;
+-	}
+-
+ 	if (entry.pre !== undefined) {
+ 		resolved.push({ op: "pre", pos: loc.pos, lines: hashlineParseText(entry.pre) });
+ 	}
+ 	if (entry.splice !== undefined) {
+ 		if (Array.isArray(entry.splice) && entry.splice.length === 0) {
+-			// Models often default `splice: []` alongside other verbs (notably `sed`).
++			// Models often default `splice: []` alongside other verbs (notably `replace`).
+ 			// Treating that combination as an explicit `del` produces a confusing
+ 			// `Conflicting ops` error. When another mutating verb is present, drop
+ 			// the empty `splice` instead of treating it as a deletion.
+-			if (entry.sed === undefined) {
++			if (entry.replace === undefined) {
+ 				resolved.push({ op: "del", pos: loc.pos });
+ 			}
+ 		} else {
+@@ -488,14 +351,14 @@ function resolveAtomToolEdit(edit: AtomToolEdit, editIndex = 0, path?: string):
+ 	if (entry.post !== undefined) {
+ 		resolved.push({ op: "post", pos: loc.pos, lines: hashlineParseText(entry.post) });
+ 	}
+-	if (entry.sed !== undefined) {
++	if (entry.replace !== undefined) {
+ 		const spliceIsExplicitReplacement = Array.isArray(entry.splice) && entry.splice.length > 0;
+ 		// Models often duplicate intent by sending both an explicit `splice` and a
+-		// matching `sed`. The explicit replacement wins; the redundant `sed` would
+-		// otherwise trigger a confusing `Conflicting ops` rejection.
++		// matching `replace`. The explicit replacement wins; the redundant
++		// `replace` would otherwise trigger a confusing `Conflicting ops` rejection.
+ 		if (!spliceIsExplicitReplacement) {
+-			const spec = parseSedSpec(entry.sed, editIndex);
+-			resolved.push({ op: "sed", pos: loc.pos, spec, expression: formatSedExpression(spec) });
++			const spec = parseReplaceSpec(entry.replace, editIndex);
++			resolved.push({ op: "replace", pos: loc.pos, spec, expression: formatReplaceExpression(spec) });
+ 		}
+ 	}
+ 	return resolved;
+@@ -511,8 +374,7 @@ function* getAtomAnchors(edit: AtomEdit): Iterable<Anchor> {
+ 		case "pre":
+ 		case "post":
+ 		case "del":
+-		case "sed":
+-		case "splice_block":
++		case "replace":
+ 			yield edit.pos;
+ 			return;
+ 		default:
+@@ -524,7 +386,7 @@ function* getAtomAnchors(edit: AtomEdit): Iterable<Anchor> {
+  * Search for a line near `anchor.line` whose trimmed content equals the
+  * anchor's content hint. Returns the closest match (preferring lines below the
+  * requested anchor on ties) or `null` when no line matches. Strict equality on
+- * trimmed content keeps this conservative \u2014 we only retarget when there is no
++ * trimmed content keeps this conservative — we only retarget when there is no
+  * ambiguity about the model's intent.
+  */
+ function findLineByContentHint(anchor: Anchor, fileLines: string[]): number | null {
+@@ -584,15 +446,16 @@ function validateAtomAnchors(edits: AtomEdit[], fileLines: string[], warnings: s
+ }
+ 
+ function validateNoConflictingAnchorOps(edits: AtomEdit[]): void {
+-	// For each anchor line, at most one mutating op (splice/del). Multiple `sed`
+-	// ops on the same line are allowed and applied sequentially. `pre`/`post`
+-	// (insert ops) may coexist with them — they don't mutate the anchor line.
++	// For each anchor line, at most one mutating op (splice/del). Multiple
++	// `replace` ops on the same line are allowed and applied sequentially.
++	// `pre`/`post` (insert ops) may coexist with them — they don't mutate the
++	// anchor line.
+ 	const mutatingPerLine = new Map<number, string>();
+ 	for (const edit of edits) {
+-		if (edit.op !== "splice" && edit.op !== "del" && edit.op !== "sed") continue;
++		if (edit.op !== "splice" && edit.op !== "del" && edit.op !== "replace") continue;
+ 		const existing = mutatingPerLine.get(edit.pos.line);
+ 		if (existing) {
+-			if (existing === "sed" && edit.op === "sed") continue;
++			if (existing === "replace" && edit.op === "replace") continue;
+ 			throw new Error(
+ 				`Conflicting ops on anchor line ${edit.pos.line}: \`${existing}\` and \`${edit.op}\`. ` +
+ 					`At most one of splice/del is allowed per anchor.`,
+@@ -613,151 +476,6 @@ export interface AtomNoopEdit {
+ 	current: string;
+ }
+ 
+-interface SpliceBlockApplyResult {
+-	text: string;
+-	firstChangedLine: number | undefined;
+-}
+-
+-type SpliceBlockEdit = Extract<AtomEdit, { op: "splice_block" }>;
+-
+-function lineStartOffset(text: string, line: number): number {
+-	let currentLine = 1;
+-	let offset = 0;
+-	while (offset < text.length && currentLine < line) {
+-		if (text[offset] === "\n") currentLine++;
+-		offset++;
+-	}
+-	return offset;
+-}
+-
+-function lineEndOffset(text: string, line: number): number {
+-	let offset = lineStartOffset(text, line);
+-	while (offset < text.length && text[offset] !== "\n") offset++;
+-	return offset;
+-}
+-
+-function lineEndIncludingNewlineOffset(text: string, line: number): number {
+-	const offset = lineEndOffset(text, line);
+-	return text[offset] === "\n" ? offset + 1 : offset;
+-}
+-
+-function spliceBlockLocatorLabel(bracket: BracketShape): string {
+-	switch (bracket) {
+-		case "none":
+-		case "body":
+-			return "(anchor)";
+-		case "node":
+-			return "[anchor]";
+-		case "left_incl":
+-			return "[anchor";
+-		case "left_excl":
+-			return "(anchor";
+-		case "right_incl":
+-			return "anchor]";
+-		case "right_excl":
+-			return "anchor)";
+-	}
+-}
+-
+-function applySpliceBlockEdits(
+-	originalText: string,
+-	edits: SpliceBlockEdit[],
+-	warnings: string[],
+-): SpliceBlockApplyResult {
+-	// Sort by anchor line descending so applying earlier ops doesn't shift
+-	// later anchors. (Multiple splice_block ops within one call are assumed
+-	// non-overlapping; overlapping ranges are not supported.)
+-	const sorted = [...edits].sort((a, b) => b.pos.line - a.pos.line);
+-	const destStyle = detectIndentStyle(originalText);
+-	let text = originalText;
+-	let firstChangedLine: number | undefined;
+-
+-	for (const edit of sorted) {
+-		const kind: DelimiterKind = edit.spec.kind;
+-		const found = findEnclosingBlock(text, edit.pos.line, { kind, depth: 0 });
+-		if ("message" in found) {
+-			throw new Error(`splice at anchor ${edit.pos.line}: ${found.message}`);
+-		}
+-		const replacedLineCount = found.closeLine - found.openLine + 1;
+-		warnings.push(
+-			`splice locator ${spliceBlockLocatorLabel(edit.bracket)} replaced \`${kind}\` block at lines ${found.openLine}-${found.closeLine} ` +
+-				`(${replacedLineCount} lines, 1 of ${found.enclosingCount} enclosing \`${kind}\` blocks).`,
+-		);
+-		const balanceErr = checkBodyBraceBalance(edit.spec.body.join("\n"), kind);
+-		if (balanceErr) {
+-			throw new Error(`splice at anchor ${edit.pos.line}: ${balanceErr}`);
+-		}
+-
+-		const stripped = stripCommonIndent(edit.spec.body);
+-		const bodyPrefix = found.bodyLineIndent ?? `${found.openerLineIndent}${defaultIndentUnit(destStyle)}`;
+-
+-		let replacementText: string;
+-		let replaceStart: number;
+-		let replaceEnd: number;
+-
+-		switch (edit.bracket) {
+-			case "node": {
+-				const indented = applyIndent(stripped, found.openerLineIndent, destStyle);
+-				replacementText = indented.join("\n");
+-				replaceStart = found.openLineStart;
+-				replaceEnd = found.closeOffsetExclusive;
+-				break;
+-			}
+-			case "left_incl":
+-			case "left_excl": {
+-				const indented = applyIndent(stripped, bodyPrefix, destStyle);
+-				replacementText = `${indented.join("\n")}\n${found.openerLineIndent}`;
+-				replaceStart =
+-					edit.bracket === "left_incl"
+-						? lineStartOffset(text, edit.pos.line)
+-						: lineEndIncludingNewlineOffset(text, edit.pos.line);
+-				replaceEnd = found.bodyEnd;
+-				break;
+-			}
+-			case "right_incl":
+-			case "right_excl": {
+-				const indented = applyIndent(stripped, bodyPrefix, destStyle);
+-				replacementText = `\n${indented.join("\n")}\n`;
+-				replaceStart = found.bodyStart;
+-				replaceEnd =
+-					edit.bracket === "right_incl"
+-						? lineEndIncludingNewlineOffset(text, edit.pos.line)
+-						: lineStartOffset(text, edit.pos.line);
+-				break;
+-			}
+-			case "none":
+-			case "body": {
+-				const goInline = found.sameLine && stripped.length === 1;
+-				if (goInline) {
+-					const single = stripped.length === 0 ? "" : stripped[0]!.trim();
+-					const pad = kind === "{" ? " " : "";
+-					replacementText = single.length > 0 ? `${pad}${single}${pad}` : pad;
+-				} else {
+-					const indented = applyIndent(stripped, bodyPrefix, destStyle);
+-					replacementText = `\n${indented.join("\n")}\n${found.openerLineIndent}`;
+-				}
+-				replaceStart = found.bodyStart;
+-				replaceEnd = found.bodyEnd;
+-				break;
+-			}
+-		}
+-
+-		const before = text.slice(0, replaceStart);
+-		const after = text.slice(replaceEnd);
+-		const newText = before + replacementText + after;
+-
+-		text = newText;
+-		if (firstChangedLine === undefined || found.openLine < firstChangedLine) {
+-			firstChangedLine = found.openLine;
+-		}
+-	}
+-	return { text, firstChangedLine };
+-}
+-
+-function defaultIndentUnit(style: { kind: "tab" | "space"; width: number }): string {
+-	return style.kind === "tab" ? "\t" : " ".repeat(Math.max(1, style.width));
+-}
+-
+ export function applyAtomEdits(
+ 	text: string,
+ 	edits: AtomEdit[],
+@@ -780,13 +498,14 @@ export function applyAtomEdits(
+ 	if (mismatches.length > 0) {
+ 		throw new HashlineMismatchError(mismatches, fileLines);
+ 	}
+-	// When a `del` and a `sed`/`splice` target the same anchor (across separate edit
+-	// entries), the `del` is almost always a hallucinated cleanup the model added on top
+-	// of the real replacement. Drop the `del` silently so the replacement wins, matching
+-	// the in-entry handling for `splice: []` paired with `sed`.
++	// When a `del` and a `replace`/`splice` target the same anchor (across separate
++	// edit entries), the `del` is almost always a hallucinated cleanup the model
++	// added on top of the real replacement. Drop the `del` silently so the
++	// replacement wins, matching the in-entry handling for `splice: []` paired
++	// with `replace`.
+ 	const replacedLines = new Set<number>();
+ 	for (const e of edits) {
+-		if (e.op === "splice" || e.op === "sed") replacedLines.add(e.pos.line);
++		if (e.op === "splice" || e.op === "replace") replacedLines.add(e.pos.line);
+ 	}
+ 	let effective = edits;
+ 	if (replacedLines.size > 0) {
+@@ -794,26 +513,6 @@ export function applyAtomEdits(
+ 	}
+ 	validateNoConflictingAnchorOps(effective);
+ 
+-	// splice_block ops own their entire block range. To keep line numbers sane,
+-	// they cannot mix with other anchor-scoped ops in the same call. They may
+-	// coexist with each other (sorted by openLine descending so earlier ops
+-	// don't shift later anchors).
+-	const spliceBlockEdits = effective.filter(
+-		(e): e is Extract<AtomEdit, { op: "splice_block" }> => e.op === "splice_block",
+-	);
+-	if (spliceBlockEdits.length > 0) {
+-		const result = applySpliceBlockEdits(text, spliceBlockEdits, warnings);
+-		if (result.firstChangedLine !== undefined) {
+-			if (firstChangedLine === undefined || result.firstChangedLine < firstChangedLine) {
+-				firstChangedLine = result.firstChangedLine;
+-			}
+-		}
+-		// Continue pipeline against the post-splice_block text.
+-		fileLines.length = 0;
+-		for (const line of result.text.split("\n")) fileLines.push(line);
+-		effective = effective.filter(e => e.op !== "splice_block");
+-	}
+-
+ 	const trackFirstChanged = (line: number) => {
+ 		if (firstChangedLine === undefined || line < firstChangedLine) {
+ 			firstChangedLine = line;
+@@ -824,15 +523,15 @@ export function applyAtomEdits(
+ 	// captured idx so multiple pre/post on the same target are emitted in the order
+ 	// the model produced them.
+ 	type Indexed<T> = { edit: T; idx: number };
+-	type AnchorEdit = Exclude<AtomEdit, { op: "append_file" } | { op: "prepend_file" } | { op: "sed_file" }>;
++	type AnchorEdit = Exclude<AtomEdit, { op: "append_file" } | { op: "prepend_file" } | { op: "replace_file" }>;
+ 	const anchorEdits: Indexed<AnchorEdit>[] = [];
+ 	const appendEdits: Indexed<Extract<AtomEdit, { op: "append_file" }>>[] = [];
+-	const sedFileEdits: Indexed<Extract<AtomEdit, { op: "sed_file" }>>[] = [];
++	const replaceFileEdits: Indexed<Extract<AtomEdit, { op: "replace_file" }>>[] = [];
+ 	const prependEdits: Indexed<Extract<AtomEdit, { op: "prepend_file" }>>[] = [];
+ 	effective.forEach((edit, idx) => {
+ 		if (edit.op === "append_file") appendEdits.push({ edit, idx });
+ 		else if (edit.op === "prepend_file") prependEdits.push({ edit, idx });
+-		else if (edit.op === "sed_file") sedFileEdits.push({ edit, idx });
++		else if (edit.op === "replace_file") replaceFileEdits.push({ edit, idx });
+ 		else anchorEdits.push({ edit, idx });
+ 	});
+ 
+@@ -884,20 +583,12 @@ export function applyAtomEdits(
+ 					replacementSet = true;
+ 					anchorMutated = true;
+ 					break;
+-				case "sed": {
++				case "replace": {
+ 					const input = replacementSet ? (replacement[0] ?? "") : currentLine;
+-					const { result, matched, error, literalFallback } = applySedToLine(input, edit.spec);
+-					if (error) {
+-						throw new Error(`Edit sed expression ${JSON.stringify(edit.expression)} rejected: ${error}`);
+-					}
++					const { result, matched } = applyReplaceToLine(input, edit.spec);
+ 					if (!matched) {
+ 						throw new Error(
+-							`Edit sed expression ${JSON.stringify(edit.expression)} did not match line ${edit.pos.line}: ${JSON.stringify(input)}`,
+-						);
+-					}
+-					if (literalFallback) {
+-						warnings.push(
+-							`sed expression ${JSON.stringify(edit.expression)} did not match as a regex on line ${edit.pos.line}; applied literal substring substitution instead. Escape regex metacharacters in the pattern to match as a regex.`,
++							`Edit replace expression ${JSON.stringify(edit.expression)} did not match line ${edit.pos.line}: ${JSON.stringify(input)}`,
+ 						);
+ 					}
+ 					replacement = [result];
+@@ -972,37 +663,25 @@ export function applyAtomEdits(
+ 		trackFirstChanged(insertIdx + 1);
+ 	}
+ 
+-	// Apply sed_file ops last so they observe the post-anchor / post-prepend /
+-	// post-append state of the file. Each op runs across every content line and
+-	let warnedLiteralFallback = false;
+-	sedFileEdits.sort((a, b) => a.idx - b.idx);
+-	for (const { edit } of sedFileEdits) {
++	// Apply replace_file ops last so they observe the post-anchor / post-prepend /
++	// post-append state of the file. Each op runs across every content line.
++	replaceFileEdits.sort((a, b) => a.idx - b.idx);
++	for (const { edit } of replaceFileEdits) {
+ 		const hasTrailingNewline = fileLines.length > 1 && fileLines[fileLines.length - 1] === "";
+ 		const upper = hasTrailingNewline ? fileLines.length - 1 : fileLines.length;
+ 		let anyMatched = false;
+-		let lastCompileError: string | undefined;
+ 		for (let i = 0; i < upper; i++) {
+ 			const line = fileLines[i] ?? "";
+-			const r = applySedToLine(line, edit.spec);
+-			if (r.error) lastCompileError = r.error;
++			const r = applyReplaceToLine(line, edit.spec);
+ 			if (!r.matched) continue;
+ 			anyMatched = true;
+-			if (r.literalFallback && !warnedLiteralFallback) {
+-				warnings.push(
+-					`sed expression ${JSON.stringify(edit.expression)} did not match as a regex; applied literal substring substitution. Escape regex metacharacters in the pattern to match as a regex.`,
+-				);
+-				warnedLiteralFallback = true;
+-			}
+ 			if (r.result !== line) {
+ 				fileLines[i] = r.result;
+ 				trackFirstChanged(i + 1);
+ 			}
+ 		}
+ 		if (!anyMatched) {
+-			if (lastCompileError !== undefined) {
+-				throw new Error(`Edit sed expression ${JSON.stringify(edit.expression)} rejected: ${lastCompileError}`);
+-			}
+-			throw new Error(`Edit sed expression ${JSON.stringify(edit.expression)} did not match any line in the file.`);
++			throw new Error(`Edit replace expression ${JSON.stringify(edit.expression)} did not match any line in the file.`);
+ 		}
+ 	}
+ 
+diff --git a/packages/coding-agent/src/prompts/tools/atom.md b/packages/coding-agent/src/prompts/tools/atom.md
+index 027d52f46..0d8ed802e 100644
+--- a/packages/coding-agent/src/prompts/tools/atom.md
++++ b/packages/coding-agent/src/prompts/tools/atom.md
+@@ -5,32 +5,22 @@ Each call **MUST** have shape `{path:"a.ts",edits:[…]}`. `path` is the default
+ Each edit **MUST** have exactly one `loc` and **MUST** include one or more verbs.
+ 
+ # Locators
+-- `"A"` targets one anchored line. `"$"` targets the whole file: `pre` = BOF, `post` = EOF, `sed` = every line.
+-- Bracketed locators are **`splice` only** and select a balanced region around anchor `A`.
+-- `"(A)"` = block body. `"[A]"` = whole block/node.
+-- `"[A"` / `"(A"` = tail after/including anchor, closer excluded.
+-- `"A]"` / `"A)"` = head through/before anchor, opener excluded.
+-- Anchor bracketed forms on a body line of the intended block, not the opener line.
+-- Do not use bracketed locators on files that do not currently parse.
+-
++- `"A"` targets one anchored line (line number + 2-letter suffix, e.g. `160sr`).
++- `"$"` targets the whole file: `pre` = BOF, `post` = EOF, `replace` = every line.
++-
+ # Verbs
+-- `splice:[…]` replaces the anchored line, or the bracketed region. `[]` deletes; `[""]` makes a blank line.
++- `splice:[…]` replaces the anchored line. `[]` deletes; `[""]` makes a blank line. To replace N lines, anchor the first line and list all replacement lines.
+ - `pre:[…]` inserts before the anchor, or BOF with `loc:"$"`.
+ - `post:[…]` inserts after the anchor, or EOF with `loc:"$"`.
++- `replace:{find,with,all?}` is a literal substring substitution on the anchored line (or every line with `loc:"$"`). No regex — `find` matches as a literal string. `all:true` replaces every occurrence on the line; default replaces only the first.
+ </ops>
+ 
+-<splice>
+-Replaces the anchored line, or the bracketed region.
+-- `[]` deletes. `[""]` leaves a blank line.
+-- For bracketed `splice`, write body at column 0, it will be re-indented.
+-- Do not use bracketed `splice` on broken files, or for single line edits.
+-</splice>
+-
+-<sed>
++<replace>
+ Use for tiny inline edits: names, operators, literals.
+-- Keep `pat` as short as possible, it does not have to be unique.
+-- `g:false` by default; set to replace all instead of first.
+-</sed>
++- `find` is a literal substring; do **NOT** escape regex metacharacters — `(`, `)`, `.`, `?`, `[`, `]`, `*`, `+` all match themselves.
++- Keep `find` as short as possible while still being unique on the line; it does **NOT** have to be unique across the file.
++- `all:false` by default; set `all:true` to replace every occurrence on the line instead of only the first.
++</replace>
+ 
+ <examples>
+ ```ts title="a.ts"
+@@ -44,8 +34,8 @@ Use for tiny inline edits: names, operators, literals.
+ 
+ # Single-line replacement:
+ `{path:"a.ts",edits:[{loc:{{href 1 "const FALLBACK = \"guest\";"}},splice:["const FALLBACK = \"anonymous\";"]}]}`
+-# Small token edit: prefer `sed`:
+-`{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();"}},sed:{pat:"toLowerCase",rep:"toUpperCase"}}]}`
++# Small token edit: prefer `replace`:
++`{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();"}},replace:{find:"toLowerCase",with:"toUpperCase"}}]}`
+ # Insert before / after an anchor:
+ `{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();"}},pre:["\tif (!clean) return FALLBACK;"],post:["\t// normalized label"]}]}`
+ # Delete a line vs make it blank:
+@@ -56,21 +46,17 @@ Use for tiny inline edits: names, operators, literals.
+ `{path:"a.ts",edits:[{loc:"$",post:["","export { FALLBACK };"]}]}`
+ # Cross-file override:
+ `{path:"a.ts",edits:[{loc:{{href 1 "const FALLBACK = \"guest\";" "config.ts:" ""}},splice:["const FALLBACK = \"anonymous\";"]}]}`
+-# Body replacement: use bracketed `splice`, write body at column 0:
+-`{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;" "(" ")"}},splice:["if (name == null) return FALLBACK;","const clean = String(name).trim();","return clean || FALLBACK;"]}]}`
+-# Whole function replacement: anchor on a body line:
+-`{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();" "[" "]"}},splice:["export function label(name) {","\treturn String(name ?? FALLBACK).trim().toLowerCase();","}"]}]}`
+-# WRONG: bare-anchor `splice` does not own neighboring lines:
++# Replace several consecutive lines: anchor the first line and list all replacement lines in `splice`.
++`{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;"}},splice:["\tconst clean = String(name ?? FALLBACK).trim();","\treturn clean.toLowerCase();","}"]}]}`
++This anchors line 4 and replaces lines 4-6 of the original function body in one splice. The anchor's hash protects against the file having shifted under you.
++# WRONG: bare-anchor `splice` only owns the anchored line. If you list 2 replacement lines, you replace 1 line with 2 — the original line 5 still shifts down.
+ `{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;"}},splice:["\tconst clean = String(name ?? FALLBACK).trim();","\treturn clean.toLowerCase();"]}]}`
+-This replaces only line 4. Original line 5 still shifts down, so the function now has two returns.
+-# RIGHT: use a body edit for that rewrite:
+-`{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;" "(" ")"}},splice:["const clean = String(name ?? FALLBACK).trim();","return clean.toLowerCase();"]}]}`
++This produces a function with two `return` statements. To replace lines 4 and 5 together, include the original line 6 (`}`) so the splice covers all the lines you intend to replace.
+ </examples>
+ 
+ <critical>
+ - You **MUST** copy full anchors exactly from a read op (e.g. `160sr`); you **MUST NOT** send only the 2-letter suffix.
+ - You **MUST** make the minimum exact edit; you **MUST NOT** reformat unrelated code.
+-- A bare anchor **MUST** target one line only; you **MUST** use bracketed `splice` for balanced block rewrites.
++- A bare anchor owns exactly one line. To replace N lines, anchor the first one and list all N replacement lines in `splice`.
+ - You **MUST NOT** include unchanged adjacent lines in `splice`/`pre`/`post`; they shift and duplicate.
+-- For bracketed `splice`, replacement braces **MUST** be balanced for the selected region.
+ </critical>
+diff --git a/packages/coding-agent/test/core/atom.test.ts b/packages/coding-agent/test/core/atom.test.ts
+index f5bdbcb82..93ac06aa5 100644
+--- a/packages/coding-agent/test/core/atom.test.ts
++++ b/packages/coding-agent/test/core/atom.test.ts
+@@ -89,6 +89,18 @@ describe("atom edit schema", () => {
+ 	it("rejects sub edits", () => {
+ 		expect(Value.Check(atomEditSchema, { loc: "1ab", sub: ["5000", "30_000"] })).toBe(false);
+ 	});
++
++	it("rejects bracketed loc forms (no longer supported)", () => {
++		// `(A)` and `[A]` were dropped — they are valid at the schema level
++		// (loc is a string) but the runtime parser rejects anything that isn't
++		// a bare anchor or `$`.
++		expect(() => resolveAtomToolEdit({ loc: "(2ab)", splice: ["X"] })).toThrow();
++		expect(() => resolveAtomToolEdit({ loc: "[2ab]", splice: ["X"] })).toThrow();
++	});
++
++	it("rejects sed-shaped replace specs", () => {
++		expect(Value.Check(atomEditSchema, { loc: "1ab", sed: { pat: "x", rep: "y" } })).toBe(false);
++	});
+ });
+ 
+ describe("resolveAtomToolEdit — loc syntax", () => {
+@@ -110,37 +122,49 @@ describe("resolveAtomToolEdit — loc syntax", () => {
+ 		expect(result.lines).toBe("ZZZ\naaa\nbbb");
+ 	});
+ 
+-	it('loc:"$" + sed substitutes across all lines', () => {
++	it('loc:"$" + replace substitutes across all lines', () => {
+ 		const content = "aaa\nfoo\nbar foo";
+-		const resolved = resolveAtomToolEdit({ loc: "$", sed: { pat: "foo", rep: "FOO" } });
++		const resolved = resolveAtomToolEdit({ loc: "$", replace: { find: "foo", with: "FOO" } });
+ 		expect(resolved).toHaveLength(1);
+-		expect(resolved[0]?.op).toBe("sed_file");
++		expect(resolved[0]?.op).toBe("replace_file");
+ 		const result = applyAtomEdits(content, resolved);
+ 		expect(result.lines).toBe("aaa\nFOO\nbar FOO");
+ 	});
+ 
+-	it('loc:"$" + sed preserves trailing newline', () => {
++	it('loc:"$" + replace with all:true substitutes every occurrence', () => {
++		const content = "aaa\nfoo foo\nbar foo";
++		const resolved = resolveAtomToolEdit({ loc: "$", replace: { find: "foo", with: "FOO", all: true } });
++		const result = applyAtomEdits(content, resolved);
++		expect(result.lines).toBe("aaa\nFOO FOO\nbar FOO");
++	});
++
++	it('loc:"$" + replace preserves trailing newline', () => {
+ 		const content = "aaa\nbbb\n";
+-		const resolved = resolveAtomToolEdit({ loc: "$", sed: { pat: "bbb", rep: "BBB" } });
++		const resolved = resolveAtomToolEdit({ loc: "$", replace: { find: "bbb", with: "BBB" } });
+ 		const result = applyAtomEdits(content, resolved);
+ 		expect(result.lines).toBe("aaa\nBBB\n");
+ 	});
+ 
+-	it('loc:"$" + sed throws when no line matches', () => {
++	it('loc:"$" + replace throws when no line matches', () => {
+ 		const content = "aaa\nbbb";
+-		const resolved = resolveAtomToolEdit({ loc: "$", sed: { pat: "zzz", rep: "yyy" } });
++		const resolved = resolveAtomToolEdit({ loc: "$", replace: { find: "zzz", with: "yyy" } });
+ 		expect(() => applyAtomEdits(content, resolved)).toThrow(/did not match any line/);
+ 	});
+ 
+-	it('loc:"$" + pre + post + sed combined', () => {
++	it('loc:"$" + pre + post + replace combined', () => {
+ 		const content = "aaa\nbbb";
+-		const resolved = resolveAtomToolEdit({ loc: "$", pre: ["PRE"], sed: { pat: "bbb", rep: "BBB" }, post: ["POST"] });
++		const resolved = resolveAtomToolEdit({
++			loc: "$",
++			pre: ["PRE"],
++			replace: { find: "bbb", with: "BBB" },
++			post: ["POST"],
++		});
+ 		const result = applyAtomEdits(content, resolved);
+ 		expect(result.lines).toBe("PRE\naaa\nBBB\nPOST");
+ 	});
+ 
+ 	it('loc:"$" rejects splice', () => {
+-		expect(() => resolveAtomToolEdit({ loc: "$", splice: ["X"] })).toThrow(/supports pre, post, and sed/);
++		expect(() => resolveAtomToolEdit({ loc: "$", splice: ["X"] })).toThrow(/supports pre, post, and replace/);
+ 	});
+ 
+ 	it('loc:"^" is no longer supported', () => {
+@@ -189,6 +213,28 @@ describe("resolveAtomToolEdit — loc syntax", () => {
+ 		expect(resolved[0]?.path).toBe("a.ts");
+ 		expect(resolved[0]?.loc).toBe("1ab");
+ 	});
++
++	it("accepts a content-suffix anchor and uses it for hint-based rebase", () => {
++		// Models sometimes paste line content after the anchor, e.g.
++		// `loc: "82zu|  for (let i = 0; i--; ...) {"`. The bare `--` in the content
++		// must not break parsing.
++		const content = "alpha\nbravo\ncharlie";
++		const loc = `2${computeLineHash(2, "bravo")}|  for (let i = 0; i--; ...) {`;
++		const resolved = resolveAtomToolEdit({ loc, splice: ["BRAVO"] });
++		const result = applyAtomEdits(content, resolved);
++		expect(result.lines).toBe("alpha\nBRAVO\ncharlie");
++	});
++
++	it("resolveAtomEntryPaths peels off path even when the loc content suffix contains colons", () => {
++		// Mimics a real failure: model wrote `image-input.ts:263ti| " const data: x"`.
++		// `lastIndexOf(":")` would have picked the colon inside `data:` and broken the split.
++		const [resolved] = resolveAtomEntryPaths(
++			[{ loc: 'image-input.ts:263ti| " const data: x"', replace: { find: "x", with: "y" } }],
++			undefined,
++		);
++		expect(resolved?.path).toBe("image-input.ts");
++		expect(resolved?.loc).toBe('263ti| " const data: x"');
++	});
+ });
+ 
+ describe("applyAtomEdits — out of range", () => {
+@@ -235,165 +281,101 @@ describe("parseAnchor (atom tolerant) + applyAtomEdits", () => {
+ 		expect(() => resolveAtomToolEdit(toolEdit)).toThrow(/Could not find a line number/);
+ 	});
+ });
+-describe("atom range locators", () => {
+-	it("resolveAtomToolEdit rejects range loc with splice", () => {
+-		expect(() => resolveAtomToolEdit({ loc: "1xx-4yy", splice: ["X"] })).toThrow(/does not support line ranges/);
+-	});
+ 
+-	it("resolveAtomToolEdit rejects range loc even when the verb would otherwise be valid", () => {
+-		expect(() => resolveAtomToolEdit({ loc: "1xx-4yy", pre: ["X"] })).toThrow(/does not support line ranges/);
+-	});
+-
+-	it("resolveAtomEntryPaths still peels off a path override before range validation", () => {
+-		const [resolved] = resolveAtomEntryPaths([{ loc: "a.ts:1xx-4yy", splice: ["X"] }], undefined);
+-		expect(resolved?.path).toBe("a.ts");
+-		expect(resolved?.loc).toBe("1xx-4yy");
+-		expect(() => resolveAtomToolEdit(resolved!)).toThrow(/does not support line ranges/);
+-	});
+-
+-	it("accepts a single anchor even when the line content contains `--`", () => {
+-		// Models sometimes paste line content after the anchor, e.g.
+-		// `loc: "82zu|  for (let i = 0; i--; ...) {"`. The bare `--` in the content
+-		// must not be mistaken for range syntax.
+-		const content = "alpha\nbravo\ncharlie";
+-		const loc = `2${computeLineHash(2, "bravo")}|  for (let i = 0; i--; ...) {`;
+-		const resolved = resolveAtomToolEdit({ loc, splice: ["BRAVO"] });
++describe("applyAtomEdits — replace", () => {
++	it("applies a literal substring substitution to the anchored line (first occurrence by default)", () => {
++		const content = "aaa\nfoo bar foo\nccc";
++		const loc = `2${computeLineHash(2, "foo bar foo")}`;
++		const resolved = resolveAtomToolEdit({ loc, replace: { find: "foo", with: "baz" } });
++		expect(resolved[0]?.op).toBe("replace");
+ 		const result = applyAtomEdits(content, resolved);
+-		expect(result.lines).toBe("alpha\nBRAVO\ncharlie");
++		expect(result.lines).toBe("aaa\nbaz bar foo\nccc");
+ 	});
+ 
+-	it("resolveAtomEntryPaths peels off path even when the loc content suffix contains colons", () => {
+-		// Mimics a real failure: model wrote `image-input.ts:263ti| " const data: x"`.
+-		// `lastIndexOf(":")` would have picked the colon inside `data:` and broken the split.
+-		const [resolved] = resolveAtomEntryPaths(
+-			[{ loc: 'image-input.ts:263ti| " const data: x"', sed: { pat: "x", rep: "y" } }],
+-			undefined,
+-		);
+-		expect(resolved?.path).toBe("image-input.ts");
+-		expect(resolved?.loc).toBe('263ti| " const data: x"');
+-	});
+-});
+-
+-describe("applyAtomEdits — sed", () => {
+-	it("applies a regex substitution to the anchored line (non-global by default)", () => {
+-		const content = "aaa\nfoo bar\nccc";
+-		const loc = `2${computeLineHash(2, "foo bar")}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "foo", rep: "baz" } });
+-		expect(resolved[0]?.op).toBe("sed");
+-		const result = applyAtomEdits(content, resolved);
+-		expect(result.lines).toBe("aaa\nbaz bar\nccc");
+-	});
+-
+-	it("non-global is the default and `g: true` enables global replacement", () => {
++	it("`all: true` replaces every occurrence on the line", () => {
+ 		const content = "foo foo foo";
+ 		const loc = `1${computeLineHash(1, "foo foo foo")}`;
+-		const first = resolveAtomToolEdit({ loc, sed: { pat: "foo", rep: "bar" } });
++		const first = resolveAtomToolEdit({ loc, replace: { find: "foo", with: "bar" } });
+ 		expect(applyAtomEdits(content, first).lines).toBe("bar foo foo");
+-		const all = resolveAtomToolEdit({ loc, sed: { pat: "foo", rep: "bar", g: true } });
++		const all = resolveAtomToolEdit({ loc, replace: { find: "foo", with: "bar", all: true } });
+ 		expect(applyAtomEdits(content, all).lines).toBe("bar bar bar");
+ 	});
+ 
+-	it("replaces with regex-meta-free patterns", () => {
+-		const content = "path = /usr/local/bin";
+-		const loc = `1${computeLineHash(1, "path = /usr/local/bin")}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "/usr/local", rep: "/opt" } });
++	it("treats regex metacharacters as literal", () => {
++		// `(a, b)` would be a capture group in regex; here it must match the
++		// literal parens in the source line.
++		const content = "return wrap(foo(a, b));";
++		const loc = `1${computeLineHash(1, content)}`;
++		const resolved = resolveAtomToolEdit({ loc, replace: { find: "foo(a, b)", with: "foo(b, a)" } });
+ 		const result = applyAtomEdits(content, resolved);
+-		expect(result.lines).toBe("path = /opt/bin");
++		expect(result.lines).toBe("return wrap(foo(b, a));");
+ 	});
+ 
+-	it("throws when pattern does not match the anchor line", () => {
++	it("treats unbalanced parens as literal characters, not as a regex error", () => {
++		const content = "x = bar());";
++		const loc = `1${computeLineHash(1, content)}`;
++		const resolved = resolveAtomToolEdit({ loc, replace: { find: "bar())", with: "baz()" } });
++		const result = applyAtomEdits(content, resolved);
++		expect(result.lines).toBe("x = baz();");
++	});
++
++	it("throws when the literal substring is not present on the anchor line", () => {
+ 		const content = "aaa\nbbb";
+ 		const loc = `2${computeLineHash(2, "bbb")}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "zzz", rep: "yyy" } });
++		const resolved = resolveAtomToolEdit({ loc, replace: { find: "zzz", with: "yyy" } });
+ 		expect(() => applyAtomEdits(content, resolved)).toThrow(/did not match line 2/);
+ 	});
+ 
+ 	it("combines with pre and post on the same anchor", () => {
+ 		const content = "aaa\nfoo\nccc";
+ 		const loc = `2${computeLineHash(2, "foo")}`;
+-		const resolved = resolveAtomToolEdit({ loc, pre: ["BEFORE"], sed: { pat: "foo", rep: "FOO" }, post: ["AFTER"] });
++		const resolved = resolveAtomToolEdit({
++			loc,
++			pre: ["BEFORE"],
++			replace: { find: "foo", with: "FOO" },
++			post: ["AFTER"],
++		});
+ 		const result = applyAtomEdits(content, resolved);
+ 		expect(result.lines).toBe("aaa\nBEFORE\nFOO\nAFTER\nccc");
+ 	});
+ 
+-	it("prefers splice when sed is also present on the same anchor", () => {
++	it("prefers splice when replace is also present on the same anchor", () => {
+ 		const content = "aaa\nfoo\nccc";
+ 		const loc = `2${computeLineHash(2, "foo")}`;
+-		const resolved = resolveAtomToolEdit({ loc, splice: ["X"], sed: { pat: "foo", rep: "Y" } });
++		const resolved = resolveAtomToolEdit({ loc, splice: ["X"], replace: { find: "foo", with: "Y" } });
+ 		// Models sometimes duplicate intent on the same line; the explicit `splice`
+-		// wins and the redundant `sed` is dropped silently.
++		// wins and the redundant `replace` is dropped silently.
+ 		const result = applyAtomEdits(content, resolved);
+ 		expect(result.lines).toBe("aaa\nX\nccc");
+ 	});
+ 
+-	it("falls back to literal substring when regex parens consume incorrectly", () => {
+-		// Pattern `foo(a, b)` is valid regex but the `(a, b)` group does not match
+-		// the literal parens in the line. Falling back to literal lets the obvious
+-		// intent succeed.
+-		const content = "return wrap(foo(a, b));";
+-		const loc = `1${computeLineHash(1, content)}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "foo(a, b)", rep: "foo(b, a)" } });
+-		const result = applyAtomEdits(content, resolved);
+-		expect(result.lines).toBe("return wrap(foo(b, a));");
+-		expect(result.warnings?.some(w => w.includes("literal substring substitution"))).toBe(true);
+-	});
+-
+-	it("falls back to literal substring when regex fails to compile", () => {
+-		// Unbalanced `)` is invalid regex; literal fallback recovers.
+-		const content = "x = bar());";
+-		const loc = `1${computeLineHash(1, content)}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "bar())", rep: "baz()" } });
+-		const result = applyAtomEdits(content, resolved);
+-		expect(result.lines).toBe("x = baz();");
+-	});
+-
+-	it("reports compile error when literal fallback also misses", () => {
+-		const content = "hello world";
+-		const loc = `1${computeLineHash(1, content)}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "zzz)", rep: "baz" } });
+-		expect(() => applyAtomEdits(content, resolved)).toThrow(/rejected/);
+-	});
+-
+-	it("treats empty `splice: []` as no-op when paired with sed", () => {
++	it("treats empty `splice: []` as no-op when paired with replace", () => {
+ 		const content = "aaa\nfoo\nccc";
+ 		const loc = `2${computeLineHash(2, "foo")}`;
+-		const resolved = resolveAtomToolEdit({ loc, splice: [], sed: { pat: "foo", rep: "FOO" } });
++		const resolved = resolveAtomToolEdit({ loc, splice: [], replace: { find: "foo", with: "FOO" } });
+ 		const result = applyAtomEdits(content, resolved);
+ 		expect(result.lines).toBe("aaa\nFOO\nccc");
+ 	});
+ 
+-	it("zero-length regex matches fall through to literal substring fallback", () => {
+-		// `pat: "()"` matches an empty string as regex; instead of erroring we treat it
+-		// as the model meaning the literal characters `()`. On a line without those
+-		// characters that surfaces as a normal "did not match" error.
+-		const content = "hello world";
+-		const loc = `1${computeLineHash(1, content)}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "()", rep: "X" } });
+-		expect(() => applyAtomEdits(content, resolved)).toThrow(/did not match line/);
+-	});
+-
+-	it("zero-length regex falls through to literal substring fallback when the literal exists", () => {
+-		const content = "call(); foo()";
+-		const loc = `1${computeLineHash(1, content)}`;
+-		const resolved = resolveAtomToolEdit({ loc, sed: { pat: "()", rep: "(arg)", g: true } });
+-		const result = applyAtomEdits(content, resolved);
+-		expect(result.lines).toBe("call(arg); foo(arg)");
+-	});
+-
+-	it("rejects sed.pat containing a newline with a splice hint", () => {
++	it("rejects replace.find containing a newline with a splice hint", () => {
+ 		const loc = "1ab";
+-		expect(() => resolveAtomToolEdit({ loc, sed: { pat: "a\nb", rep: "x" } })).toThrow(
++		expect(() => resolveAtomToolEdit({ loc, replace: { find: "a\nb", with: "x" } })).toThrow(
+ 			/must be a single line.*splice/,
+ 		);
+ 	});
+ 
++	it("rejects replace.with containing a newline", () => {
++		const loc = "1ab";
++		expect(() => resolveAtomToolEdit({ loc, replace: { find: "a", with: "x\ny" } })).toThrow(/must be a single line/);
++	});
++
+ 	it("drops cross-entry `del` when another edit replaces the same anchor", () => {
+-		// Models sometimes emit a `splice: []` cleanup alongside a `sed`/`splice` that
++		// Models sometimes emit a `splice: []` cleanup alongside a `replace`/`splice` that
+ 		// already replaces the line. Prefer the replacement and silently drop the del.
+ 		const content = "aaa\nfoo\nccc";
+ 		const loc = `2${computeLineHash(2, "foo")}`;
+ 		const edits = [
+-			...resolveAtomToolEdit({ loc, sed: { pat: "foo", rep: "FOO" } }),
++			...resolveAtomToolEdit({ loc, replace: { find: "foo", with: "FOO" } }),
+ 			...resolveAtomToolEdit({ loc, splice: [] }),
+ 		];
+ 		const result = applyAtomEdits(content, edits);
+diff --git a/packages/coding-agent/test/core/splice-block-bugs.test.ts b/packages/coding-agent/test/core/splice-block-bugs.test.ts
+deleted file mode 100644
+index 77dc63901..000000000
+--- a/packages/coding-agent/test/core/splice-block-bugs.test.ts
++++ /dev/null
+@@ -1,95 +0,0 @@
+-/**
+- * Repro tests for the four `splice_block` defects surfaced by the
+- * fixture-run review (omp-fixture-runs-20260426-235127). Each test guards
+- * the repaired behavior.
+- */
+-import { describe, expect, it } from "bun:test";
+-import { type AtomEdit, applyAtomEdits, computeLineHash } from "@oh-my-pi/pi-coding-agent/edit";
+-import type { Anchor } from "@oh-my-pi/pi-coding-agent/edit/modes/hashline";
+-
+-function tag(line: number, content: string): Anchor {
+-	return { line, hash: computeLineHash(line, content) };
+-}
+-
+-describe("BUG 1 — [anchor] must replace the whole node", () => {
+-	it("does not double the declaration line", () => {
+-		const content = ["class C {", "\tisRunning(): boolean {", "\t\treturn this.running;", "\t}", "}", ""].join("\n");
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\t\treturn this.running;"),
+-				spec: { body: ["isRunning(): boolean {", "\treturn this._running;", "}"], kind: "{" },
+-				bracket: "node",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		const lines = result.lines.split("\n");
+-		const sigLines = lines.filter(l => l.includes("isRunning(): boolean"));
+-		expect(sigLines).toHaveLength(1);
+-		expect(result.lines).not.toMatch(/isRunning\(\): boolean\s+isRunning\(\): boolean/);
+-	});
+-});
+-
+-describe("BUG 2 — false-positive unbalanced-`{` warning", () => {
+-	it("does not warn when post-edit file is syntactically valid (JS regex literal)", () => {
+-		const content = ["function f() {", "\tconst re = /[{]/g;", "\treturn re.test(s);", "}", ""].join("\n");
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\treturn re.test(s);"),
+-				spec: { body: ["return Boolean(re.exec(s));"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		const imbalanceWarnings = (result.warnings ?? []).filter(w => w.includes("unbalanced"));
+-		expect(imbalanceWarnings).toEqual([]);
+-	});
+-});
+-
+-describe("BUG 3 — splice_block must surface the chosen block range", () => {
+-	it("surfaces the chosen block range so callers can verify intent", () => {
+-		const content = [
+-			"func Dispatch() error {",
+-			"\tvar errs []error",
+-			"\tfor _, sink := range sinks {",
+-			"\t\tif err := sink.Write(); err != nil {",
+-			"\t\t\terrs = append(errs, err)",
+-			"\t\t}",
+-			"\t}",
+-			"\tif len(errs) == 0 {",
+-			"\t\treturn nil",
+-			"\t}",
+-			"\treturn errors.Join(errs...)",
+-			"}",
+-			"",
+-		].join("\n");
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(11, "\treturn errors.Join(errs...)"),
+-				spec: { body: ["return joinAll(errs)"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		const hint = (result.warnings ?? []).find(w => /splice locator.*replaced.*lines? \d+/i.test(w));
+-		expect(hint).toBeDefined();
+-	});
+-});
+-
+-describe("BUG 4 — kind:'(' must work on single-line calls", () => {
+-	it("finds a same-line `(` block by anchor on that line", () => {
+-		const content = ["def make():", "\treturn Config(host=host.strip(), port=int(port))", ""].join("\n");
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(2, "\treturn Config(host=host.strip(), port=int(port))"),
+-				spec: { body: ["host=host, port=port"], kind: "(" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		expect(result.lines).toContain("Config(host=host, port=port)");
+-	});
+-});
+diff --git a/packages/coding-agent/test/core/splice-block.test.ts b/packages/coding-agent/test/core/splice-block.test.ts
+deleted file mode 100644
+index ad15f5cb8..000000000
+--- a/packages/coding-agent/test/core/splice-block.test.ts
++++ /dev/null
+@@ -1,251 +0,0 @@
+-import { describe, expect, it } from "bun:test";
+-import { type AtomEdit, applyAtomEdits, computeLineHash, resolveAtomToolEdit } from "@oh-my-pi/pi-coding-agent/edit";
+-import type { Anchor } from "@oh-my-pi/pi-coding-agent/edit/modes/hashline";
+-
+-function tag(line: number, content: string): Anchor {
+-	return { line, hash: computeLineHash(line, content) };
+-}
+-
+-describe("splice_block — single-line block", () => {
+-	it("stays inline when body is one line", () => {
+-		const content = "function foo(): number { return 1; }\n";
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(1, "function foo(): number { return 1; }"),
+-				spec: { body: ["return 42;"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		expect(result.lines).toBe("function foo(): number { return 42; }\n");
+-	});
+-
+-	it("expands when body is multi-line", () => {
+-		const content = "function foo() { return 1; }\n";
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(1, "function foo() { return 1; }"),
+-				spec: { body: ["if (cond) {", "    return 0;", "}", "return 1;"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		expect(result.lines).toContain("function foo() {");
+-		expect(result.lines).toContain("if (cond) {");
+-		expect(result.lines).toContain("return 1;");
+-		expect(result.lines.split("\n").pop()).toBe("");
+-	});
+-});
+-
+-describe("splice_block — multi-line block", () => {
+-	const content = ["function bar(x: number) {", "\tif (x > 0) {", "\t\treturn x;", "\t}", "\treturn 0;", "}", ""].join(
+-		"\n",
+-	);
+-
+-	it("replaces the innermost { } when anchor is inside the inner block", () => {
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\t\treturn x;"),
+-				spec: { body: ["return x * 2;"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		expect(result.lines).toContain("\t\treturn x * 2;");
+-		expect(result.lines).not.toContain("\t\treturn x;\n");
+-	});
+-});
+-
+-describe("splice_block — indent normalization", () => {
+-	it("strips agent's common indent and applies destination indent", () => {
+-		const content = ["function f() {", "\treturn 1;", "}", ""].join("\n");
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(2, "\treturn 1;"),
+-				spec: { body: ["    if (cond) {", "        return 0;", "    }", "    return 2;"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		expect(result.lines).toContain("\treturn 2;");
+-		expect(result.lines).toContain("\tif (cond) {");
+-	});
+-});
+-
+-describe("splice_block — validation", () => {
+-	it("rejects when no enclosing block contains the line", () => {
+-		const content = "const x = 1;\nconst y = 2;\n";
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(1, "const x = 1;"),
+-				spec: { body: ["..."], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		expect(() => applyAtomEdits(content, edits)).toThrow(/No enclosing/);
+-	});
+-
+-	it("rejects when body has unbalanced delimiters of the chosen kind", () => {
+-		const content = "function f() {\n\treturn 1;\n}\n";
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(2, "\treturn 1;"),
+-				spec: { body: ["return 1;", "}"], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		expect(() => applyAtomEdits(content, edits)).toThrow(/unbalanced/);
+-	});
+-});
+-
+-describe("splice_block — locator forms", () => {
+-	const content = [
+-		"function split() {",
+-		"\tconst a = 1;",
+-		"\tconst b = 2;",
+-		"\tconst c = 3;",
+-		"\treturn a + b + c;",
+-		"}",
+-		"",
+-	].join("\n");
+-
+-	it("replaces the tail from anchor through closer with [anchor", () => {
+-		const result = applyAtomEdits(content, [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\tconst b = 2;"),
+-				spec: { body: ["return a;"], kind: "{" },
+-				bracket: "left_incl",
+-			},
+-		]);
+-		expect(result.lines.split("\n")).toEqual(["function split() {", "\tconst a = 1;", "\treturn a;", "}", ""]);
+-	});
+-
+-	it("replaces the tail after anchor with (anchor", () => {
+-		const result = applyAtomEdits(content, [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\tconst b = 2;"),
+-				spec: { body: ["return b;"], kind: "{" },
+-				bracket: "left_excl",
+-			},
+-		]);
+-		expect(result.lines.split("\n")).toEqual([
+-			"function split() {",
+-			"\tconst a = 1;",
+-			"\tconst b = 2;",
+-			"\treturn b;",
+-			"}",
+-			"",
+-		]);
+-	});
+-
+-	it("replaces the head through anchor with anchor]", () => {
+-		const result = applyAtomEdits(content, [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\tconst b = 2;"),
+-				spec: { body: ["const z = 0;"], kind: "{" },
+-				bracket: "right_incl",
+-			},
+-		]);
+-		expect(result.lines.split("\n")).toEqual([
+-			"function split() {",
+-			"\tconst z = 0;",
+-			"\tconst c = 3;",
+-			"\treturn a + b + c;",
+-			"}",
+-			"",
+-		]);
+-	});
+-
+-	it("replaces the head before anchor with anchor)", () => {
+-		const result = applyAtomEdits(content, [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\tconst b = 2;"),
+-				spec: { body: ["const z = 0;"], kind: "{" },
+-				bracket: "right_excl",
+-			},
+-		]);
+-		expect(result.lines.split("\n")).toEqual([
+-			"function split() {",
+-			"\tconst z = 0;",
+-			"\tconst b = 2;",
+-			"\tconst c = 3;",
+-			"\treturn a + b + c;",
+-			"}",
+-			"",
+-		]);
+-	});
+-});
+-
+-describe("splice (bracketed locator) \u2014 resolveAtomToolEdit", () => {
+-	it("resolves bare anchor + splice as a line splice op (not splice_block)", () => {
+-		const resolved = resolveAtomToolEdit({
+-			loc: "2gj|\treturn 1;",
+-			splice: ["return 2;"],
+-		});
+-		expect(resolved).toHaveLength(1);
+-		expect(resolved[0]?.op).toBe("splice");
+-	});
+-
+-	it("resolves (anchor) bracket as splice_block region (body scope)", () => {
+-		const resolved = resolveAtomToolEdit({ loc: "(2gj|\treturn 1;)", splice: ["return 2;"] }, 0, "foo.ts");
+-		expect(resolved).toHaveLength(1);
+-		const op = resolved[0]!;
+-		expect(op.op).toBe("splice_block");
+-		if (op.op === "splice_block") {
+-			expect(op.bracket).toBe("body");
+-			expect(op.spec.kind).toBe("{");
+-		}
+-	});
+-
+-	it("resolves [anchor] bracket as splice_block region (whole node)", () => {
+-		const resolved = resolveAtomToolEdit({ loc: "[2gj|\treturn 1;]", splice: ["function f() {}"] }, 0, "foo.ts");
+-		const op = resolved[0]!;
+-		expect(op.op).toBe("splice_block");
+-		if (op.op === "splice_block") expect(op.bracket).toBe("node");
+-	});
+-
+-	it("rejects mixed bracket locator forms", () => {
+-		expect(() => resolveAtomToolEdit({ loc: "(2gj]", splice: ["x"] })).toThrow(/mixed bracket/);
+-	});
+-
+-	it("rejects bracket locators paired with pre/post/sed", () => {
+-		expect(() => resolveAtomToolEdit({ loc: "[2gj", pre: ["x"] })).toThrow(/splice-only/);
+-	});
+-
+-	it("rejects bracket locator without splice", () => {
+-		expect(() => resolveAtomToolEdit({ loc: "[2gj" } as never)).toThrow(/missing verb|requires/);
+-	});
+-
+-	it("defaults delimiter to '{' when no path is provided", () => {
+-		const resolved = resolveAtomToolEdit({ loc: "[2gj|\treturn 1;]", splice: ["x"] });
+-		const op = resolved[0]!;
+-		if (op.op === "splice_block") expect(op.spec.kind).toBe("{");
+-	});
+-});
+-
+-describe("splice_block — string/comment safety", () => {
+-	it("ignores braces inside strings when finding the enclosing block", () => {
+-		const content = ["function f() {", '\tconst s = "{}";', "\treturn s;", "}", ""].join("\n");
+-		const edits: AtomEdit[] = [
+-			{
+-				op: "splice_block",
+-				pos: tag(3, "\treturn s;"),
+-				spec: { body: ['return "replaced";'], kind: "{" },
+-				bracket: "body",
+-			},
+-		];
+-		const result = applyAtomEdits(content, edits);
+-		expect(result.lines).toContain('return "replaced";');
+-		expect(result.lines.split("\n")).toEqual(["function f() {", '\treturn "replaced";', "}", ""]);
+-	});
+-});
