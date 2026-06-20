@@ -294,14 +294,51 @@ pub fn parse_summary_output(text: &str) -> Result<serde_json::Value> {
    Ok(serde_json::json!({ "summary": summary_text }))
 }
 
+/// Strip one balanced leading markdown emphasis or quote wrapper from `s`
+/// (`**x**`, `__x__`, `*x*`, `_x_`, `` `x` ``, `"x"`, or smart quotes),
+/// returning the unwrapped inner token and the trailing remainder (both
+/// trimmed). When `s` has no recognized leading wrapper, returns
+/// `(s.trim(), "")`.
+fn unwrap_leading_marker(s: &str) -> (&str, &str) {
+   let s = s.trim();
+   for marker in ["**", "__", "*", "_", "`", "\""] {
+      if let Some(rest) = s.strip_prefix(marker)
+         && let Some(end) = rest.find(marker)
+      {
+         return (rest[..end].trim(), rest[end + marker.len()..].trim());
+      }
+   }
+   for (open, close) in [("\u{201c}", "\u{201d}"), ("\u{2018}", "\u{2019}")] {
+      if let Some(rest) = s.strip_prefix(open)
+         && let Some(end) = rest.find(close)
+      {
+         return (rest[..end].trim(), rest[end + close.len()..].trim());
+      }
+   }
+   (s, "")
+}
+
 /// Parse markdown changelog format.
 ///
-/// Lenient: tolerates code fences, headers as `#`/`##`/`###` or bare
-/// `Category:` lines, and bullet glyph variations. Recognized categories are
-/// matched case-insensitively; unknown `#` headers are still accepted verbatim.
+/// Lenient: tolerates code fences, headers as `#`/`##`/`###`, bare
+/// `Category` / `Category:` lines, and emphasis/quote-wrapped headers
+/// (`**Added**`, `*Fixed*`, `"Security"`). A `Category: text` line (with or
+/// without emphasis, e.g. `Fixed: …` or `**Fixed:** …`) is treated as a header
+/// plus an inline entry. Recognized categories are matched case-insensitively
+/// (`Breaking`/`Breaking Changes` both accepted); unknown `#` headers are kept
+/// verbatim. A bare multi-word line that merely *starts* with a category word
+/// (e.g. `Added rate limiting`) stays an entry, not a header.
 pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
-   const KNOWN: [&str; 7] =
-      ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security", "Breaking"];
+   const KNOWN: [&str; 8] = [
+      "Added",
+      "Changed",
+      "Fixed",
+      "Deprecated",
+      "Removed",
+      "Security",
+      "Breaking",
+      "Breaking Changes",
+   ];
 
    let unfenced = strip_fences(text);
 
@@ -316,29 +353,61 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
          .map(|k| (*k).to_string())
    };
 
+   // Detect a category header in `raw` (a line with any leading `#` already
+   // stripped, or a bare line). Returns the canonical category plus any inline
+   // entry that followed a `Category:` / `**Category:**` prefix. Bare lines
+   // must resolve to a *known* category so ordinary entries stay entries.
+   let detect_category = |raw: &str| -> Option<(String, Option<String>)> {
+      let trimmed = raw.trim();
+
+      // Leading emphasis/quote wrapper (or a plain bare category with none):
+      // `Added`, `**Added**`, `**Added:** text`, `*Fixed*`, `"Security"`.
+      let (lead, remainder) = unwrap_leading_marker(trimmed);
+      if let Some(cat) = canonical(lead) {
+         let inline = remainder.trim_start_matches(':').trim();
+         return Some((cat, (!inline.is_empty()).then(|| inline.to_string())));
+      }
+
+      // Plain `Category: inline entry` (no wrapper).
+      if let Some((before, after)) = trimmed.split_once(':')
+         && let Some(cat) = canonical(before)
+      {
+         let after = after.trim();
+         return Some((cat, (!after.is_empty()).then(|| after.to_string())));
+      }
+
+      None
+   };
+
    for line in unfenced.lines() {
       let trimmed_line = line.trim();
       if trimmed_line.is_empty() {
          continue; // tolerate any number of blank/whitespace lines
       }
 
-      // Header detection:
-      //  - `#`/`##`/`###` prefixed line (any text), or
-      //  - a bare line that *exactly* equals a known category (with optional trailing
-      //    `:`), e.g. `Added`, `Added:` — but NOT `Added rate limiting`.
-      let header = if trimmed_line.starts_with('#') {
-         let h = trimmed_line
-            .trim_start_matches('#')
-            .trim()
-            .trim_end_matches(':')
-            .trim();
-         Some(canonical(h).unwrap_or_else(|| h.to_string()))
-      } else {
-         canonical(trimmed_line)
-      };
+      // `#`/`##`/`###` heading: always a header (unknown ones kept verbatim).
+      if let Some(after_hash) = trimmed_line.strip_prefix('#') {
+         let h = after_hash.trim_start_matches('#').trim();
+         let (cat, inline) = detect_category(h)
+            .unwrap_or_else(|| (h.trim_end_matches(':').trim().to_string(), None));
+         if let Some(entry) = inline {
+            entries.entry(cat.clone()).or_default().push(entry);
+         }
+         current_category = Some(cat);
+         continue;
+      }
 
-      if let Some(h) = header {
-         current_category = Some(h);
+      // Category header, bullet/emphasis/quote tolerant, with an optional
+      // inline entry: `Added`, `Added:`, `**Added**`, `**Fixed:** text`,
+      // `- Removed: flag`. A bulleted line is probed de-bulleted so an
+      // all-bulleted `- Category: entry` list still parses; `Added rate
+      // limiting` (no colon, multi-word) falls through and stays an entry.
+      let probe = bullet_content(trimmed_line).unwrap_or(trimmed_line);
+      if let Some((cat, inline)) = detect_category(probe) {
+         if let Some(entry) = inline {
+            entries.entry(cat.clone()).or_default().push(entry);
+         }
+         current_category = Some(cat);
          continue;
       }
 
@@ -347,17 +416,16 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
       if let Some(cat) = &current_category
          && !entry.is_empty()
       {
-         entries
-            .entry(cat.clone())
-            .or_default()
-            .push(entry.to_string());
+         entries.entry(cat.clone()).or_default().push(entry.to_string());
       }
    }
 
    if entries.is_empty() {
-      return Err(CommitGenError::Other(
-         "markdown changelog: no entries found (format: ## Category\\n- entry)".to_string(),
-      ));
+      let preview: String = unfenced.chars().take(200).collect();
+      return Err(CommitGenError::Other(format!(
+         "markdown changelog: no entries found (expected `## Category` then `- entry`); got: {}",
+         preview.replace('\n', "\\n")
+      )));
    }
 
    Ok(serde_json::json!({ "entries": entries }))
@@ -741,6 +809,72 @@ mod tests {
       assert!(e.contains_key("Security"));
       assert!(!e.contains_key("Added"));
       assert_eq!(e["Security"][0], "Added rate limiting on auth endpoints");
+   }
+
+   #[test]
+   fn test_changelog_emphasized_headers() {
+      // Weak models (e.g. flash-lite) emit bold/italic section labels instead
+      // of `#` headings; the parser must still recognize the category.
+      let md = "**Added**\n- new endpoint\n*Fixed*\n- a bug\n__Security__\n- hardening";
+      let r = parse_changelog_response(md).unwrap();
+      let e = r["entries"].as_object().unwrap();
+      assert_eq!(e["Added"][0], "new endpoint");
+      assert_eq!(e["Fixed"][0], "a bug");
+      assert_eq!(e["Security"][0], "hardening");
+   }
+
+   #[test]
+   fn test_changelog_quoted_and_hash_emphasized_headers() {
+      let md = "\"Added\"\n- one\n## **Changed**\n- two";
+      let r = parse_changelog_response(md).unwrap();
+      let e = r["entries"].as_object().unwrap();
+      assert_eq!(e["Added"][0], "one");
+      assert_eq!(e["Changed"][0], "two");
+   }
+
+   #[test]
+   fn test_changelog_inline_category_entries() {
+      // `Category: entry` on a single line, plain and emphasized, with the
+      // colon both inside and outside the emphasis markers.
+      let md = "Added: a feature\n**Fixed:** a crash\n**Removed**: an old flag";
+      let r = parse_changelog_response(md).unwrap();
+      let e = r["entries"].as_object().unwrap();
+      assert_eq!(e["Added"][0], "a feature");
+      assert_eq!(e["Fixed"][0], "a crash");
+      assert_eq!(e["Removed"][0], "an old flag");
+   }
+
+   #[test]
+   fn test_changelog_breaking_changes_alias() {
+      // The schema/rendering label is "Breaking Changes"; bare/inline headers
+      // without a `#` must still be recognized.
+      let md = "Breaking Changes:\n- dropped v1 API\n**Breaking Changes:** changed default";
+      let r = parse_changelog_response(md).unwrap();
+      let e = r["entries"].as_object().unwrap();
+      assert_eq!(e["Breaking Changes"].as_array().unwrap().len(), 2);
+   }
+
+   #[test]
+   fn test_changelog_inline_does_not_eat_multiword_item() {
+      // An entry whose prefix isn't a category must stay an entry, even with a
+      // colon ("Updated behavior: ...").
+      let md = "# Changed\n- Updated behavior: now retries on 5xx";
+      let r = parse_changelog_response(md).unwrap();
+      let e = r["entries"].as_object().unwrap();
+      assert_eq!(e["Changed"][0], "Updated behavior: now retries on 5xx");
+      assert!(!e.contains_key("Added"));
+   }
+
+   #[test]
+   fn test_changelog_all_bulleted_inline_categories() {
+      // No `#`/section headers at all — every line is `- Category: entry`.
+      // Without inline detection this yields "no entries found".
+      let md = "- Added: a new flag\n- Fixed: a crash\n- **Removed:** dead code";
+      let r = parse_changelog_response(md).unwrap();
+      let e = r["entries"].as_object().unwrap();
+      assert_eq!(e["Added"][0], "a new flag");
+      assert_eq!(e["Fixed"][0], "a crash");
+      assert_eq!(e["Removed"][0], "dead code");
    }
 
    #[test]
