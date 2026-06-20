@@ -1045,13 +1045,14 @@ where
    let cache_entry = build_cache_entry(config, spec);
    if let Some((cache, key)) = cache_entry.as_ref()
       && let Some(stored) = cache.get(key)
-      && let Ok(output) = serde_json::from_str::<T>(&stored)
+      && let Some((output, text_content)) =
+         decode_cache_payload::<T>(spec.tool_name, spec.operation, &stored, config.markdown_output)
    {
       print_llm_progress(|| format_llm_cache_progress(spec));
       return Ok(OneShotResponse {
          output,
          source: OneShotSource::Cache,
-         text_content: None,
+         text_content,
          stop_reason: None,
       });
    }
@@ -1086,12 +1087,59 @@ where
       .await?;
 
    if let Some((cache, key)) = cache_entry.as_ref()
-      && let Ok(payload) = serde_json::to_string(&response.output)
+      && let Some(payload) =
+         encode_cache_payload(response.source, &response.output, response.text_content.as_deref())
    {
       cache.put(key, spec.model, spec.operation, request_json.as_deref().unwrap_or(""), &payload);
    }
 
    Ok(response)
+}
+
+fn encode_cache_payload<T: Serialize>(
+   source: OneShotSource,
+   output: &T,
+   text_content: Option<&str>,
+) -> Option<String> {
+   if matches!(source, OneShotSource::PlainTextContent | OneShotSource::OutputJsonParse)
+      && let Some(text) = text_content
+   {
+      Some(text.to_string())
+   } else if let Ok(json_payload) = serde_json::to_string(output) {
+      Some(format!("\x00json:{json_payload}"))
+   } else {
+      None
+   }
+}
+
+fn decode_cache_payload<T: DeserializeOwned>(
+   tool_name: &str,
+   operation: &str,
+   stored: &str,
+   markdown_output: bool,
+) -> Option<(T, Option<String>)> {
+   let (is_raw, payload) = if let Some(stripped) = stored.strip_prefix("\x00json:") {
+      (false, stripped)
+   } else {
+      (true, stored)
+   };
+
+   let parsed = match parse_json_output::<T>(payload, &format!("{operation} cached JSON")) {
+      Ok(output) => Some(output),
+      Err(_) => match parse_plain_text_output::<T>(tool_name, payload, markdown_output) {
+         Ok(Some(output)) => Some(output),
+         _ => None,
+      },
+   };
+
+   parsed.map(|output| {
+      let text_content = if is_raw {
+         Some(payload.to_string())
+      } else {
+         None
+      };
+      (output, text_content)
+   })
 }
 
 fn build_cache_entry(
@@ -1116,6 +1164,7 @@ fn build_cache_entry(
       user_prompt: spec.user_prompt,
       schema: spec.schema,
       api_mode,
+      markdown_output: config.markdown_output,
    });
    Some((cache, key))
 }
@@ -2435,6 +2484,75 @@ mod tests {
          OneShotParseOutcome::Retry => panic!("expected plain-text summary fallback"),
          OneShotParseOutcome::Fatal(err) => panic!("unexpected parse failure: {err}"),
       }
+   }
+
+   #[test]
+   fn test_caching_and_parsing_logic_prefers_tool_payload_or_raw_markdown() {
+      // s1. Tool call mode (markdown_output is false)
+      let response = OneShotResponse::<SummaryOutput> {
+         output:       SummaryOutput { summary: "added feature".to_string() },
+         source:       OneShotSource::ToolCall,
+         text_content: Some("{\"summary\":\"ignored\"}".to_string()),
+         stop_reason:  None,
+      };
+
+      // Payload selection logic with discriminator:
+      let full_payload =
+         encode_cache_payload(response.source, &response.output, response.text_content.as_deref())
+            .expect("failed to encode");
+
+      // Assert that we selected the tool/serialized output mapped with the "json:"
+      // prefix
+      assert_eq!(full_payload, "\x00json:{\"summary\":\"added feature\"}");
+
+      // Cache hit simulation with discriminator:
+      let is_markdown_output = false;
+      let decoded = decode_cache_payload::<SummaryOutput>(
+         "create_commit_summary",
+         "summary",
+         &full_payload,
+         is_markdown_output,
+      );
+
+      assert!(decoded.is_some());
+      let (parsed_output, text_content) = decoded.unwrap();
+      assert_eq!(parsed_output.summary, "added feature");
+
+      // Verify text_content set to None under non-markdown
+      assert_eq!(text_content, None);
+
+      // s2. Markdown output mode (markdown_output is true)
+      let response_md = OneShotResponse::<SummaryOutput> {
+         output:       SummaryOutput { summary: "fixed logic because of something".to_string() },
+         source:       OneShotSource::PlainTextContent,
+         text_content: Some("fixed logic because of something".to_string()),
+         stop_reason:  None,
+      };
+
+      let full_payload_md = encode_cache_payload(
+         response_md.source,
+         &response_md.output,
+         response_md.text_content.as_deref(),
+      )
+      .expect("failed to encode md");
+
+      // Assert that we cached the raw text content/markdown directly (no prefix)
+      assert_eq!(full_payload_md, "fixed logic because of something");
+
+      let is_markdown_output_md = true;
+      let decoded_md = decode_cache_payload::<SummaryOutput>(
+         "create_commit_summary",
+         "summary",
+         &full_payload_md,
+         is_markdown_output_md,
+      );
+
+      assert!(decoded_md.is_some());
+      let (parsed_output_md, text_content_md) = decoded_md.unwrap();
+      assert_eq!(parsed_output_md.summary, "fixed logic because of something");
+
+      // Verify text_content set to Some(raw_payload) as is_raw_md is true
+      assert_eq!(text_content_md, Some("fixed logic because of something".to_string()));
    }
 
    #[test]

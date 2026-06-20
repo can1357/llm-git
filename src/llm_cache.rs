@@ -28,7 +28,7 @@ use crate::{
 
 /// Bumped whenever the on-disk row format or hashing scheme changes. Existing
 /// rows with a different schema version are treated as misses.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Approximate inverse probability of running a TTL prune on each successful
 /// `put` call. Keeps the cache bounded without scheduling background work.
@@ -222,6 +222,7 @@ pub struct CacheMaterial<'a> {
    pub user_prompt:      &'a str,
    pub schema:           &'a serde_json::Value,
    pub api_mode:         &'a str,
+   pub markdown_output:  bool,
 }
 
 /// Compute a content-addressed cache key over `material`. Stable across runs
@@ -236,6 +237,15 @@ pub fn compute_key(material: &CacheMaterial<'_>) -> String {
    write_field(&mut hasher, "tool_description", material.tool_description);
    write_field(&mut hasher, "system", material.system_prompt);
    write_field(&mut hasher, "user", material.user_prompt);
+   write_field(
+      &mut hasher,
+      "markdown_output",
+      if material.markdown_output {
+         "true"
+      } else {
+         "false"
+      },
+   );
    // serde_json::Value uses BTreeMap by default → keys serialize in stable
    // order without preserve_order, giving a canonical schema string.
    let schema_canonical = serde_json::to_string(material.schema).unwrap_or_else(|_| String::new());
@@ -273,6 +283,7 @@ mod tests {
          user_prompt:      "user",
          schema:           &SCHEMA,
          api_mode:         "ChatCompletions",
+         markdown_output:  true,
       }
    }
 
