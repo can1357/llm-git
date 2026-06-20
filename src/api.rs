@@ -1059,7 +1059,11 @@ where
    // On parse failure (stale schema / wrong T) we silently fall through and
    // re-fetch — the next successful response will overwrite the stale entry.
 
-   let capture_request = cache_entry.is_some();
+   let failure_sink = crate::llm_cache::global();
+   let failure_key = cache_entry.as_ref().map(|(_, key)| key.clone());
+   // Capture the request whenever there's a cache to write to — for a
+   // successful payload or to log a failed response for offline diagnosis.
+   let capture_request = cache_entry.is_some() || failure_sink.is_some();
    let (response, request_json): (OneShotResponse<T>, Option<String>) =
       retry_api_call(config, async move || {
          let mode = config.resolved_api_mode(spec.model);
@@ -1081,7 +1085,19 @@ where
          ) {
             OneShotParseOutcome::Success(output) => Ok((false, Some((output, Some(request_json))))),
             OneShotParseOutcome::Retry => Ok((true, None)),
-            OneShotParseOutcome::Fatal(err) => Err(err),
+            OneShotParseOutcome::Fatal(err) => {
+               if let Some(cache) = failure_sink.as_ref() {
+                  cache.put_failure(
+                     failure_key.as_deref().unwrap_or(""),
+                     spec.model,
+                     spec.operation,
+                     &request_json,
+                     &response_text,
+                     &err.to_string(),
+                  );
+               }
+               Err(err)
+            },
          }
       })
       .await?;

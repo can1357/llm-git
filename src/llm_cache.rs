@@ -34,6 +34,11 @@ const SCHEMA_VERSION: i32 = 3;
 /// `put` call. Keeps the cache bounded without scheduling background work.
 const PRUNE_DIVISOR: u64 = 64;
 
+/// Hard cap on retained diagnostic failure rows. Failures are append-only and
+/// purely for offline debugging, so we keep only the most recent ones rather
+/// than letting a run of parse errors grow the table without bound.
+const MAX_FAILURES: i64 = 200;
+
 /// Holds the process-wide cache. Initialized from runtime config in `main`,
 /// hence `OnceLock` rather than `LazyLock` (the value depends on user config
 /// loaded at startup, not on a static initializer).
@@ -101,6 +106,16 @@ pub struct CachedLlmResponse {
    pub response: String,
 }
 
+/// A recorded parse/processing failure, retained for offline diagnosis only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureRecord {
+   pub model:     String,
+   pub operation: String,
+   pub request:   String,
+   pub response:  String,
+   pub error:     String,
+}
+
 impl LlmCache {
    /// Open (or create) the cache at `path` with the given TTL. A TTL of zero
    /// disables expiration.
@@ -131,7 +146,20 @@ impl LlmCache {
                 accessed_at    INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_responses_created_at
-                ON responses(created_at);",
+                ON responses(created_at);
+             CREATE TABLE IF NOT EXISTS failures (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                schema_version INTEGER NOT NULL,
+                key            TEXT    NOT NULL,
+                model          TEXT    NOT NULL,
+                operation      TEXT    NOT NULL,
+                request        TEXT    NOT NULL,
+                response       TEXT    NOT NULL,
+                error          TEXT    NOT NULL,
+                created_at     INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_failures_created_at
+                ON failures(created_at);",
          )
          .map_err(|err| CommitGenError::Other(format!("create cache schema: {err}")))?;
       conn
@@ -202,6 +230,62 @@ impl LlmCache {
          let _ =
             conn.execute("DELETE FROM responses WHERE created_at < ?1", params![cutoff as i64]);
       }
+   }
+
+   /// Append a parse/processing failure for offline diagnosis. Append-only and
+   /// best-effort: never read back for cache hits, never fatal. The table is
+   /// capped at the most recent `MAX_FAILURES` rows (and TTL-pruned when a TTL
+   /// is set) so repeated failures cannot grow it without bound.
+   pub fn put_failure(
+      &self,
+      key: &str,
+      model: &str,
+      operation: &str,
+      request: &str,
+      response: &str,
+      error: &str,
+   ) {
+      let conn = self.conn.lock();
+      let now = now_unix();
+      let _ = conn.execute(
+         "INSERT INTO failures
+          (schema_version, key, model, operation, request, response, error, created_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         params![SCHEMA_VERSION, key, model, operation, request, response, error, now as i64],
+      );
+      if self.ttl_secs > 0 {
+         let cutoff = now.saturating_sub(self.ttl_secs);
+         let _ = conn.execute("DELETE FROM failures WHERE created_at < ?1", params![cutoff as i64]);
+      }
+      let _ = conn.execute(
+         "DELETE FROM failures
+          WHERE id NOT IN (SELECT id FROM failures ORDER BY id DESC LIMIT ?1)",
+         params![MAX_FAILURES],
+      );
+   }
+
+   /// Return the most recent recorded failures, newest first. Best-effort:
+   /// returns an empty vec on any underlying error.
+   pub fn recent_failures(&self, limit: usize) -> Vec<FailureRecord> {
+      let conn = self.conn.lock();
+      let Ok(mut stmt) = conn.prepare(
+         "SELECT model, operation, request, response, error
+          FROM failures ORDER BY id DESC LIMIT ?1",
+      ) else {
+         return Vec::new();
+      };
+      let rows = stmt.query_map(params![limit as i64], |row| {
+         Ok(FailureRecord {
+            model:     row.get(0)?,
+            operation: row.get(1)?,
+            request:   row.get(2)?,
+            response:  row.get(3)?,
+            error:     row.get(4)?,
+         })
+      });
+      rows
+         .map(|iter| iter.filter_map(std::result::Result::ok).collect())
+         .unwrap_or_default()
    }
 }
 
@@ -360,5 +444,46 @@ mod tests {
       let cache = LlmCache::open(&dir.path().join("c.sqlite"), Duration::from_secs(0)).unwrap();
       cache.put("k", "model", "op", "request", "v");
       assert_eq!(cache.get("k").as_deref(), Some("v"));
+   }
+
+   #[test]
+   fn put_failure_records_for_diagnosis_without_serving_cache_hits() {
+      let dir = tempdir().unwrap();
+      let cache = LlmCache::open(&dir.path().join("c.sqlite"), Duration::from_secs(0)).unwrap();
+
+      cache.put_failure(
+         "k1",
+         "gemini-flash-lite",
+         "changelog",
+         "{\"req\":1}",
+         "**Added**\n- a thing",
+         "markdown changelog: no entries found",
+      );
+
+      // The failed response is queryable for diagnosis...
+      let recent = cache.recent_failures(10);
+      assert_eq!(recent.len(), 1);
+      assert_eq!(recent[0].operation, "changelog");
+      assert_eq!(recent[0].response, "**Added**\n- a thing");
+      assert_eq!(recent[0].error, "markdown changelog: no entries found");
+
+      // ...but is never replayed as a successful cache hit.
+      assert!(cache.get("k1").is_none());
+   }
+
+   #[test]
+   fn put_failure_caps_retained_rows() {
+      let dir = tempdir().unwrap();
+      let cache = LlmCache::open(&dir.path().join("c.sqlite"), Duration::from_secs(0)).unwrap();
+
+      let total = MAX_FAILURES as usize + 50;
+      for i in 0..total {
+         cache.put_failure("k", "m", "op", "req", &format!("resp{i}"), "err");
+      }
+
+      let recent = cache.recent_failures(usize::MAX);
+      assert_eq!(recent.len() as i64, MAX_FAILURES, "row count is capped");
+      // Newest-first ordering keeps the most recent failure.
+      assert_eq!(recent[0].response, format!("resp{}", total - 1));
    }
 }
