@@ -416,7 +416,10 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
       if let Some(cat) = &current_category
          && !entry.is_empty()
       {
-         entries.entry(cat.clone()).or_default().push(entry.to_string());
+         entries
+            .entry(cat.clone())
+            .or_default()
+            .push(entry.to_string());
       }
    }
 
