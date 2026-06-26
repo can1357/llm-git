@@ -318,6 +318,26 @@ fn unwrap_leading_marker(s: &str) -> (&str, &str) {
    (s, "")
 }
 
+/// Boundary-aware test for an `<exception …>` / `<exception>` opening tag.
+///
+/// Matches regardless of attributes, self-closing form, or a missing close,
+/// but not lookalikes like `<exceptional>` — the tag name must be terminated by
+/// `>`, `/`, whitespace, or end-of-input. Case-insensitive.
+fn has_exception_tag(text: &str) -> bool {
+   const TAG: &str = "<exception";
+   let lower = text.to_lowercase();
+   let mut from = 0;
+   while let Some(rel) = lower[from..].find(TAG) {
+      let after = from + rel + TAG.len();
+      match lower[after..].chars().next() {
+         None | Some('>' | '/') => return true,
+         Some(c) if c.is_whitespace() => return true,
+         _ => from = after,
+      }
+   }
+   false
+}
+
 /// Parse markdown changelog format.
 ///
 /// Lenient: tolerates code fences, headers as `#`/`##`/`###`, bare
@@ -328,6 +348,13 @@ fn unwrap_leading_marker(s: &str) -> (&str, &str) {
 /// (`Breaking`/`Breaking Changes` both accepted); unknown `#` headers are kept
 /// verbatim. A bare multi-word line that merely *starts* with a category word
 /// (e.g. `Added rate limiting`) stays an entry, not a header.
+/// An `<exception>…</exception>` tag anywhere in the reply is a top-level,
+/// mutually-exclusive signal that the diff has nothing changelog-worthy: the
+/// whole changelog is skipped (empty `entries`), even if category sections are
+/// also present. The body is the model's reason and is ignored here. Without
+/// the tag, zero parsed entries is a parse error so the retry path can recover
+/// genuinely malformed output (e.g. real entries emitted without a category
+/// header).
 pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
    const KNOWN: [&str; 8] = [
       "Added",
@@ -341,6 +368,13 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
    ];
 
    let unfenced = strip_fences(text);
+
+   // An <exception>…</exception> tag is a top-level, mutually-exclusive signal
+   // that nothing is changelog-worthy: skip the whole changelog even if category
+   // sections are also present (the body is the model's reason, ignored here).
+   if has_exception_tag(&unfenced) {
+      return Ok(serde_json::json!({ "entries": {} }));
+   }
 
    let mut entries: HashMap<String, Vec<String>> = HashMap::new();
    let mut current_category: Option<String> = None;
@@ -426,7 +460,7 @@ pub fn parse_changelog_response(text: &str) -> Result<serde_json::Value> {
    if entries.is_empty() {
       let preview: String = unfenced.chars().take(200).collect();
       return Err(CommitGenError::Other(format!(
-         "markdown changelog: no entries found (expected `## Category` then `- entry`); got: {}",
+         "markdown changelog: no entries found (expected `# Category` sections with `- entry` bullets, or `<exception>reason</exception>`); got: {}",
          preview.replace('\n', "\\n")
       )));
    }
@@ -878,6 +912,55 @@ mod tests {
       assert_eq!(e["Added"][0], "a new flag");
       assert_eq!(e["Fixed"][0], "a crash");
       assert_eq!(e["Removed"][0], "dead code");
+   }
+
+   #[test]
+   fn test_changelog_exception_skips() {
+      // An <exception>reason</exception> tag is the model's signal that nothing
+      // is changelog-worthy: parse to an empty result so the caller skips the
+      // changelog. Tolerated fenced, with a missing close tag, or wrapping the
+      // whole reply.
+      let cases = [
+         "<exception>only test cleanup and regression-suite removal</exception>",
+         "```\n<exception>internal refactor, no user impact</exception>\n```",
+         "<exception>no user-facing change", // missing close tag tolerated
+      ];
+      for md in cases {
+         let r = parse_changelog_response(md).unwrap();
+         assert!(
+            r["entries"].as_object().unwrap().is_empty(),
+            "input was: {md:?}"
+         );
+      }
+   }
+
+   #[test]
+   fn test_changelog_exception_wins_over_sections() {
+      // The tag is top-level and mutually exclusive: if it appears, the whole
+      // changelog is skipped even when category sections are also present.
+      let md = "<exception>only internal refactors</exception>\n# Added\n- a thing";
+      let r = parse_changelog_response(md).unwrap();
+      assert!(r["entries"].as_object().unwrap().is_empty());
+   }
+
+   #[test]
+   fn test_changelog_exception_lookalike_not_matched() {
+      // Boundary-aware: `<exceptional>` inside an entry must not trip the skip.
+      let md = "# Changed\n- Handled <exceptional> control flow in the parser";
+      let r = parse_changelog_response(md).unwrap();
+      assert_eq!(
+         r["entries"]["Changed"][0],
+         "Handled <exceptional> control flow in the parser"
+      );
+   }
+
+   #[test]
+   fn test_changelog_no_exception_no_entries_errors() {
+      // Without an <exception> tag, zero parsed entries is malformed output: it
+      // must error so the retry path can recover, rather than silently dropping
+      // a real entry or swallowing prose that ignored the format.
+      assert!(parse_changelog_response("Added JWT auth").is_err());
+      assert!(parse_changelog_response("No user-visible changes found.").is_err());
    }
 
    #[test]

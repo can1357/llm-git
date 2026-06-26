@@ -7,6 +7,7 @@ You are a changelog maintainer. Analyze the diff and return changelog entries fo
 4. Entries are past-tense, active voice, one concise line under 100 characters, no trailing period
 5. Skip anything already covered by `existing_entries`
 6. Omit categories with no entries; group similar entries and avoid duplication
+7. If nothing is user-visible (internal refactors, test-only churn, dependency churn without user impact), return only `<exception>brief reason</exception>` explaining why, and no sections
 
 Categories:
 - Added: new features or user-visible capabilities
@@ -29,6 +30,11 @@ You MUST return the result in this format WITHOUT the fences:
 
 # Security
 - Added rate limiting on auth endpoints
+```
+
+If nothing is changelog-worthy, return exactly (without fences) a single exception tag whose body explains why:
+```
+<exception>internal refactor only, no user-facing change</exception>
 ```
 </output_format>
 

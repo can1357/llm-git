@@ -651,6 +651,13 @@ mod tests {
                   !parts.system.contains("{\"entries\""),
                   "markdown variant must not advertise JSON output"
                );
+               // The advertised none-signal must match what
+               // markdown_output::has_exception_tag accepts, so the prompt can't
+               // drift away from the parser.
+               assert!(
+                  parts.system.contains("<exception>"),
+                  "markdown variant must advertise the <exception> none-signal"
+               );
             },
             "default" => assert!(
                parts.system.contains("{\"entries\""),
