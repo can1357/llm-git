@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, path::PathBuf};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::OnceLock};
 
 use clap::{Parser, ValueEnum};
 use indexmap::IndexMap;
@@ -30,6 +30,11 @@ pub struct TypeConfig {
    /// Per-type hint for classification guidance
    #[serde(default)]
    pub hint: String,
+
+   /// Alternative names a model might emit for this type, normalized to the
+   /// canonical name during parsing (e.g. `ui` → `ux`).
+   #[serde(default, skip_serializing_if = "Vec::is_empty")]
+   pub aliases: Vec<String>,
 }
 
 /// Match rules for mapping commits to changelog categories
@@ -66,245 +71,81 @@ impl CategoryConfig {
    }
 }
 
-/// Default commit types with rich guidance for AI prompts
-/// Order defines priority: first type checked first in decision tree
-pub fn default_types() -> IndexMap<String, TypeConfig> {
-   IndexMap::from([
-      ("feat".to_string(), TypeConfig {
-         description: "New public API surface OR user-observable capability/behavior change"
-            .to_string(),
-         diff_indicators: vec![
-            "pub fn".to_string(),
-            "pub struct".to_string(),
-            "pub enum".to_string(),
-            "export function".to_string(),
-            "#[arg]".to_string(),
-         ],
-         file_patterns: vec![],
-         examples: vec![
-            "Added pub fn process_batch() → feat (new API)".to_string(),
-            "Migrated HTTP client to async → feat (behavior change)".to_string(),
-         ],
-         ..Default::default()
-      }),
-      ("fix".to_string(), TypeConfig {
-         description: "Fixes incorrect behavior (bugs, crashes, wrong outputs, race conditions)"
-            .to_string(),
-         diff_indicators: vec![
-            "unwrap() → ?".to_string(),
-            "bounds check".to_string(),
-            "off-by-one".to_string(),
-            "error handling".to_string(),
-         ],
-         ..Default::default()
-      }),
-      ("refactor".to_string(), TypeConfig {
-         description: "Internal restructuring with provably unchanged behavior".to_string(),
-         diff_indicators: vec![
-            "rename".to_string(),
-            "extract".to_string(),
-            "consolidate".to_string(),
-            "reorganize".to_string(),
-         ],
-         examples: vec!["Renamed internal module structure → refactor (no API change)".to_string()],
-         hint: "Requires proof: same tests pass, same API. If behavior changes, use feat."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("docs".to_string(), TypeConfig {
-         description: "Documentation only changes".to_string(),
-         file_patterns: vec!["*.md".to_string(), "doc comments".to_string()],
-         hint: "Excludes prompt template files (prompts/*.md). Prompt changes are functional — \
-                use feat/fix/refactor."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("test".to_string(), TypeConfig {
-         description: "Adding or modifying tests".to_string(),
-         file_patterns: vec![
-            "*_test.rs".to_string(),
-            "tests/".to_string(),
-            "*.test.ts".to_string(),
-         ],
-         ..Default::default()
-      }),
-      ("chore".to_string(), TypeConfig {
-         description: "Housekeeping: tooling scripts, editor config, miscellaneous maintenance \
-                       not covered by other types"
-            .to_string(),
-         file_patterns: vec![".gitignore".to_string(), "*.lock".to_string()],
-         hint: "Use deps for version bumps, config for app/env config, build for build scripts."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("style".to_string(), TypeConfig {
-         description: "Formatting, whitespace changes (no logic change)".to_string(),
-         diff_indicators: vec!["whitespace".to_string(), "formatting".to_string()],
-         hint: "Variable/function renames are refactor, not style.".to_string(),
-         ..Default::default()
-      }),
-      ("perf".to_string(), TypeConfig {
-         description: "Performance improvements (proven faster)".to_string(),
-         diff_indicators: vec![
-            "optimization".to_string(),
-            "cache".to_string(),
-            "batch".to_string(),
-         ],
-         ..Default::default()
-      }),
-      ("build".to_string(), TypeConfig {
-         description: "Build system, dependency changes".to_string(),
-         file_patterns: vec![
-            "Cargo.toml".to_string(),
-            "package.json".to_string(),
-            "Makefile".to_string(),
-         ],
-         ..Default::default()
-      }),
-      ("ci".to_string(), TypeConfig {
-         description: "CI/CD configuration".to_string(),
-         file_patterns: vec![".github/workflows/".to_string(), ".gitlab-ci.yml".to_string()],
-         ..Default::default()
-      }),
-      ("revert".to_string(), TypeConfig {
-         description: "Reverts a previous commit".to_string(),
-         diff_indicators: vec!["Revert".to_string()],
-         ..Default::default()
-      }),
-      // --- Extended vocabulary ---
-      ("deps".to_string(), TypeConfig {
-         description: "Dependency version bumps (Cargo.toml, package.json, go.mod, \
-                       requirements.txt, etc.)"
-            .to_string(),
-         file_patterns: vec![
-            "Cargo.toml".to_string(),
-            "package.json".to_string(),
-            "go.mod".to_string(),
-            "requirements.txt".to_string(),
-            "pyproject.toml".to_string(),
-         ],
-         hint: "Version bumps only. Build system changes belong in build; lockfile-only changes \
-                can be deps."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("security".to_string(), TypeConfig {
-         description: "Security hardening, CVE patches, auth improvements, input sanitization, \
-                       rate limiting"
-            .to_string(),
-         diff_indicators: vec![
-            "sanitize".to_string(),
-            "auth".to_string(),
-            "CVE".to_string(),
-            "rate limit".to_string(),
-            "HMAC".to_string(),
-         ],
-         hint: "Use for proactive hardening too, not just bug fixes. Security-motivated fix → \
-                security, not fix."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("config".to_string(), TypeConfig {
-         description: "Application or environment configuration changes (.env, settings, feature \
-                       flags, runtime config)"
-            .to_string(),
-         file_patterns: vec![
-            ".env".to_string(),
-            "settings.toml".to_string(),
-            "config.yaml".to_string(),
-         ],
-         hint: "App/runtime config. Build system config → build; CI config → ci; dev tooling → \
-                chore."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("ux".to_string(), TypeConfig {
-         description: "Usability and ergonomics improvements to existing interfaces (CLI flags, \
-                       error messages, output formatting)"
-            .to_string(),
-         hint: "Existing feature made easier/clearer → ux. New capability → feat.".to_string(),
-         ..Default::default()
-      }),
-      ("release".to_string(), TypeConfig {
-         description: "Version bump and release preparation (CHANGELOG.md updates, version files, \
-                       release tags)"
-            .to_string(),
-         file_patterns: vec![
-            "CHANGELOG.md".to_string(),
-            "CHANGELOG".to_string(),
-            "VERSION".to_string(),
-         ],
-         hint: "Only for the release commit itself. Code changes alongside a release use their \
-                own type."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("hotfix".to_string(), TypeConfig {
-         description: "Critical production fix requiring immediate patch, often on a dedicated \
-                       hotfix branch"
-            .to_string(),
-         hint: "Reserve for genuine production emergencies. Normal bugs → fix.".to_string(),
-         ..Default::default()
-      }),
-      ("infra".to_string(), TypeConfig {
-         description: "Infrastructure-as-code changes (Terraform, Kubernetes manifests, Ansible, \
-                       cloud config)"
-            .to_string(),
-         file_patterns: vec![
-            "*.tf".to_string(),
-            "helm/".to_string(),
-            "terraform/".to_string(),
-            "k8s/".to_string(),
-         ],
-         ..Default::default()
-      }),
-      ("init".to_string(), TypeConfig {
-         description: "Initial commit bootstrapping a project, module, or major subsystem"
-            .to_string(),
-         hint: "Use once per project/module bootstrap. Subsequent setup → chore or build."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("merge".to_string(), TypeConfig {
-         description: "Merge or sync commit with no standalone logic change (merge branches, sync \
-                       forks)"
-            .to_string(),
-         hint: "Only when the commit is purely a merge. Squashed logic changes → use the \
-                appropriate type."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("hack".to_string(), TypeConfig {
-         description: "Deliberate temporary workaround or shortcut with known technical debt"
-            .to_string(),
-         hint: "Must signal intent to revisit in the body (e.g., TODO: replace once X lands)."
-            .to_string(),
-         ..Default::default()
-      }),
-      ("wip".to_string(), TypeConfig {
-         description: "Incomplete in-progress work not ready for review or release".to_string(),
-         hint: "Prefer a real type for finished commits. Use wip only for explicit save-points."
-            .to_string(),
-         ..Default::default()
-      }),
-   ])
+/// Embedded single source of truth for the commit-type vocabulary.
+///
+/// Defines every default commit type — name, classification guidance, and the
+/// alternative spellings (`aliases`) a model might emit — plus the global
+/// cross-type disambiguation hint. [`default_types`], [`default_classifier_hint`],
+/// and [`CommitType`] validation/coercion all derive from this file, so the
+/// vocabulary lives in exactly one place.
+const COMMIT_TYPES_JSON: &str = include_str!("commit_types.json");
+
+/// One entry in [`COMMIT_TYPES_JSON`]: a canonical type name plus its config.
+#[derive(Deserialize)]
+struct VocabularyEntry {
+   name:   String,
+   #[serde(flatten)]
+   config: TypeConfig,
 }
 
-/// Default global hint for cross-type disambiguation
+/// Parsed shape of [`COMMIT_TYPES_JSON`].
+#[derive(Deserialize)]
+struct VocabularyFile {
+   classifier_hint: String,
+   types:           Vec<VocabularyEntry>,
+}
+
+/// The commit-type vocabulary: ordered type configs plus a flattened
+/// alias → canonical lookup, parsed once from [`COMMIT_TYPES_JSON`].
+struct Vocabulary {
+   /// Canonical name → config, in priority order (first match wins).
+   types:           IndexMap<String, TypeConfig>,
+   /// Alias (lowercase) → canonical name, aggregated from every type's
+   /// `aliases`.
+   aliases:         HashMap<String, String>,
+   classifier_hint: String,
+}
+
+/// Lazily parse and cache the embedded vocabulary. Panics only if the embedded
+/// JSON is malformed, which a unit test guards against.
+fn vocabulary() -> &'static Vocabulary {
+   static VOCAB: OnceLock<Vocabulary> = OnceLock::new();
+   VOCAB.get_or_init(|| {
+      let file: VocabularyFile =
+         serde_json::from_str(COMMIT_TYPES_JSON).expect("embedded commit_types.json must be valid");
+      let mut types = IndexMap::with_capacity(file.types.len());
+      let mut aliases = HashMap::new();
+      for entry in file.types {
+         for alias in &entry.config.aliases {
+            aliases.insert(alias.to_lowercase(), entry.name.clone());
+         }
+         types.insert(entry.name, entry.config);
+      }
+      Vocabulary { types, aliases, classifier_hint: file.classifier_hint }
+   })
+}
+
+/// Default commit types with rich guidance for AI prompts.
+///
+/// Order defines priority: the first type checked first in the decision tree.
+/// Sourced from the embedded [`COMMIT_TYPES_JSON`] registry.
+pub fn default_types() -> IndexMap<String, TypeConfig> {
+   vocabulary().types.clone()
+}
+
+/// Default global hint for cross-type disambiguation, from the registry.
 pub fn default_classifier_hint() -> String {
-   r"CRITICAL disambiguation rules:
-- feat vs refactor: feat=ANY observable behavior change OR new public API; refactor=provably unchanged (same tests, same API). When in doubt, prefer feat.
-- fix vs hotfix: hotfix=critical production emergency; fix=normal bug.
-- fix vs security: security=proactive hardening, CVE patches, auth hardening; fix=non-security bugs.
-- deps vs chore: deps=dependency version bumps only; chore=other maintenance (tooling, scripts).
-- deps vs build: build=build system scripts/config; deps=bumping library versions in manifests.
-- config vs chore: config=application/runtime config; chore=dev tooling and housekeeping.
-- ux vs feat: ux=existing feature made easier/clearer; feat=new capability.
-- init=bootstrap commit for a project or major subsystem; use once.
-- wip=in-progress save-point; prefer a real type for finished commits.
-- hack=deliberate temporary workaround; body must note intent to revisit.
-- merge=merge/sync commits with no standalone logic change."
-      .to_string()
+   vocabulary().classifier_hint.clone()
+}
+
+/// Coerce a raw type token to a canonical commit type, never failing.
+///
+/// Canonical names and known aliases map to their canonical form (via
+/// [`CommitType::new`]); anything unrecognized falls back to `chore`. Used by
+/// the markdown analysis parser to salvage a heading whose type the model
+/// invented rather than discarding the whole analysis.
+pub fn coerce_commit_type(raw: &str) -> String {
+   CommitType::new(raw).map_or_else(|_| "chore".to_string(), |ct| ct.as_str().to_string())
 }
 
 /// Default categories matching current hardcoded behavior
@@ -534,26 +375,29 @@ pub struct ScopeCandidate {
 pub struct CommitType(String);
 
 impl CommitType {
-   const VALID_TYPES: &'static [&'static str] = &[
-      "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci", "revert",
-      "deps", "security", "config", "ux", "release", "hotfix", "infra", "init", "merge", "hack",
-      "wip",
-   ];
-
-   /// Create new `CommitType` with validation
+   /// Create a new `CommitType`, normalizing aliases to canonical names.
+   ///
+   /// Accepts any canonical type from the registry or a known alias (e.g.
+   /// `ui` → `ux`, `feature` → `feat`); both resolve to the canonical form.
+   ///
+   /// # Errors
+   /// Returns [`CommitGenError::InvalidCommitType`] when the token is neither a
+   /// canonical type nor a known alias.
    pub fn new(s: impl Into<String>) -> Result<Self> {
       let s = s.into();
       let normalized = s.to_lowercase();
-
-      if !Self::VALID_TYPES.contains(&normalized.as_str()) {
-         return Err(CommitGenError::InvalidCommitType(format!(
-            "Invalid commit type '{}'. Must be one of: {}",
-            s,
-            Self::VALID_TYPES.join(", ")
-         )));
+      let vocab = vocabulary();
+      if vocab.types.contains_key(normalized.as_str()) {
+         return Ok(Self(normalized));
       }
-
-      Ok(Self(normalized))
+      if let Some(canonical) = vocab.aliases.get(&normalized) {
+         return Ok(Self(canonical.clone()));
+      }
+      Err(CommitGenError::InvalidCommitType(format!(
+         "Invalid commit type '{}'. Must be one of: {}",
+         s,
+         vocab.types.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+      )))
    }
 
    /// Returns inner string slice
@@ -1566,10 +1410,40 @@ mod tests {
 
    #[test]
    fn test_commit_type_invalid() {
-      let invalid_types = ["invalid", "bug", "feature", "update", "change", "random", "xyz", "123"];
+      let invalid_types = ["invalid", "update", "change", "random", "xyz", "123"];
 
       for ty in &invalid_types {
          assert!(CommitType::new(*ty).is_err(), "Expected '{ty}' to be invalid");
+      }
+   }
+
+   #[test]
+   fn test_commit_type_aliases_normalize_to_canonical() {
+      for (alias, canonical) in
+         [("ui", "ux"), ("feature", "feat"), ("bug", "fix"), ("formatting", "style")]
+      {
+         let ct =
+            CommitType::new(alias).unwrap_or_else(|_| panic!("'{alias}' should be a valid alias"));
+         assert_eq!(ct.as_str(), canonical, "alias '{alias}'");
+      }
+   }
+
+   #[test]
+   fn test_coerce_commit_type_falls_back_to_chore() {
+      assert_eq!(coerce_commit_type("ui"), "ux");
+      assert_eq!(coerce_commit_type("totallyunknown"), "chore");
+   }
+
+   #[test]
+   fn test_embedded_vocabulary_is_valid() {
+      // Guards the `expect` in `vocabulary()`: the embedded JSON must parse, and
+      // no alias may collide with a canonical name or another alias.
+      let vocab = vocabulary();
+      assert!(vocab.types.contains_key("feat"));
+      assert!(!vocab.classifier_hint.is_empty());
+      for (alias, canonical) in &vocab.aliases {
+         assert!(vocab.types.contains_key(canonical), "alias '{alias}' → unknown '{canonical}'");
+         assert!(!vocab.types.contains_key(alias), "alias '{alias}' shadows a canonical name");
       }
    }
 

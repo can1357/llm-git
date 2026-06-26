@@ -6,7 +6,7 @@ Return your groups in a markdown-like format where each group defines a standalo
 
 <instructions>
 1. Each group is identified by a group ID (G1, G2, G3, etc.)
-2. Each group has one commit type and optional scope
+2. Each group has one commit type (from the `<commit_types>` list) and optional scope
 3. Groups are independent when possible; use dependencies for strict ordering
 4. Return 1–5 groups (or the requested maximum)
 5. Every provided file ID must appear in at least one group
@@ -43,6 +43,12 @@ max_commits: {{ max_commits }}
 <planning_targets>
 {{ planning_targets }}
 </planning_targets>
+
+{% if types_description %}
+<commit_types>
+{{ types_description }}
+</commit_types>
+{% endif %}
 
 <git_stat>
 {{ stat }}

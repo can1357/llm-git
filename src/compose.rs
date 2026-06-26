@@ -1794,6 +1794,7 @@ async fn analyze_compose_intent(
    } else {
       "default"
    };
+   let types_description = crate::api::format_types_description(config);
    let parts = templates::render_compose_intent_prompt(&templates::ComposeIntentPromptParams {
       variant,
       max_commits,
@@ -1802,6 +1803,7 @@ async fn analyze_compose_intent(
       planning_targets: &planning_targets,
       planning_notes: &planning_notes,
       split_bias: &split_bias,
+      types_description: Some(&types_description),
    })?;
 
    let response = run_oneshot::<ComposeIntentResponse>(config, &OneShotSpec {

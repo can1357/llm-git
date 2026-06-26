@@ -94,7 +94,7 @@ Call `create_conventional_analysis` with exactly:
 
 ```json
 {
-  "type": "feat|fix|refactor|docs|test|chore|style|perf|build|ci|revert|deps|security|config|ux|release|hotfix|infra|init|merge|hack|wip",
+  "type": "<one of the allowed commit types listed in <commit_types> below>",
   "scope": "component-name" | null,
   "summary": "past-tense umbrella headline without prefix or period",
   "details": [

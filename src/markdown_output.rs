@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
    error::{CommitGenError, Result},
-   types::CommitType,
+   types::{CommitType, coerce_commit_type},
 };
 
 // ===== Leniency helpers =====
@@ -139,19 +139,31 @@ struct AnalysisParts {
    issue_refs:  Vec<String>,
 }
 
+/// A parsed heading: `(commit_type, optional scope, summary)`.
+type Heading = (String, Option<String>, String);
+
 fn parse_analysis_parts(text: &str) -> Result<AnalysisParts> {
    let unfenced = strip_fences(text);
    let lines: Vec<&str> = unfenced.lines().collect();
 
    // Find the heading line: the first line that parses as `type(scope)?: summary`.
-   let mut heading_idx = None;
-   let mut parsed_heading = None;
+   // A canonical heading wins outright. Failing that, a markdown `#` heading
+   // whose type is off-list (e.g. `# ui: ...`) is salvaged by coercing the type
+   // rather than discarding the model's whole analysis. The `#` gate keeps stray
+   // `key: value` JSON lines from being misread as headings.
+   let mut canonical: Option<(usize, Heading)> = None;
+   let mut coerced: Option<(usize, Heading)> = None;
    for (i, line) in lines.iter().enumerate() {
       let candidate = strip_heading_markers(line);
       if let Some(h) = parse_heading(&candidate) {
-         heading_idx = Some(i);
-         parsed_heading = Some(h);
+         canonical = Some((i, h));
          break;
+      }
+      if coerced.is_none()
+         && line.trim_start().starts_with('#')
+         && let Some(h) = parse_heading_coerced(&candidate)
+      {
+         coerced = Some((i, h));
       }
       // Only scan the first few lines for the heading.
       if i >= 5 {
@@ -159,12 +171,12 @@ fn parse_analysis_parts(text: &str) -> Result<AnalysisParts> {
       }
    }
 
-   let (commit_type, scope, summary) = parsed_heading.ok_or_else(|| {
+   let (heading_idx, (commit_type, scope, summary)) = canonical.or(coerced).ok_or_else(|| {
       CommitGenError::Other(
          "markdown analysis: no `type(scope): summary` heading found".to_string(),
       )
    })?;
-   let start = heading_idx.unwrap_or(0) + 1;
+   let start = heading_idx + 1;
 
    let mut details = Vec::new();
    let mut issue_refs = Vec::new();
@@ -230,9 +242,40 @@ pub fn parse_fast_commit(text: &str) -> Result<serde_json::Value> {
    }))
 }
 
-/// Parse a `type(scope): summary` or `type: summary` heading line.
-/// Returns (type, optional scope, summary). None if it doesn't look like one.
-fn parse_heading(line: &str) -> Option<(String, Option<String>, String)> {
+/// Parse a `type(scope): summary` or `type: summary` heading line, normalizing
+/// the type to its canonical form (aliases like `ui` → `ux`).
+///
+/// Returns None unless the type is a known canonical type or alias. This keeps
+/// stray `key: value` lines (e.g. `type: "refactor",` from a JSON blob, or
+/// `summary: ...`) from being misread as a heading.
+fn parse_heading(line: &str) -> Option<Heading> {
+   let (ty, scope, summary) = split_heading(line)?;
+   // Normalize aliases to canonical (e.g. `ui` → `ux`); reject unknown types.
+   let canonical = CommitType::new(&ty).ok()?;
+   Some((canonical.as_str().to_string(), scope, summary))
+}
+
+/// Parse a heading whose type token is *not* a canonical conventional type,
+/// coercing it to the nearest canonical type (see [`coerce_commit_type`]).
+///
+/// Models sometimes classify real work with an off-list type (e.g.
+/// `# ui: implement file management`). Rejecting such a heading outright would
+/// discard an otherwise complete analysis; coercing salvages the summary and
+/// details. Stays narrow — only a bare-word type and a non-JSON-looking summary
+/// qualify — and callers gate this on the line being an actual markdown `#`
+/// heading so stray `key: "value",` lines are never coerced.
+fn parse_heading_coerced(line: &str) -> Option<Heading> {
+   let (ty, scope, summary) = split_heading(line)?;
+   if !is_bare_word(&ty) || summary.starts_with(['"', '{', '[']) {
+      return None;
+   }
+   Some((coerce_commit_type(&ty), scope, summary))
+}
+
+/// Split a `type(scope)?: summary` heading into its parts without validating
+/// the type. Returns None when the shape doesn't match (no colon, empty type or
+/// summary, malformed parentheses).
+fn split_heading(line: &str) -> Option<Heading> {
    let colon = line.find(':')?;
    let type_scope = line[..colon].trim();
    let summary = line[colon + 1..].trim().to_string();
@@ -258,16 +301,16 @@ fn parse_heading(line: &str) -> Option<(String, Option<String>, String)> {
    } else {
       (type_scope.to_string(), None)
    };
-
-   // The type token must be a *valid conventional commit type*. This is what
-   // prevents stray `key: value` lines (e.g. `type: "refactor",` from a JSON
-   // blob, or `summary: ...`) from being misread as a heading — which would
-   // otherwise produce garbage like {"type":"type"} that caches and then fails
-   // downstream validation. Only a real type makes a real heading.
-   if CommitType::new(&ty).is_err() {
-      return None;
-   }
    Some((ty, scope, summary))
+}
+
+/// True when `s` is a single bare alphabetic word (optional internal hyphen),
+/// e.g. `ui`, `bugfix`, `release-build`. Rejects quoted/punctuated tokens so a
+/// JSON value like `"refactor"` is never treated as a type token.
+fn is_bare_word(s: &str) -> bool {
+   !s.is_empty()
+      && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+      && s.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
 }
 
 /// Parse markdown summary format.
@@ -506,7 +549,7 @@ pub fn parse_compose_intent(text: &str) -> Result<serde_json::Value> {
 
             let group_obj = serde_json::json!({
                "group_id": gid,
-               "type": normalize_commit_type(&gtype),
+               "type": coerce_commit_type(&gtype),
                "scope": scope,
                "rationale": rationale,
                "file_ids": Vec::<String>::new(),
@@ -695,35 +738,6 @@ pub fn parse_batch_observations(text: &str) -> Result<serde_json::Value> {
    Ok(serde_json::json!({ "files": files }))
 }
 
-/// Normalize commit type string
-fn normalize_commit_type(s: &str) -> String {
-   match s.to_lowercase().as_str() {
-      "feat" | "feature" => "feat".to_string(),
-      "fix" | "bugfix" => "fix".to_string(),
-      "docs" | "documentation" => "docs".to_string(),
-      "style" | "formatting" => "style".to_string(),
-      "refactor" | "refactoring" => "refactor".to_string(),
-      "perf" | "performance" => "perf".to_string(),
-      "test" | "tests" => "test".to_string(),
-      "build" | "builder" => "build".to_string(),
-      "ci" | "cicd" => "ci".to_string(),
-      "chore" | "maintenance" => "chore".to_string(),
-      "revert" | "reversion" => "revert".to_string(),
-      "deps" | "dependencies" | "dependency" => "deps".to_string(),
-      "security" | "sec" => "security".to_string(),
-      "config" | "configuration" => "config".to_string(),
-      "ux" | "ergonomics" => "ux".to_string(),
-      "release" | "version" => "release".to_string(),
-      "hotfix" => "hotfix".to_string(),
-      "infra" | "infrastructure" => "infra".to_string(),
-      "init" | "initialization" => "init".to_string(),
-      "merge" | "merging" => "merge".to_string(),
-      "hack" | "hacky" => "hack".to_string(),
-      "wip" | "work-in-progress" => "wip".to_string(),
-      other => other.to_string(),
-   }
-}
-
 #[cfg(test)]
 mod tests {
    use super::*;
@@ -769,6 +783,58 @@ mod tests {
       assert!(parse_conventional_analysis(json_ish).is_err());
       // And `summary:`/`scope:` key lines are likewise not headings.
       assert!(parse_conventional_analysis("summary: did a thing\nscope: core").is_err());
+   }
+
+   #[test]
+   fn test_issue_footer_not_misread_as_heading() {
+      // `Fixes:`/`Closes:`/`Resolves:` are issue footers, never heading types,
+      // so a leading footer line must not be coerced into a `fix:` heading.
+      assert!(parse_conventional_analysis("Fixes: #123\n- did a thing").is_err());
+      // A real heading still parses its trailing Fixes footer into issue_refs.
+      let r = parse_conventional_analysis("# fix(api): corrected thing\n- patched it\nFixes: #123")
+         .unwrap();
+      assert_eq!(r["type"], "fix");
+      assert_eq!(r["issue_refs"][0], "#123");
+   }
+
+   #[test]
+   fn test_noncanonical_heading_type_is_coerced() {
+      // The exact response that hard-failed in production: a heading whose type
+      // is off-list but aliased (`ui` → `ux`). It must be salvaged, normalized,
+      // and deserialize cleanly into ConventionalAnalysis — not discarded with
+      // "no `type(scope): summary` heading found".
+      let md = "# ui: implement file management and detail view enhancements\n\n- Expanded file \
+                management capabilities within FilesPanel to support broader operations.\n- \
+                Updated user interface components to improve data presentation and interaction \
+                flow in DetailView and MetricsPanel.\n- Enhanced API communication logic to \
+                support new state requirements for modal components.\n- Adjusted kernel argument \
+                help documentation for improved clarity.";
+      let r = parse_conventional_analysis(md).unwrap();
+      let analysis: crate::types::ConventionalAnalysis = serde_json::from_value(r).unwrap();
+      assert_eq!(analysis.commit_type.as_str(), "ux");
+      assert_eq!(
+         analysis.summary.as_deref(),
+         Some("implement file management and detail view enhancements")
+      );
+      assert_eq!(analysis.details.len(), 4);
+   }
+
+   #[test]
+   fn test_unknown_heading_type_falls_back_to_chore() {
+      // An unrecognized off-list type coerces to the safe `chore` default.
+      let md = "# wibble: tweaked the knobs\n\n- Adjusted a knob.";
+      let r = parse_conventional_analysis(md).unwrap();
+      assert_eq!(r["type"], "chore");
+      assert_eq!(r["summary"], "tweaked the knobs");
+   }
+
+   #[test]
+   fn test_noncanonical_type_only_coerced_for_markdown_heading() {
+      // Coercion is gated on the `#` heading marker. A bare `word: summary`
+      // line with an off-list type stays rejected, so prose/JSON noise can't be
+      // misread as a heading.
+      assert!(parse_conventional_analysis("wibble: did a thing").is_err());
+      assert!(parse_conventional_analysis("note: see below\nmore prose").is_err());
    }
 
    #[test]

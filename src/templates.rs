@@ -489,6 +489,7 @@ pub struct ComposeIntentPromptParams<'a> {
    pub planning_targets: &'a str,
    pub planning_notes:   &'a str,
    pub split_bias:       &'a str,
+   pub types_description: Option<&'a str>,
 }
 
 /// Render compose intent prompt template.
@@ -502,6 +503,9 @@ pub fn render_compose_intent_prompt(p: &ComposeIntentPromptParams<'_>) -> Result
    context.insert("planning_targets", p.planning_targets);
    context.insert("planning_notes", p.planning_notes);
    context.insert("split_bias", p.split_bias);
+   if let Some(types) = p.types_description {
+      context.insert("types_description", types);
+   }
 
    render_prompt_parts(&format!("compose-intent/{}.md", p.variant), &template_content, &context)
 }
@@ -739,12 +743,15 @@ mod tests {
          planning_targets: "file IDs",
          planning_notes:   "Prefer conservative grouping over speculative splitting.",
          split_bias:       "Prefer fewer groups when the split is uncertain.",
+         types_description: Some("**feat**: new capability\n**ux**: ergonomics"),
       })
       .unwrap();
 
       assert!(parts.system.contains("create_compose_intent_plan"));
       assert!(parts.user.contains("max_commits: 3"));
       assert!(parts.user.contains("src/foo.rs"));
+      assert!(parts.user.contains("<commit_types>"));
+      assert!(parts.user.contains("new capability"));
    }
 
    #[test]

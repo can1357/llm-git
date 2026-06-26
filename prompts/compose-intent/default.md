@@ -19,7 +19,7 @@ Use only the provided planning target summary and snapshot as evidence.
 <group_contract>
 Each group must:
 - use a stable `group_id` such as `G1`, `G2`, `G3`
-- choose one conventional commit type
+- choose one commit type from the `<commit_types>` list
 - use a narrow scope only when clearly justified; otherwise omit it
 - explain the logical change in one concise rationale
 - list only prerequisite groups in `dependencies`
@@ -42,6 +42,12 @@ max_commits: {{ max_commits }}
 <planning_targets>
 {{ planning_targets }}
 </planning_targets>
+
+{% if types_description %}
+<commit_types>
+{{ types_description }}
+</commit_types>
+{% endif %}
 
 <planning_guidance>
 {{ planning_notes }}
