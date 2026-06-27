@@ -184,7 +184,7 @@ analysis_model = "gpt-4o"
 summary_model = "gpt-4o-mini"
 ```
 
-The client uses tool calling for all models, falling back to parsing JSON content from the model response when a provider ignores `tool_choice`. This works across OpenRouter, LiteLLM, Anthropic, and OpenAI endpoints.
+The client asks all providers for markdown/plain-text responses and parses the same response format across OpenRouter, LiteLLM, Anthropic, and OpenAI endpoints.
 
 ### Commit Types
 

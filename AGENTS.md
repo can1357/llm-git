@@ -57,11 +57,11 @@ uv run pytest -k truncate                    # Match by name
 
 **Core package** (`lgit/`):
 - `analysis` - Scope candidate extraction from git numstat
-- `api` - LLM integration (OpenAI-compatible) with function calling, retry logic, and response caching
+- `api` - LLM integration (OpenAI-compatible) with markdown response parsing, retry logic, and response caching
 - `cache` - On-disk cache of LLM responses (BLAKE3-keyed)
 - `changelog` - `CHANGELOG.md` maintenance against the staged tree
 - `compose` - AI-powered commit splitting
-- `config` - Configuration loading (TOML) and prompt-variant selection
+- `config` - Configuration loading (TOML)
 - `diffing` - Smart diff truncation with priority scoring
 - `errors` - Error/exception types
 - `git` - Git command wrappers (diff, stat, commit, history operations)
@@ -92,22 +92,20 @@ uv run pytest -k truncate                    # Match by name
    - Preserve ALL file headers, truncate content proportionally
    - Keep context (first 15 + last 10 lines per file)
 3. `extract_scope_candidates()` - Parse git numstat to identify changed modules/components
-4. Analysis call - AI call with function calling schema:
-   - Tool: `create_conventional_analysis`
-   - Returns: `{type, scope?, body: [details], issue_refs: [...]}`
+4. Analysis call - AI returns markdown conventional-commit analysis:
+   - Heading identifies type, optional scope, and summary
+   - Bullets become structured detail points; issue refs are parsed from output
 5. `generate_summary_from_analysis()` - AI call for summary generation:
-   - Tool: `create_commit_summary`
    - Input: type + scope + detail points + stat
-   - Returns: `{summary}` (≤72 chars)
+   - Returns plain text in `<summary>...</summary>` tags (≤72 chars)
 6. `post_process_commit_message()` - Enforce capitalization, punctuation
 7. `validate_commit_message()` - Check past-tense verbs, length limits
 8. Create commit (unless dry-run)
 
 **Compose Mode** (`lgit/compose.py:run_compose_mode`):
 1. Combine staged + unstaged diffs into single analysis
-2. Intent analysis - AI identifies logical commit groups:
-   - Tool: `create_compose_analysis`
-   - Returns: `{groups: [{changes: [{path, hunks}], type, scope?, rationale, dependencies}]}`
+2. Intent analysis - AI identifies logical commit groups from markdown:
+   - Returns group headings with file IDs/hunk IDs that are mapped to compose groups
    - **CRITICAL**: Each group specifies file paths + hunk headers (e.g., `@@ -10,5 +10,7 @@`) or `["ALL"]`
 3. Dependency order - Topological sort (Kahn's algorithm) to ensure working state
 4. Display proposed splits, optionally stop (preview mode)
@@ -169,10 +167,9 @@ uv run pytest -k truncate                    # Match by name
 
 ## Prompt Engineering
 
-**Prompt variants**: `default` vs `markdown`
-- Selected per call by the `markdown_output` config flag (markdown on by default); `analysis_prompt_variant` / `summary_prompt_variant` override the non-markdown variant.
-- Bundled under `lgit/resources/prompts/<family>/` (families: `analysis`, `summary`, `changelog`, `map`, `reduce`, `compose-intent`, `compose-bind`, `fast`).
-- Rendered at runtime via Jinja2 (`lgit/templates.py`). User overrides may live in `~/.llm-git/prompts/`.
+**Prompt files**:
+- One markdown prompt per family under `lgit/resources/prompts/<family>.md` (families: `analysis`, `summary`, `changelog`, `map`, `reduce`, `compose-intent`, `compose-bind`, `fast`).
+- Rendered at runtime via Jinja2 (`lgit/templates.py`). User overrides may live in `~/.llm-git/prompts/<family>.md`.
 
 **Validation retry**: Summary generation retries once on validation failure with constraint injection
 - Validates: past-tense verb, no type repetition, type-file consistency heuristics
@@ -199,48 +196,26 @@ uv run pytest -k truncate                    # Match by name
 
 ## API Integration (`lgit/api.py`)
 
-**Function calling schema**:
+**Markdown response parsing**:
 1. `create_conventional_analysis` - Detail extraction:
-   ```json
-   {
-     "type": "feat|fix|refactor|...",
-     "scope": "optional_scope",
-     "body": ["detail 1.", "detail 2."],
-     "issue_refs": ["#123", "#456"]
-   }
-   ```
+   - Parses a conventional-commit heading such as `feat(api): added login`
+   - Converts markdown bullets into detail points
+   - Extracts issue refs from the parsed response
 
 2. `create_commit_summary` - Summary generation:
-   ```json
-   {
-     "summary": "concise past-tense summary without period"
-   }
-   ```
+   - Parses `<summary>concise past-tense summary</summary>`
+   - Strips accidental type/scope prefixes before validation
 
-3. `create_compose_analysis` - Compose grouping:
-   ```json
-   {
-     "groups": [
-       {
-         "changes": [
-           {"path": "lgit/foo.py", "hunks": ["@@ -10,5 +10,7 @@"]},
-           {"path": "lgit/bar.py", "hunks": ["ALL"]}
-         ],
-         "type": "feat",
-         "scope": "api",
-         "rationale": "Added TLS support",
-         "dependencies": []
-       }
-     ]
-   }
-   ```
+3. `create_compose_intent_plan` / `bind_compose_hunks` - Compose grouping:
+   - Parses markdown group plans into file IDs, hunk IDs, commit types, scopes, and dependencies
+   - Falls back to deterministic grouping when parsing fails
 
 **Retry logic**:
 - Exponential backoff: 1s, 2s, 4s (default 3 retries)
 - Retries on 5xx errors or transient failures
 - Configurable: `max_retries`, `initial_backoff_ms` in config
 
-**Caching**: Responses are cached on disk keyed by a BLAKE3 hash of `(model, prompt_family, prompt_variant, …)` (`lgit/cache.py`); set `LLM_GIT_CACHE_DISABLED=1` to bypass.
+**Caching**: Responses are cached on disk keyed by a BLAKE3 hash of `(operation, model, api_mode, tool_name, system_prompt, user_prompt)` (`lgit/cache.py`); set `LLM_GIT_CACHE_DISABLED=1` to bypass.
 
 **Fallback**: If AI calls fail, `fallback_summary()` (`lgit/markdown_output.py`) generates a heuristic summary from stat.
 
@@ -261,8 +236,6 @@ max_diff_length = 100000
 
 wide_change_threshold = 0.50  # Omit scope if >50% of files changed
 
-analysis_prompt_variant = "default"
-summary_prompt_variant = "default"
 
 exclude_old_message = false   # When true, git show omits original message
 ```
@@ -305,6 +278,8 @@ uv run mypy                 # optional local type check
 - `ruff format` owns line length (`line-length = 120`); `E501` is therefore disabled in lint.
 - Lint rule set: `E`, `F`, `W`, `I`, `UP`, `B` (see `[tool.ruff.lint]` in `pyproject.toml`).
 - CI gates on `ruff format --check`, `ruff check`, and `pytest`; `mypy` is local-only (not a CI gate).
+
+**PEP 758 — unparenthesized `except` (do not flag)**: This project targets Python ≥3.14, where `except`/`except*` may list multiple exception types *without* parentheses as long as no name is bound — e.g. `except OSError, json.JSONDecodeError:` catches **both**. This is valid 3.14+ syntax ([PEP 758](https://peps.python.org/pep-0758/)), not the removed Python-2 `except E, name:` form and not a bug. Do not mark, "fix", or rewrite these to parenthesized tuples; both styles are accepted (`ruff` passes them) and appear in `lgit/api.py` and `lgit/compose.py`.
 
 # Common Issues
 
