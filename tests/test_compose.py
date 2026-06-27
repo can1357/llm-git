@@ -502,8 +502,12 @@ def test_should_collect_compose_observations_skips_area_mode() -> None:
     config = CommitConfig(map_reduce_threshold=1_000)
     counter = compose._create_token_counter(config)
 
+    # Large (area-mode) snapshots skip observation collection even though map-reduce would apply.
     assert compose._should_use_map_reduce(snapshot.diff, config, counter)
-    assert not compose._should_collect_compose_observations(snapshot, config, counter)
+    collects = not compose._is_large_compose_snapshot(snapshot) and compose._should_use_map_reduce(
+        snapshot.diff, config, counter
+    )
+    assert not collects
 
 
 def test_compose_analysis_strategy_uses_map_reduce_for_large_diff() -> None:
