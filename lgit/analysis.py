@@ -222,16 +222,6 @@ def extract_scope_candidates(
     return scope_str, is_wide
 
 
-def extract_scope_candidates_from_numstat(
-    numstat: str,
-    config: object | None = None,
-) -> tuple[list[ScopeCandidate], bool, int]:
-    """Return raw candidate objects, wide-change flag, and total lines."""
-
-    candidates, total = ScopeAnalyzer.extract_scope(numstat, config)
-    return candidates, ScopeAnalyzer.is_wide_change(candidates, config), total
-
-
 def extract_path_from_rename(path_part: str) -> str:
     """Return the destination path from git numstat rename syntax."""
 

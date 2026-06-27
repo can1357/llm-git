@@ -13,7 +13,7 @@ from jinja2 import Environment
 
 from .errors import ConfigError
 
-USER_SEPARATOR_MARKER = "======USER======="
+USER_SEPARATOR_MARKER = "<!-- USER -->"
 PROMPT_CATEGORIES = (
     "analysis",
     "summary",
@@ -40,7 +40,6 @@ class PromptParts:
 class AnalysisParams:
     """Parameters for rendering the analysis prompt."""
 
-    variant: str = "default"
     stat: str = ""
     diff: str = ""
     scope_candidates: str = ""
@@ -62,7 +61,6 @@ class MapFile:
 class ComposeIntentPromptParams:
     """Parameters for rendering the compose-intent prompt."""
 
-    variant: str = "default"
     max_commits: int = 1
     stat: str = ""
     snapshot_summary: str = ""
@@ -76,7 +74,6 @@ class ComposeIntentPromptParams:
 class ComposeBindPromptParams:
     """Parameters for rendering the compose-bind prompt."""
 
-    variant: str = "default"
     groups: str = ""
     ambiguous_files: str = ""
 
@@ -85,7 +82,6 @@ class ComposeBindPromptParams:
 class FastPromptParams:
     """Parameters for rendering the fast-mode prompt."""
 
-    variant: str = "default"
     stat: str = ""
     diff: str = ""
     scope_candidates: str = ""
@@ -150,9 +146,9 @@ def render_prompt_parts(
 
 
 def render_analysis_prompt(params: AnalysisParams | None = None, **kwargs: Any) -> PromptParts:
-    """Render the analysis prompt variant."""
+    """Render the analysis prompt."""
     p = params if params is not None else AnalysisParams(**kwargs)
-    template_content = load_template_file("analysis", p.variant)
+    template_content = load_template_file("analysis")
     context = {
         "stat": p.stat,
         "diff": p.diff,
@@ -162,11 +158,10 @@ def render_analysis_prompt(params: AnalysisParams | None = None, **kwargs: Any) 
         "types_description": p.types_description,
         "project_context": p.project_context,
     }
-    return render_prompt_parts(f"analysis/{p.variant}.md", template_content, context)
+    return render_prompt_parts("analysis.md", template_content, context)
 
 
 def render_summary_prompt(
-    variant: str,
     commit_type: str,
     scope: str,
     chars: str,
@@ -174,8 +169,8 @@ def render_summary_prompt(
     stat: str,
     user_context: str | None = None,
 ) -> PromptParts:
-    """Render the summary prompt variant."""
-    template_content = load_template_file("summary", variant)
+    """Render the summary prompt."""
+    template_content = load_template_file("summary")
     context = {
         "commit_type": commit_type,
         "scope": scope,
@@ -184,19 +179,18 @@ def render_summary_prompt(
         "stat": stat,
         "user_context": user_context,
     }
-    return render_prompt_parts(f"summary/{variant}.md", template_content, context)
+    return render_prompt_parts("summary.md", template_content, context)
 
 
 def render_changelog_prompt(
-    variant: str,
     changelog_path: str,
     is_package_changelog: bool,
     stat: str,
     diff: str,
     existing_entries: str | None = None,
 ) -> PromptParts:
-    """Render the changelog prompt variant."""
-    template_content = load_template_file("changelog", variant)
+    """Render the changelog prompt."""
+    template_content = load_template_file("changelog")
     context = {
         "changelog_path": changelog_path,
         "is_package_changelog": is_package_changelog,
@@ -204,45 +198,43 @@ def render_changelog_prompt(
         "diff": diff,
         "existing_entries": existing_entries,
     }
-    return render_prompt_parts(f"changelog/{variant}.md", template_content, context)
+    return render_prompt_parts("changelog.md", template_content, context)
 
 
 def render_map_prompt(
-    variant: str,
     files: Iterable[MapFile | Mapping[str, str]],
     context_header: str = "",
 ) -> PromptParts:
     """Render the map prompt for batched file-observation extraction."""
-    template_content = load_template_file("map", variant)
+    template_content = load_template_file("map")
     context = {
         "files": [_mapping_for_file(file) for file in files],
         "context_header": context_header,
     }
-    return render_prompt_parts(f"map/{variant}.md", template_content, context)
+    return render_prompt_parts("map.md", template_content, context)
 
 
 def render_reduce_prompt(
-    variant: str,
     observations: str,
     stat: str,
     scope_candidates: str,
     types_description: str | None = None,
 ) -> PromptParts:
     """Render the reduce prompt for synthesizing map observations."""
-    template_content = load_template_file("reduce", variant)
+    template_content = load_template_file("reduce")
     context = {
         "observations": observations,
         "stat": stat,
         "scope_candidates": scope_candidates,
         "types_description": types_description,
     }
-    return render_prompt_parts(f"reduce/{variant}.md", template_content, context)
+    return render_prompt_parts("reduce.md", template_content, context)
 
 
 def render_fast_prompt(params: FastPromptParams | None = None, **kwargs: Any) -> PromptParts:
-    """Render the fast-mode single-call prompt variant."""
+    """Render the fast-mode single-call prompt."""
     p = params if params is not None else FastPromptParams(**kwargs)
-    template_content = load_template_file("fast", p.variant)
+    template_content = load_template_file("fast")
     context = {
         "stat": p.stat,
         "diff": p.diff,
@@ -250,16 +242,16 @@ def render_fast_prompt(params: FastPromptParams | None = None, **kwargs: Any) ->
         "user_context": p.user_context,
         "types_description": p.types_description,
     }
-    return render_prompt_parts(f"fast/{p.variant}.md", template_content, context)
+    return render_prompt_parts("fast.md", template_content, context)
 
 
 def render_compose_intent_prompt(
     params: ComposeIntentPromptParams | None = None,
     **kwargs: Any,
 ) -> PromptParts:
-    """Render the compose-intent planning prompt variant."""
+    """Render the compose-intent planning prompt."""
     p = params if params is not None else ComposeIntentPromptParams(**kwargs)
-    template_content = load_template_file("compose-intent", p.variant)
+    template_content = load_template_file("compose-intent")
     context = {
         "max_commits": p.max_commits,
         "stat": p.stat,
@@ -269,42 +261,39 @@ def render_compose_intent_prompt(
         "split_bias": p.split_bias,
         "types_description": p.types_description,
     }
-    return render_prompt_parts(f"compose-intent/{p.variant}.md", template_content, context)
+    return render_prompt_parts("compose-intent.md", template_content, context)
 
 
 def render_compose_bind_prompt(
     params: ComposeBindPromptParams | None = None,
     **kwargs: Any,
 ) -> PromptParts:
-    """Render the compose-bind hunk-assignment prompt variant."""
+    """Render the compose-bind hunk-assignment prompt."""
     p = params if params is not None else ComposeBindPromptParams(**kwargs)
-    template_content = load_template_file("compose-bind", p.variant)
+    template_content = load_template_file("compose-bind")
     context = {"groups": p.groups, "ambiguous_files": p.ambiguous_files}
-    return render_prompt_parts(f"compose-bind/{p.variant}.md", template_content, context)
+    return render_prompt_parts("compose-bind.md", template_content, context)
 
 
-def load_template_file(category: str, variant: str) -> str:
+def load_template_file(category: str) -> str:
     """Load a user override prompt first, then the packaged prompt resource."""
     if category not in PROMPT_CATEGORIES:
         raise ConfigError(f"Unknown prompt category {category!r}")
-    _validate_variant(variant)
     if prompts_dir := get_user_prompts_dir():
-        user_template = prompts_dir.joinpath(category, f"{variant}.md")
+        user_template = prompts_dir.joinpath(f"{category}.md")
         if user_template.exists():
             try:
                 return user_template.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ConfigError(f"Failed to read template file {user_template}: {exc}") from exc
 
-    resource = resources.files("lgit.resources").joinpath("prompts", category, f"{variant}.md")
+    resource = resources.files("lgit.resources").joinpath("prompts", f"{category}.md")
     if resource.is_file():
         try:
             return resource.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ConfigError(f"Failed to read package template {category}/{variant}.md: {exc}") from exc
-    raise ConfigError(
-        f"Template variant {variant!r} in category {category!r} not found as user override or package resource"
-    )
+            raise ConfigError(f"Failed to read package template {category}.md: {exc}") from exc
+    raise ConfigError(f"Template {category!r} not found as user override or package resource")
 
 
 def _find_user_separator(content: str) -> tuple[int, int] | None:
@@ -333,11 +322,6 @@ def _ensure_static_system_prompt(system_template: str, template_name: str) -> No
             f"Template {template_name!r} contains dynamic tags in system section. "
             f"Move interpolated content below {USER_SEPARATOR_MARKER}."
         )
-
-
-def _validate_variant(variant: str) -> None:
-    if not variant or "/" in variant or "\\" in variant or variant in {".", ".."}:
-        raise ConfigError(f"Invalid prompt variant {variant!r}")
 
 
 def _mapping_for_file(file: MapFile | Mapping[str, str]) -> Mapping[str, str]:
