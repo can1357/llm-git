@@ -271,6 +271,114 @@ def test_execute_compose_failure_before_update_ref_preserves_real_index(
     assert run_git(empty_repo, "diff", "--cached").stdout == staged_before
 
 
+def test_execute_compose_partial_round_keeps_uncovered_changes_staged(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (empty_repo / "a.py").write_text("a1\n", encoding="utf-8")
+    (empty_repo / "b.py").write_text("b1\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+    run_git(empty_repo, "commit", "-m", "initial")
+    (empty_repo / "a.py").write_text("a1 changed\n", encoding="utf-8")
+    (empty_repo / "b.py").write_text("b1 changed\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+
+    snapshot = pin_snapshot_staged_state(
+        build_compose_snapshot(git.get_compose_diff(empty_repo), git.get_compose_stat(empty_repo)), empty_repo
+    )
+    a_file = snapshot.file_by_path("a.py")
+    assert a_file is not None
+    # A first-round plan that covers only a.py; b.py is left uncovered.
+    plan = ComposeExecutablePlan(
+        groups=(
+            ComposeExecutableGroup(
+                group_id="G1",
+                commit_type="refactor",
+                scope=None,
+                file_ids=(a_file.file_id,),
+                rationale="change a",
+                dependencies=(),
+                hunk_ids=a_file.hunk_ids,
+            ),
+        ),
+        dependency_order=(0,),
+    )
+
+    async def prepared_messages(*args: object) -> list[str]:
+        return ["refactor: changed a"]
+
+    monkeypatch.setattr(compose, "_prepare_group_messages", prepared_messages)
+    args = Namespace(dir=str(empty_repo), compose_preview=False, sign=False, compose_test_after_each=False)
+    base_state = compose.capture_compose_base_state(empty_repo)
+
+    hashes = asyncio.run(compose.execute_compose(snapshot, plan, CommitConfig(), args, base_state))
+
+    assert len(hashes) == 1
+    # b.py's change must remain *staged* (not demoted to an unstaged edit) so the next round
+    # consumes it; a.py is committed, so it is no longer staged.
+    assert run_git(empty_repo, "diff", "--cached", "--name-only").stdout.split() == ["b.py"]
+    assert "b1 changed" in run_git(empty_repo, "diff", "--cached").stdout
+    # A follow-up round still sees the leftover instead of stopping early.
+    assert "b.py" in git.get_compose_diff(empty_repo)
+
+
+def test_execute_compose_partial_round_preserves_mid_run_staging(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (empty_repo / "a.py").write_text("a1\n", encoding="utf-8")
+    (empty_repo / "b.py").write_text("b1\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+    run_git(empty_repo, "commit", "-m", "initial")
+    (empty_repo / "a.py").write_text("a1 changed\n", encoding="utf-8")
+    (empty_repo / "b.py").write_text("b1 changed\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+
+    snapshot = pin_snapshot_staged_state(
+        build_compose_snapshot(git.get_compose_diff(empty_repo), git.get_compose_stat(empty_repo)), empty_repo
+    )
+    a_file = snapshot.file_by_path("a.py")
+    assert a_file is not None
+    plan = ComposeExecutablePlan(
+        groups=(
+            ComposeExecutableGroup(
+                group_id="G1",
+                commit_type="refactor",
+                scope=None,
+                file_ids=(a_file.file_id,),
+                rationale="change a",
+                dependencies=(),
+                hunk_ids=a_file.hunk_ids,
+            ),
+        ),
+        dependency_order=(0,),
+    )
+
+    async def prepared_messages(*args: object) -> list[str]:
+        # Mid-run, after the snapshot was captured, the user stages: an unrelated new file (c.py)
+        # and a *newer* edit to a snapshot path (b.py) that the plan does not cover.
+        (empty_repo / "c.py").write_text("user mid-run\n", encoding="utf-8")
+        (empty_repo / "b.py").write_text("b1 changed even more\n", encoding="utf-8")
+        run_git(empty_repo, "add", "c.py", "b.py")
+        return ["refactor: changed a"]
+
+    monkeypatch.setattr(compose, "_prepare_group_messages", prepared_messages)
+    args = Namespace(dir=str(empty_repo), compose_preview=False, sign=False, compose_test_after_each=False)
+    base_state = compose.capture_compose_base_state(empty_repo)
+
+    hashes = asyncio.run(compose.execute_compose(snapshot, plan, CommitConfig(), args, base_state))
+
+    assert len(hashes) == 1
+    # The uncovered b.py stays staged AND the user's mid-run c.py survives.
+    assert sorted(run_git(empty_repo, "diff", "--cached", "--name-only").stdout.split()) == ["b.py", "c.py"]
+    # Crucially, b.py keeps the user's mid-run content — it is NOT reverted to the snapshot version.
+    staged_b = run_git(empty_repo, "diff", "--cached").stdout
+    assert "b1 changed even more" in staged_b
+    assert "b1 changed\n" not in staged_b
+
+
 def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     rounds: list[int] = []
 

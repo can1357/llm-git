@@ -67,8 +67,8 @@ class TestRunner:
         self.config = config
         self.filter: str | None = None
 
-    def with_filter(self, filter: str | None) -> Self:
-        self.filter = filter or None
+    def with_filter(self, name_filter: str | None) -> Self:
+        self.filter = name_filter or None
         return self
 
     def fixture_names(self) -> list[str]:

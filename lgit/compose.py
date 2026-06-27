@@ -106,11 +106,10 @@ class PlanningMode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ComposeBaseState:
-    """HEAD, symbolic ref, and live index tree captured before LLM calls."""
+    """HEAD hash and symbolic ref captured before LLM calls, to guard the final ref update."""
 
     head_hash: str
     head_ref: str
-    index_tree: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,11 +264,10 @@ def compute_dependency_order(
 
 
 def capture_compose_base_state(repo_dir: str | os.PathLike[str] = ".") -> ComposeBaseState:
-    """Capture HEAD/ref/index state once before compose planning or LLM calls."""
+    """Capture HEAD hash and symbolic ref once before compose planning or LLM calls."""
     return ComposeBaseState(
         head_hash=git.get_head_hash(repo_dir),
         head_ref=git.current_head_ref(repo_dir),
-        index_tree=git.write_real_index_tree(repo_dir),
     )
 
 
@@ -424,12 +422,9 @@ async def execute_compose(
         return []
 
     git.update_ref_checked(base_state.head_ref, parent_hash, base_state.head_hash, repo_dir)
-    current_index_tree = git.write_real_index_tree(repo_dir)
-    if current_index_tree == base_state.index_tree:
-        git.reset_mixed_to(parent_hash, repo_dir)
-    else:
-        paths = snapshot.touched_paths()
-        git.reset_paths_to(parent_hash, paths, repo_dir)
+    # Leave the real index untouched. It is this round's staged tree, so committed paths now match
+    # the new HEAD (clean) while staged changes the plan did not cover — plus any staging the user
+    # added mid-run, on any path — stay staged for the next round. The worktree is never touched.
     return commit_hashes
 
 

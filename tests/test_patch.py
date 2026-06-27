@@ -476,7 +476,6 @@ def test_get_compose_diff_detects_unstaged_whole_file_move(empty_repo: Path, run
     assert moved is not None
     assert moved.old_path == "src/old.rs"
     assert snapshot.file_by_path("src/old.rs") is None
-    assert snapshot.touched_paths() == ["src/new.rs", "src/old.rs"]
 
 
 def test_stage_executable_group_renames_file_atomically(empty_repo: Path, run_git: GitRunner) -> None:

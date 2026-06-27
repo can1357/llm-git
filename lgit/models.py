@@ -852,15 +852,6 @@ class ComposeSnapshot:
         """Return all hunks belonging to a snapshot file."""
         return [hunk for hunk in self.hunks if hunk.file_id == file_id]
 
-    def touched_paths(self) -> list[str]:
-        """Worktree paths affected by the snapshot, including pre-rename source paths."""
-        paths: list[str] = []
-        for file in self.files:
-            paths.append(file.path)
-            if file.old_path is not None:
-                paths.append(file.old_path)
-        return paths
-
 
 def _format_body_line(line: str) -> str:
     stripped = line.strip()

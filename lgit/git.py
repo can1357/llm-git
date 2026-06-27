@@ -508,20 +508,6 @@ def update_ref_checked(refname: str, new: str, old: str, dir: str | os.PathLike[
     run_git(["update-ref", refname, new, old], cwd=dir)
 
 
-def reset_mixed_to(treeish: str, dir: str | os.PathLike[str] = ".") -> None:
-    """Reset the live index to `treeish` without changing the worktree."""
-
-    run_git(["reset", "--mixed", "-q", treeish], cwd=dir)
-
-
-def reset_paths_to(treeish: str, paths: Sequence[str], dir: str | os.PathLike[str] = ".") -> None:
-    """Reset selected index paths to `treeish`, leaving worktree untouched."""
-
-    if not paths:
-        return
-    run_git(["reset", "-q", treeish, "--", *paths], cwd=dir)
-
-
 def append_signoff_trailer(message: str, dir: str | os.PathLike[str] = ".") -> str:
     """Append a Signed-off-by trailer from Git's committer identity."""
 
@@ -541,19 +527,19 @@ def get_commit_list(start_ref: str | None = None, dir: str | os.PathLike[str] = 
     return [line for line in stdout.splitlines() if line]
 
 
-def get_commit_metadata(hash: str, dir: str | os.PathLike[str] = "."):
+def get_commit_metadata(commit_hash: str, dir: str | os.PathLike[str] = "."):
     """Extract author, committer, message, parent, and tree metadata for a commit."""
 
     fmt = "%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B"
-    info = run_git(["show", "-s", f"--format={fmt}", hash], cwd=dir).stdout
+    info = run_git(["show", "-s", f"--format={fmt}", commit_hash], cwd=dir).stdout
     parts = info.split("\0", 6)
     if len(parts) < 7:
-        raise GitError(f"Failed to parse commit metadata for {hash}")
-    tree_hash = _rev_parse_tree_of(hash, dir)
-    parents_line = run_git(["rev-list", "--parents", "-n", "1", hash], cwd=dir).stdout
+        raise GitError(f"Failed to parse commit metadata for {commit_hash}")
+    tree_hash = _rev_parse_tree_of(commit_hash, dir)
+    parents_line = run_git(["rev-list", "--parents", "-n", "1", commit_hash], cwd=dir).stdout
     parent_hashes = parents_line.split()[1:]
     return CommitMetadata(
-        hash=hash,
+        hash=commit_hash,
         author_name=parts[0],
         author_email=parts[1],
         author_date=parts[2],
