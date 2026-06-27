@@ -5,6 +5,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from lgit import cli, git, profile
 from lgit.api import summary_from_holistic_analysis
 from lgit.config import CommitConfig
@@ -62,12 +63,12 @@ def test_trace_output_flag_enables_file_profiling() -> None:
     assert profile.timings_enabled(args) is True
 
 
-def test_completions_generate_for_all_shells() -> None:
-    for shell in ("bash", "zsh", "fish", "powershell", "elvish"):
-        script = cli._completion_script(shell)
+@pytest.mark.parametrize("shell", ["bash", "zsh", "fish", "powershell", "elvish"])
+def test_completions_generate_for_all_shells(shell: str) -> None:
+    script = cli._completion_script(shell)
 
-        assert script
-        assert "lgit" in script
+    assert script
+    assert "lgit" in script
 
 
 def test_summary_from_holistic_analysis_ignores_blank_summary() -> None:

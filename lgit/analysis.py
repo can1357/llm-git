@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from .models import ScopeCandidate
 
@@ -28,15 +30,23 @@ PLACEHOLDER_DIRS = {
 SKIP_DIRS = {".test", "tests", "benches", "examples", "target", "build", "node_modules", ".github"}
 
 
+class _ScopeConfig(Protocol):
+    """Config attributes read during scope analysis; satisfied by ``CommitConfig``."""
+
+    excluded_files: list[str]
+    wide_change_threshold: float
+    wide_change_abstract: bool
+
+
 @dataclass(slots=True)
 class ScopeAnalyzer:
     """Accumulates changed-line totals per meaningful path component."""
 
-    component_lines: dict[str, int] = field(default_factory=dict)
+    component_lines: Counter[str] = field(default_factory=Counter)
     total_lines: int = 0
 
     @classmethod
-    def from_numstat(cls, numstat: str, config: object | None = None) -> ScopeAnalyzer:
+    def from_numstat(cls, numstat: str, config: _ScopeConfig | None = None) -> ScopeAnalyzer:
         """Build an analyzer from git diff --numstat output."""
 
         analyzer = cls()
@@ -44,7 +54,7 @@ class ScopeAnalyzer:
             analyzer.process_numstat_line(line, config)
         return analyzer
 
-    def process_numstat_line(self, line: str, config: object | None = None) -> None:
+    def process_numstat_line(self, line: str, config: _ScopeConfig | None = None) -> None:
         """Process one added/deleted/path numstat row."""
 
         parts = line.split("\t")
@@ -65,7 +75,7 @@ class ScopeAnalyzer:
         for component in extract_components_from_path(path):
             if any("." in segment for segment in component.split("/")):
                 continue
-            self.component_lines[component] = self.component_lines.get(component, 0) + lines_changed
+            self.component_lines[component] += lines_changed
 
     def build_scope_candidates(self) -> list[ScopeCandidate]:
         """Return sorted candidates with percentage and confidence scores."""
@@ -87,7 +97,7 @@ class ScopeAnalyzer:
         return candidates
 
     @staticmethod
-    def is_wide_change(candidates: Sequence[ScopeCandidate], config: object | None = None) -> bool:
+    def is_wide_change(candidates: Sequence[ScopeCandidate], config: _ScopeConfig | None = None) -> bool:
         """Return true when no scope dominates or many roots are touched."""
 
         threshold = float(getattr(config, "wide_change_threshold", 0.5))
@@ -97,14 +107,14 @@ class ScopeAnalyzer:
         return len(roots) >= 3
 
     @staticmethod
-    def extract_scope(numstat: str, config: object | None = None) -> tuple[list[ScopeCandidate], int]:
+    def extract_scope(numstat: str, config: _ScopeConfig | None = None) -> tuple[list[ScopeCandidate], int]:
         """Return candidates plus total changed lines from numstat."""
 
         analyzer = ScopeAnalyzer.from_numstat(numstat, config)
         return analyzer.build_scope_candidates(), analyzer.total_lines
 
     @staticmethod
-    def count_changed_lines(numstat: str, config: object | None = None) -> int:
+    def count_changed_lines(numstat: str, config: _ScopeConfig | None = None) -> int:
         """Count changed non-binary, non-excluded lines in numstat."""
 
         return ScopeAnalyzer.from_numstat(numstat, config).total_lines
@@ -164,7 +174,7 @@ def extract_scope_candidates(
     source: object,
     target: str | None = None,
     dir: str = ".",
-    config: object | None = None,
+    config: _ScopeConfig | None = None,
 ) -> tuple[str, bool]:
     """Extract a scope prompt string and wide-change flag.
 
@@ -284,7 +294,7 @@ def _is_file_segment(segment: str) -> bool:
     return "." in segment and not segment.startswith(".") and segment.rfind(".") > 0
 
 
-def _is_excluded(path: str, config: object | None) -> bool:
+def _is_excluded(path: str, config: _ScopeConfig | None) -> bool:
     excluded = getattr(config, "excluded_files", ())
     return any(path.endswith(str(pattern)) for pattern in excluded)
 

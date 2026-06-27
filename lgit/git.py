@@ -527,7 +527,7 @@ def get_commit_list(start_ref: str | None = None, dir: str | os.PathLike[str] = 
     return [line for line in stdout.splitlines() if line]
 
 
-def get_commit_metadata(commit_hash: str, dir: str | os.PathLike[str] = "."):
+def get_commit_metadata(commit_hash: str, dir: str | os.PathLike[str] = ".") -> CommitMetadata:
     """Extract author, committer, message, parent, and tree metadata for a commit."""
 
     fmt = "%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B"
