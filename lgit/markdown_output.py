@@ -660,14 +660,6 @@ def _truncate_summary(text: str, limit: int) -> str:
     return cleaned[: max(1, limit)].rsplit(" ", 1)[0].rstrip(" ,;:-") or cleaned[:limit].rstrip(" ,;:-")
 
 
-def _dominant_area(text: str) -> str | None:
-    for line in text.splitlines():
-        match = re.search(r"(?:^|\s)(?:[ab]/)?([\w.-]+)(?:/|\.)", line)
-        if match:
-            return match.group(1).strip("._-").lower() or None
-    return None
-
-
 def _dedupe(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []

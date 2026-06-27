@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import InitVar, dataclass, field
 from enum import StrEnum
 from functools import lru_cache
@@ -157,11 +157,6 @@ class CategoryConfig:
     match: CategoryMatch = field(default_factory=CategoryMatch)
     default: bool = False
 
-    @property
-    def header_name(self) -> str:
-        """Return the changelog section header for this category."""
-        return self.header or self.name
-
 
 @dataclass(frozen=True, slots=True)
 class _Vocabulary:
@@ -207,9 +202,9 @@ class CommitType:
     @classmethod
     def from_raw(cls, raw: str | Self) -> Self:
         """Create a commit type from a canonical name or known alias."""
-        if isinstance(raw, cls):
-            return raw
-        return cls(raw)
+        if isinstance(raw, str):
+            return cls(raw)
+        return raw
 
     def __str__(self) -> str:
         return self.value
@@ -233,10 +228,6 @@ class CommitType:
 
     def __hash__(self) -> int:
         return hash(self.value)
-
-    def is_empty(self) -> bool:
-        """Return whether the canonical value is empty."""
-        return not self.value
 
 
 def _canonical_commit_type(raw: str) -> str:
@@ -276,9 +267,9 @@ class Scope:
     @classmethod
     def from_raw(cls, raw: str | Self) -> Self:
         """Create a scope after strict validation."""
-        if isinstance(raw, cls):
-            return raw
-        return cls(raw)
+        if isinstance(raw, str):
+            return cls(raw)
+        return raw
 
     def __str__(self) -> str:
         return self.value
@@ -302,10 +293,6 @@ class Scope:
 
     def __hash__(self) -> int:
         return hash(self.value)
-
-    def is_empty(self) -> bool:
-        """Return whether the scope is empty."""
-        return not self.value
 
     def segments(self) -> tuple[str, ...]:
         """Split the scope into slash-delimited segments."""
@@ -399,9 +386,9 @@ class CommitSummary:
     @classmethod
     def from_raw(cls, raw: str | Self, *, max_length: int = DEFAULT_SUMMARY_MAX_LENGTH) -> Self:
         """Create a summary with a configurable hard length limit."""
-        if isinstance(raw, cls):
-            return raw
-        return cls(raw, max_length=max_length)
+        if isinstance(raw, str):
+            return cls(raw, max_length=max_length)
+        return raw
 
     def __str__(self) -> str:
         return self.value
@@ -415,10 +402,6 @@ class CommitSummary:
 
     def __len__(self) -> int:
         return _byte_len(self.value)
-
-    def is_empty(self) -> bool:
-        """Return whether the summary is empty."""
-        return not self.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,10 +507,6 @@ def _analysis_details_tuple(values: Any) -> tuple[AnalysisDetail, ...]:
     return tuple(detail for value in values if (detail := _coerce_analysis_detail(value)) is not None)
 
 
-def _string_vec_tuple(value: Any) -> tuple[str, ...]:
-    return tuple(_value_to_strings(value))
-
-
 def _value_to_strings(value: Any) -> list[str]:
     if value is None:
         return []
@@ -574,6 +553,25 @@ class ConventionalAnalysis:
         object.__setattr__(self, "details", _analysis_details_tuple(self.details))
         object.__setattr__(self, "issue_refs", _string_tuple(self.issue_refs))
 
+    @classmethod
+    def from_raw(
+        cls,
+        *,
+        commit_type: str | CommitType,
+        scope: str | Scope | None = None,
+        summary: str | None = None,
+        details: Iterable[Any] = (),
+        issue_refs: Iterable[str] = (),
+    ) -> Self:
+        """Create an analysis from raw model output, coercing each field."""
+        return cls(
+            commit_type=CommitType.from_raw(commit_type),
+            scope=coerce_optional_scope(scope),
+            summary=summary,
+            details=_analysis_details_tuple(details),
+            issue_refs=_string_tuple(issue_refs),
+        )
+
     @property
     def type(self) -> CommitType:
         """Return the commit type under the JSON field name used by prompts."""
@@ -582,14 +580,6 @@ class ConventionalAnalysis:
     def body_texts(self) -> list[str]:
         """Return detail text for summary generation."""
         return [detail.text for detail in self.details]
-
-    def changelog_entries(self) -> dict[ChangelogCategory, list[str]]:
-        """Group user-visible detail text by changelog category."""
-        entries: dict[ChangelogCategory, list[str]] = {}
-        for detail in self.details:
-            if detail.user_visible and detail.changelog_category is not None:
-                entries.setdefault(detail.changelog_category, []).append(detail.text)
-        return entries
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,21 +627,6 @@ class ChangelogCategory(StrEnum):
         if normalized == "breaking":
             return cls.BREAKING
         return cls.CHANGED
-
-    @classmethod
-    def from_commit_type(cls, commit_type: str | CommitType, body: Sequence[str] = ()) -> Self:
-        """Resolve the default category for a commit type and body."""
-        if any("breaking" in item.lower() or "incompatible" in item.lower() for item in body):
-            return cls.BREAKING
-        match str(commit_type):
-            case "feat":
-                return cls.ADDED
-            case "fix":
-                return cls.FIXED
-            case "revert":
-                return cls.REMOVED
-            case _:
-                return cls.CHANGED
 
     @classmethod
     def render_order(cls) -> tuple[Self, ...]:
@@ -866,10 +841,6 @@ class ComposeSnapshot:
     def hunks_for_file(self, file_id: str) -> list[ComposeHunk]:
         """Return all hunks belonging to a snapshot file."""
         return [hunk for hunk in self.hunks if hunk.file_id == file_id]
-
-    def all_hunk_ids(self) -> list[str]:
-        """Return every hunk id in snapshot order."""
-        return [hunk.hunk_id for hunk in self.hunks]
 
 
 def _format_body_line(line: str) -> str:
