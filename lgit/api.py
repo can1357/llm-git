@@ -161,7 +161,7 @@ async def generate_conventional_analysis(
     )
     if user_context:
         user_prompt = f"{user_prompt}\n\n<user_context>\n{user_context}\n</user_context>"
-    type_enum = list(config.types or {"chore": None})
+    type_enum = list(config.types) or ["chore"]
     spec = OneShotSpec(
         operation="analysis",
         model=resolve_model_name(config.analysis_model),
@@ -259,14 +259,10 @@ async def generate_summary_from_analysis(
     summary = strip_type_prefix(
         summary
         or analysis.summary
-        or fallback_summary(
-            stat, analysis.body_texts(), limit=config.summary_hard_limit, commit_type=commit_type
-        )
+        or fallback_summary(stat, analysis.body_texts(), limit=config.summary_hard_limit, commit_type=commit_type)
     )
     if not validate_summary_quality(summary, commit_type, stat).ok:
-        summary = _fallback_summary_for_commit(
-            stat, analysis.body_texts(), commit_type, config.summary_hard_limit
-        )
+        summary = _fallback_summary_for_commit(stat, analysis.body_texts(), commit_type, config.summary_hard_limit)
     return summary[: config.summary_hard_limit].rstrip(" .")
 
 
@@ -284,7 +280,9 @@ async def generate_analysis_with_map_reduce(
         count_sync = getattr(counter, "count_sync", None)
         token_count = int(count_sync(diff)) if callable(count_sync) else max(1, len(diff) // 4)
         style.print_info(f"Large diff detected ({token_count} tokens), using map-reduce...")
-        return await run_map_reduce(config, stat, diff, scope_candidates, model_name=kwargs.get("model_name"), counter=counter)
+        return await run_map_reduce(
+            config, stat, diff, scope_candidates, model_name=kwargs.get("model_name"), counter=counter
+        )
     return await generate_conventional_analysis(config, stat, diff, scope_candidates, **kwargs)
 
 
@@ -310,7 +308,7 @@ async def generate_fast_commit(
             "types_description": format_types_description(config),
         },
     )
-    type_enum = list(config.types or {"chore": None})
+    type_enum = list(config.types) or ["chore"]
     spec = OneShotSpec(
         operation="fast",
         model=resolve_model_name(config.analysis_model),
@@ -708,7 +706,12 @@ def _build_cache_entry(config: CommitConfig, spec: OneShotSpec) -> tuple[Any, st
 
 
 def _record_failure(
-    config: CommitConfig, cache_entry: tuple[Any, str] | None, spec: OneShotSpec, request: str, response: str, error: Exception
+    config: CommitConfig,
+    cache_entry: tuple[Any, str] | None,
+    spec: OneShotSpec,
+    request: str,
+    response: str,
+    error: Exception,
 ) -> None:
     sink = llm_cache.LlmCache.instance()
     if sink is None and cache_entry is not None:

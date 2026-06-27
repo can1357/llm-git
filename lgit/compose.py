@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from . import api, diffing, git, map_reduce, style, templates, tokens
-from .errors import GitError, ValidationFailure
+from .errors import GitError, NoChanges, ValidationFailure
 from .models import (
     CommitSummary,
     CommitType,
@@ -29,14 +29,14 @@ from .patch import (
     build_compose_snapshot,
     create_executable_group_patch,
     force_stage_file_from_base_in_index,
-    pin_snapshot_worktree_state,
+    pin_snapshot_staged_state,
     stage_executable_group_in_index,
 )
 from .validation import validate_commit_message
 
-
 if TYPE_CHECKING:
     from .config import CommitConfig
+
 
 class _ComposeArgs(Protocol):
     """Command-line arguments read during compose planning and execution."""
@@ -273,11 +273,18 @@ def capture_compose_base_state(repo_dir: str | os.PathLike[str] = ".") -> Compos
     )
 
 
-async def run_compose_mode(args: _ComposeArgs, config: _ComposeConfig) -> list[str]:
-    """Run compose rounds until preview, no changes remain, or max rounds is reached."""
-    max_rounds = int(config.compose_max_rounds or 5)
+async def run_compose_mode(args: _ComposeArgs, config: CommitConfig) -> list[str]:
+    """Split the staged tree into atomic commits, looping until the staged diff is empty.
+
+    Compose mirrors the regular commit path's scope: it only ever touches staged changes
+    (callers auto-stage when nothing is staged). One LLM plan may not cover every staged
+    change, so each round commits what it can and re-plans the remainder. The loop is
+    unconstrained, but fails fast if a round makes no progress — staged changes still remain
+    yet no commit was produced — instead of spinning forever or silently leaving them behind.
+    """
     all_hashes: list[str] = []
-    for round_number in range(1, max_rounds + 1):
+    round_number = 1
+    while True:
         hashes = await run_compose_round(args, config, round_number)
         all_hashes.extend(hashes)
         if args.compose_preview:
@@ -286,8 +293,12 @@ async def run_compose_mode(args: _ComposeArgs, config: _ComposeConfig) -> list[s
             git.get_compose_diff(args.dir, config)
         except NoChanges:
             break
-        if round_number == max_rounds:
-            break
+        if not hashes:
+            raise GitError(
+                "Compose made no progress: staged changes remain but the plan produced no commits. "
+                "Re-run, narrow what is staged, or split manually."
+            )
+        round_number += 1
     return all_hashes
 
 
@@ -315,14 +326,14 @@ def _print_executable_plan(snapshot: ComposeSnapshot, plan: ComposeExecutablePla
             print(f"   Depends on: {', '.join(group.dependencies)}")
 
 
-async def run_compose_round(args: _ComposeArgs, config: _ComposeConfig, round_number: int = 1) -> list[str]:
+async def run_compose_round(args: _ComposeArgs, config: CommitConfig, round_number: int = 1) -> list[str]:
     """Plan one immutable compose snapshot and optionally execute it in isolation."""
     repo_dir = args.dir
     base_state = capture_compose_base_state(repo_dir)
     diff = git.get_compose_diff(repo_dir, config)
     stat = git.get_compose_stat(repo_dir)
     snapshot = build_compose_snapshot(diff, stat)
-    snapshot = pin_snapshot_worktree_state(snapshot, repo_dir)
+    snapshot = pin_snapshot_staged_state(snapshot, repo_dir)
     _save_debug_artifact(args, f"compose_round_{round_number}_snapshot.json", _snapshot_to_jsonable(snapshot))
 
     token_counter = _create_token_counter(config)
@@ -1700,12 +1711,12 @@ async def _message_parts_from_api(
     strategy = _compose_analysis_strategy(diff, config, counter)
     if strategy is ComposeAnalysisStrategy.MAP_REDUCE:
         analysis = await map_reduce.run_map_reduce(
-            diff,
-            stat,
-            group.rationale,
-            config.analysis_model,
             config,
-            counter,
+            stat,
+            diff,
+            scope_candidates=group.rationale,
+            model_name=config.analysis_model,
+            counter=counter,
         )
     else:
         analysis_diff = diff
@@ -1912,7 +1923,7 @@ __all__ = [
     "compute_dependency_order",
     "create_executable_group_patch",
     "execute_compose",
-    "pin_snapshot_worktree_state",
+    "pin_snapshot_staged_state",
     "plan_compose_snapshot",
     "run_compose_mode",
     "run_compose_round",

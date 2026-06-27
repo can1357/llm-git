@@ -325,6 +325,10 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
 async def _run_compose(args: argparse.Namespace, config: CommitConfig) -> int:
     from .compose import run_compose_mode
 
+    # Compose commits only the staged tree, using the same scope rule as the regular path:
+    # staged changes are used as-is; otherwise stage everything before splitting.
+    with profile.section("auto_stage_if_needed", _timing_collector(args)):
+        _auto_stage_if_needed(args, config)
     hashes = await run_compose_mode(args, config)
     if hashes:
         for commit_hash in hashes:

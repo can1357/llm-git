@@ -87,7 +87,7 @@ async def reduce_phase(
 ) -> ConventionalAnalysis:
     """Synthesize map observations into final conventional analysis."""
 
-    type_enum = list(config.types or {"chore": None})
+    type_enum = list(config.types) or ["chore"]
     observations_json = json.dumps(
         [_observation_to_mapping(item) for item in observations], ensure_ascii=False, indent=2
     )
@@ -185,7 +185,12 @@ async def _map_phase(
 
 
 async def _map_file_batch(
-    files: Sequence[FileDiff], context_header: str, model_name: str, config: CommitConfig, counter: Any, progress_label: str
+    files: Sequence[FileDiff],
+    context_header: str,
+    model_name: str,
+    config: CommitConfig,
+    counter: Any,
+    progress_label: str,
 ) -> list[FileObservation]:
     rendered = [_render_file_diff_for_batch(file, counter) for file in files]
     prompt_files = [{"path": file.filename, "diff": diff} for file, diff in zip(files, rendered, strict=True)]
