@@ -103,7 +103,7 @@ uv run pytest -k truncate                    # Match by name
 8. Create commit (unless dry-run)
 
 **Compose Mode** (`lgit/compose.py:run_compose_mode`):
-1. Combine staged + unstaged diffs into single analysis
+1. Scope to the staged tree, exactly like the regular commit path: callers `git add -A` first only when nothing is staged (`_run_compose` → `_auto_stage_if_needed`); the snapshot is then `git diff --cached` (index vs HEAD, with rename detection). Unstaged worktree edits and untracked files are out of scope. The loop is unconstrained — each round commits what its plan covers and re-plans the remaining staged diff until empty — but errors out if a round produces no commits while staged changes remain (a no-op plan), instead of spinning forever.
 2. Intent analysis - AI identifies logical commit groups from markdown:
    - Returns group headings with file IDs/hunk IDs that are mapped to compose groups
    - **CRITICAL**: Each group specifies file paths + hunk headers (e.g., `@@ -10,5 +10,7 @@`) or `["ALL"]`
@@ -147,13 +147,13 @@ uv run pytest -k truncate                    # Match by name
 
 ## Hunk-Level Staging (`lgit/patch.py`)
 
-**Problem**: Staging from the live worktree (`git add <file>`) reads whatever is on disk *at staging time*. Compose spends minutes in LLM calls; any edits the user makes meanwhile would leak into the generated commits.
+**Problem**: Compose splits the *staged* tree but spends minutes in LLM calls. Reading the live worktree (`git add <file>`) at staging time would let unstaged edits made to a staged file in the meantime leak into the generated commits.
 
-**Solution**: Everything staged during compose comes from the immutable snapshot captured at invocation — never from the live worktree.
+**Solution**: Everything staged during a compose round comes from the immutable staged-index snapshot captured at the start of that round — never from the live worktree.
 
 **Key steps:**
-- Build the compose snapshot - Parse the captured diff into `ComposeFile`/`ComposeHunk` records with stable ids
-- Pin worktree state - Hash every changed file's worktree content into the odb at capture time (object `{mode, oid}`, or deleted); handles symlinks, submodule gitlinks, and binaries
+- Build the compose snapshot - Parse the captured `git diff --cached` into `ComposeFile`/`ComposeHunk` records with stable ids
+- Pin staged-index state - Capture each changed path's staged blob (object `{mode, oid}`, or deleted) from the index at capture time via `git ls-files -s`; covers regular blobs, symlinks, and submodule gitlinks uniformly
 - Stage a group into an isolated temp index:
   - Partial file: `git apply --cached --3way` with the snapshot-derived patch; on conflict, re-splice from the base blob
   - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
