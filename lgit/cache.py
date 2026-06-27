@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import threading
@@ -50,12 +49,9 @@ class CacheMaterial:
     operation: str
     model: str
     tool_name: str
-    tool_description: str
     system_prompt: str
     user_prompt: str
-    schema: Any
     api_mode: str
-    markdown_output: bool
 
 
 class LlmCache:
@@ -263,15 +259,8 @@ def compute_key(material: CacheMaterial) -> str:
     _write_field(hasher, "model", material.model)
     _write_field(hasher, "api_mode", material.api_mode)
     _write_field(hasher, "tool_name", material.tool_name)
-    _write_field(hasher, "tool_description", material.tool_description)
     _write_field(hasher, "system", material.system_prompt)
     _write_field(hasher, "user", material.user_prompt)
-    _write_field(hasher, "markdown_output", "true" if material.markdown_output else "false")
-    try:
-        schema = json.dumps(material.schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    except TypeError:
-        schema = ""
-    _write_field(hasher, "schema", schema)
     hasher.update(b"\n")
     return hasher.hexdigest()
 

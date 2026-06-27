@@ -98,10 +98,7 @@ class CommitConfig:
     excluded_files: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED_FILES))
     low_priority_extensions: list[str] = field(default_factory=lambda: list(DEFAULT_LOW_PRIORITY_EXTENSIONS))
     max_detail_tokens: int = 200
-    analysis_prompt_variant: str = "default"
-    summary_prompt_variant: str = "default"
     wide_change_abstract: bool = True
-    markdown_output: bool = True
     exclude_old_message: bool = True
     gpg_sign: bool = False
     signoff: bool = False
@@ -409,10 +406,7 @@ _FIELD_COERCERS = {
     "excluded_files": _to_str_list,
     "low_priority_extensions": _to_str_list,
     "max_detail_tokens": _to_int,
-    "analysis_prompt_variant": _to_str,
-    "summary_prompt_variant": _to_str,
     "wide_change_abstract": _to_bool,
-    "markdown_output": _to_bool,
     "exclude_old_message": _to_bool,
     "gpg_sign": _to_bool,
     "signoff": _to_bool,

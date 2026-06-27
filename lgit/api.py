@@ -53,7 +53,6 @@ _JSON_CACHE_PREFIX = "\x00json:"
 class OneShotSource(StrEnum):
     """Origin of a parsed one-shot response."""
 
-    TOOL_CALL = "tool_call"
     OUTPUT_JSON_PARSE = "output_json_parse"
     PLAIN_TEXT_CONTENT = "plain_text_content"
     CACHE = "cache"
@@ -70,17 +69,14 @@ class OneShotDebug:
 
 @dataclass(frozen=True, slots=True)
 class OneShotSpec:
-    """Complete description of a single LLM tool or markdown request."""
+    """Complete description of a single markdown LLM request."""
 
     operation: str
     model: str | None = None
     prompt_family: str = "custom"
-    prompt_variant: str = "default"
     system_prompt: str = ""
     user_prompt: str = ""
     tool_name: str = "create_response"
-    tool_description: str = "Return the requested structured response"
-    schema: Mapping[str, Any] | None = None
     progress_label: str | None = None
     debug: OneShotDebug | Mapping[str, Any] | str | Path | None = None
     cacheable: bool = True
@@ -96,12 +92,6 @@ class OneShotResponse:
     stop_reason: str | None = None
 
 
-def strict_json_schema(properties: Mapping[str, Any], required: list[str] | tuple[str, ...]) -> dict[str, Any]:
-    """Build a strict object JSON schema with no additional properties."""
-
-    return {"type": "object", "properties": dict(properties), "required": list(required), "additionalProperties": False}
-
-
 async def run_oneshot(
     config: Any,
     prompt: str | OneShotSpec | Mapping[str, Any] | None = None,
@@ -109,37 +99,26 @@ async def run_oneshot(
     spec: OneShotSpec | Mapping[str, Any] | None = None,
     system_prompt: str | None = None,
     model: str | None = None,
-    schema: Mapping[str, Any] | None = None,
-    schema_name: str = "response",
     tool_name: str | None = None,
-    tool_description: str | None = None,
     operation: str | None = None,
     prompt_family: str = "custom",
-    prompt_variant: str = "default",
-    temperature: float | None = None,
     debug_label: str | None = None,
     debug: OneShotDebug | Mapping[str, Any] | str | Path | None = None,
-    markdown_output: bool | None = None,
     cache: bool = True,
     cacheable: bool | None = None,
     **_: Any,
 ) -> Any:
-    """Run one LLM request, returning parsed output or a ``OneShotResponse`` for specs."""
+    """Run one markdown LLM request, returning parsed output or a ``OneShotResponse`` for specs."""
 
-    del temperature
     return_response = isinstance(prompt, OneShotSpec) or spec is not None or isinstance(prompt, Mapping)
     built = _coerce_spec(
         prompt,
         spec=spec,
         system_prompt=system_prompt,
         model=model,
-        schema=schema,
-        schema_name=schema_name,
         tool_name=tool_name,
-        tool_description=tool_description,
         operation=operation,
         prompt_family=prompt_family,
-        prompt_variant=prompt_variant,
         debug_label=debug_label,
         debug=debug,
         cacheable=cache if cacheable is None else cacheable,
@@ -151,7 +130,7 @@ async def run_oneshot(
                 str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))
             ),
         )
-    response = await _run_oneshot_response(config, built, markdown_output=markdown_output)
+    response = await _run_oneshot_response(config, built)
     return response if return_response else response.output
 
 
@@ -170,14 +149,8 @@ async def generate_conventional_analysis(
 ) -> ConventionalAnalysis:
     """Generate a structured conventional-commit analysis for a diff."""
 
-    variant = (
-        "markdown"
-        if bool(getattr(config, "markdown_output", True))
-        else str(getattr(config, "analysis_prompt_variant", "default"))
-    )
     system_prompt, user_prompt = render_prompt(
         "analysis",
-        variant,
         {
             "project_context": project_context or "",
             "types_description": format_types_description(config),
@@ -195,12 +168,9 @@ async def generate_conventional_analysis(
         operation="analysis",
         model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))),
         prompt_family="analysis",
-        prompt_variant=variant,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         tool_name="create_conventional_analysis",
-        tool_description="Create conventional commit analysis from a git diff",
-        schema=build_analysis_schema(type_enum, config),
         progress_label="analysis",
         debug=OneShotDebug(debug_output, debug_prefix, "analysis") if debug_output else None,
         cacheable=True,
@@ -260,15 +230,9 @@ async def generate_summary_from_analysis(
     scope = None if analysis.scope is None else str(analysis.scope)
     prefix_len = len(commit_type) + 2 + (len(scope) + 2 if scope else 0)
     chars = max(20, int(getattr(config, "summary_guideline", 72)) - prefix_len)
-    variant = (
-        "markdown"
-        if bool(getattr(config, "markdown_output", True))
-        else str(getattr(config, "summary_prompt_variant", "default"))
-    )
     details = "\n".join(f"- {detail}" for detail in analysis.body_texts()) or f"- {analysis.summary or ''}"
     system_prompt, user_prompt = render_prompt(
         "summary",
-        variant,
         {
             "commit_type": commit_type,
             "scope": scope,
@@ -282,21 +246,9 @@ async def generate_summary_from_analysis(
         operation="summary",
         model=resolve_model_name(str(getattr(config, "summary_model", getattr(config, "model", "claude-haiku-4-5")))),
         prompt_family="summary",
-        prompt_variant=variant,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         tool_name="create_commit_summary",
-        tool_description="Compose a git commit summary line from detail statements",
-        schema=strict_json_schema(
-            {
-                "summary": {
-                    "type": "string",
-                    "description": f"Single line summary, target {getattr(config, 'summary_guideline', 72)} chars, hard limit {getattr(config, 'summary_hard_limit', 128)}.",
-                    "maxLength": int(getattr(config, "summary_hard_limit", 128)),
-                }
-            },
-            ["summary"],
-        ),
         progress_label="summary",
         debug=OneShotDebug(debug_output, debug_prefix, "summary") if debug_output else None,
         cacheable=True,
@@ -350,10 +302,8 @@ async def generate_fast_commit(
 ) -> ConventionalCommit:
     """Generate a complete conventional commit in one model call."""
 
-    variant = "markdown" if bool(getattr(config, "markdown_output", True)) else "default"
     system_prompt, user_prompt = render_prompt(
         "fast",
-        variant,
         {
             "stat": stat,
             "diff": diff,
@@ -367,20 +317,9 @@ async def generate_fast_commit(
         operation="fast",
         model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))),
         prompt_family="fast",
-        prompt_variant=variant,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         tool_name="create_fast_commit",
-        tool_description="Create a compact conventional commit message",
-        schema=strict_json_schema(
-            {
-                "type": {"type": "string", "enum": type_enum, "description": "Conventional commit type"},
-                "scope": {"type": "string", "description": "Optional scope. Omit if unclear."},
-                "summary": {"type": "string", "description": "Compact past-tense summary, no prefix or period"},
-                "details": {"type": "array", "items": {"type": "string"}, "description": "0-3 detail sentences"},
-            },
-            ["type", "summary", "details"],
-        ),
         progress_label="fast",
         debug=OneShotDebug(debug_output, debug_prefix, "fast") if debug_output else None,
         cacheable=True,
@@ -425,20 +364,18 @@ def _fallback_summary_for_commit(stat: str, details: Iterable[str], commit_type:
         return fallback_summary("", details_list, limit=limit, commit_type=commit_type)
 
 
-def render_prompt(family: str, variant: str, context: Mapping[str, Any]) -> tuple[str, str]:
+def render_prompt(family: str, context: Mapping[str, Any]) -> tuple[str, str]:
     """Render a prompt through ``lgit.templates`` with resource fallback."""
 
     try:
         from . import templates
 
-        rendered = _render_with_template_helper(templates, family, variant, context)
+        rendered = _render_with_template_helper(templates, family, context)
         if rendered is not None:
             return rendered
     except ImportError, AttributeError:
         pass
-    template_text = (
-        resources.files("lgit.resources").joinpath("prompts", family, f"{variant}.md").read_text(encoding="utf-8")
-    )
+    template_text = resources.files("lgit.resources").joinpath("prompts", f"{family}.md").read_text(encoding="utf-8")
     system, user = _split_prompt(Template(template_text).render(**context))
     return system, user
 
@@ -460,40 +397,6 @@ def format_types_description(config: Any) -> str:
     return "\n".join(lines)
 
 
-def build_analysis_schema(type_enum: list[str], config: Any) -> dict[str, Any]:
-    """Return the strict schema used for conventional analysis calls."""
-
-    return strict_json_schema(
-        {
-            "type": {"type": "string", "enum": type_enum, "description": "Conventional commit type"},
-            "scope": {"type": "string", "description": "Optional scope. Omit if unclear."},
-            "summary": {
-                "type": "string",
-                "description": "Umbrella commit summary without type/scope prefix or trailing period",
-                "maxLength": int(getattr(config, "summary_hard_limit", 128)),
-            },
-            "details": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "changelog_category": {
-                            "type": "string",
-                            "enum": ["Added", "Changed", "Fixed", "Deprecated", "Removed", "Security"],
-                        },
-                        "user_visible": {"type": "boolean"},
-                    },
-                    "required": ["text", "user_visible"],
-                    "additionalProperties": False,
-                },
-            },
-            "issue_refs": {"type": "array", "items": {"type": "string"}},
-        },
-        ["type", "summary", "details", "issue_refs"],
-    )
-
-
 def encode_cache_payload(source: OneShotSource | str, output: Any, text_content: str | None = None) -> str | None:
     """Encode parsed output for stable cache storage."""
 
@@ -505,9 +408,7 @@ def encode_cache_payload(source: OneShotSource | str, output: Any, text_content:
         return None
 
 
-def decode_cache_payload(
-    tool_name: str, operation: str, stored: str, markdown_output: bool
-) -> tuple[Any, str | None] | None:
+def decode_cache_payload(tool_name: str, operation: str, stored: str) -> tuple[Any, str | None] | None:
     """Decode a cached payload using JSON first, then markdown/plain-text fallback."""
 
     is_raw = not stored.startswith(_JSON_CACHE_PREFIX)
@@ -516,7 +417,7 @@ def decode_cache_payload(
         output = _parse_json_payload(payload)
     except json.JSONDecodeError, ValueError, TypeError:
         try:
-            output = _parse_plain_text(tool_name, payload, markdown_output)
+            output = _parse_plain_text(tool_name, payload)
         except json.JSONDecodeError, ValueError, TypeError:
             return None
     if output is None:
@@ -524,17 +425,14 @@ def decode_cache_payload(
     return output, payload if is_raw else None
 
 
-async def _run_oneshot_response(
-    config: Any, spec: OneShotSpec, *, markdown_output: bool | None = None
-) -> OneShotResponse:
-    markdown_mode = bool(getattr(config, "markdown_output", True) if markdown_output is None else markdown_output)
+async def _run_oneshot_response(config: Any, spec: OneShotSpec) -> OneShotResponse:
     mode = _resolved_mode(config, spec.model or "")
-    cache_entry = _build_cache_entry(config, spec, markdown_mode)
+    cache_entry = _build_cache_entry(config, spec)
     if cache_entry is not None:
         cache_obj, key = cache_entry
         stored = cache_obj.get(key)
         if stored is not None:
-            decoded = decode_cache_payload(spec.tool_name, spec.operation, stored, markdown_mode)
+            decoded = decode_cache_payload(spec.tool_name, spec.operation, stored)
             if decoded is not None:
                 output, text = decoded
                 profile.print_llm_progress(lambda: f"cache hit {spec.operation} ({spec.model})")
@@ -547,11 +445,11 @@ async def _run_oneshot_response(
     last_retry_from_error = False
     for attempt in range(1, attempts + 1):
         try:
-            request, response_text = await _send_oneshot(config, spec, mode, markdown_mode)
+            request, response_text = await _send_oneshot(config, spec, mode)
             request_json = json.dumps(request, ensure_ascii=False, default=_json_default)
             if not response_text.strip():
                 raise _RetryableResponse("empty response body")
-            response = _parse_oneshot_response(mode, spec.tool_name, spec.operation, response_text, markdown_mode)
+            response = _parse_oneshot_response(mode, spec.tool_name, spec.operation, response_text)
             if cache_entry is not None:
                 payload = encode_cache_payload(response.source, response.output, response.text_content)
                 if payload is not None:
@@ -580,9 +478,7 @@ async def _run_oneshot_response(
     raise LgitError(f"Max retries exceeded for {spec.operation}: {last_error}")
 
 
-async def _send_oneshot(
-    config: Any, spec: OneShotSpec, mode: ResolvedApiMode, markdown_mode: bool
-) -> tuple[dict[str, Any], str]:
+async def _send_oneshot(config: Any, spec: OneShotSpec, mode: ResolvedApiMode) -> tuple[dict[str, Any], str]:
     timeout = httpx.Timeout(
         float(getattr(config, "request_timeout_secs", 120)), connect=float(getattr(config, "connect_timeout_secs", 30))
     )
@@ -591,7 +487,7 @@ async def _send_oneshot(
     if mode == ResolvedApiMode.CHAT_COMPLETIONS:
         if api_key:
             headers["authorization"] = f"Bearer {api_key}"
-        request = _openai_request(config, spec, markdown_mode)
+        request = _openai_request(config, spec)
         url = urljoin(
             str(getattr(config, "api_base_url", "http://localhost:4000")).rstrip("/") + "/", "chat/completions"
         )
@@ -602,7 +498,7 @@ async def _send_oneshot(
             headers["authorization"] = f"Bearer {api_key}"
         if _anthropic_prompt_caching_enabled(config):
             headers["anthropic-beta"] = "prompt-caching-2024-07-31"
-        request = _anthropic_request(config, spec, markdown_mode)
+        request = _anthropic_request(config, spec)
         url = _anthropic_messages_url(str(getattr(config, "api_base_url", "")))
     _save_debug(spec.debug, "request", request)
     profile.print_llm_progress(lambda: f"query {spec.operation} model={spec.model}")
@@ -627,22 +523,19 @@ async def _send_oneshot(
     return request, text
 
 
-def _openai_request(config: Any, spec: OneShotSpec, markdown_mode: bool) -> dict[str, Any]:
+def _openai_request(config: Any, spec: OneShotSpec) -> dict[str, Any]:
     messages = []
     if spec.system_prompt.strip():
         messages.append({"role": "system", "content": spec.system_prompt})
     messages.append({"role": "user", "content": spec.user_prompt})
     request: dict[str, Any] = {"model": spec.model, "messages": messages}
-    if not markdown_mode:
-        request["tools"] = [_openai_tool(spec.tool_name, spec.tool_description, spec.schema or {})]
-        request["tool_choice"] = {"type": "function", "function": {"name": spec.tool_name}}
     prompt_cache_key = _openai_prompt_cache_key(config, spec)
     if prompt_cache_key:
         request["prompt_cache_key"] = prompt_cache_key
     return request
 
 
-def _anthropic_request(config: Any, spec: OneShotSpec, markdown_mode: bool) -> dict[str, Any]:
+def _anthropic_request(config: Any, spec: OneShotSpec) -> dict[str, Any]:
     prompt_caching = _anthropic_prompt_caching_enabled(config)
     request: dict[str, Any] = {
         "model": spec.model,
@@ -651,14 +544,11 @@ def _anthropic_request(config: Any, spec: OneShotSpec, markdown_mode: bool) -> d
     }
     if spec.system_prompt.strip():
         request["system"] = [_anthropic_text(spec.system_prompt, prompt_caching)]
-    if not markdown_mode:
-        request["tools"] = [_anthropic_tool(spec.tool_name, spec.tool_description, spec.schema or {}, prompt_caching)]
-        request["tool_choice"] = {"type": "tool", "name": spec.tool_name}
     return request
 
 
 def _parse_oneshot_response(
-    mode: ResolvedApiMode, tool_name: str, operation: str, response_text: str, markdown_mode: bool
+    mode: ResolvedApiMode, tool_name: str, operation: str, response_text: str
 ) -> OneShotResponse:
     if mode == ResolvedApiMode.CHAT_COMPLETIONS:
         body = json.loads(response_text)
@@ -668,44 +558,26 @@ def _parse_oneshot_response(
         message = choices[0].get("message") or {}
         if refusal := message.get("refusal"):
             raise LgitError(f"Model refused {operation}: {refusal}")
-        last_error: Exception | None = None
-        for call in message.get("tool_calls") or []:
-            function = (call or {}).get("function") or {}
-            if str(function.get("name", "")).endswith(tool_name):
-                args = str(function.get("arguments") or "").strip()
-                if not args:
-                    last_error = LgitError(f"Model returned empty function arguments for {operation}")
-                else:
-                    try:
-                        return OneShotResponse(
-                            _parse_tool_arguments(args, operation), OneShotSource.TOOL_CALL, message.get("content")
-                        )
-                    except LgitError as exc:
-                        last_error = exc
         content = message.get("content")
-        if content is not None:
-            if not str(content).strip():
-                raise _RetryableResponse("empty content")
-            return _parse_content_fallback(tool_name, operation, str(content), markdown_mode)
-        if last_error is not None:
-            raise last_error
-        raise LgitError(f"No {operation} found in API response")
+        if content is None:
+            raise LgitError(f"No {operation} found in API response")
+        if not str(content).strip():
+            raise _RetryableResponse("empty content")
+        return _parse_content_fallback(tool_name, operation, str(content))
 
-    tool_input, text_content, stop_reason = _extract_anthropic_content(response_text, tool_name)
-    if tool_input is not None:
-        return OneShotResponse(tool_input, OneShotSource.TOOL_CALL, text_content or None, stop_reason)
+    text_content, stop_reason = _extract_anthropic_content(response_text)
     if not text_content.strip():
         raise _RetryableResponse("empty content")
-    response = _parse_content_fallback(tool_name, operation, text_content, markdown_mode)
+    response = _parse_content_fallback(tool_name, operation, text_content)
     return OneShotResponse(response.output, response.source, response.text_content, stop_reason)
 
 
-def _parse_content_fallback(tool_name: str, operation: str, content: str, markdown_mode: bool) -> OneShotResponse:
+def _parse_content_fallback(tool_name: str, operation: str, content: str) -> OneShotResponse:
     try:
         return OneShotResponse(_parse_json_payload(content), OneShotSource.OUTPUT_JSON_PARSE, content)
     except (json.JSONDecodeError, ValueError, TypeError) as json_error:
         try:
-            parsed = _parse_plain_text(tool_name, content, markdown_mode)
+            parsed = _parse_plain_text(tool_name, content)
         except (json.JSONDecodeError, ValueError, TypeError) as markdown_error:
             raise LgitError(f"Failed to parse {operation} plain-text fallback: {markdown_error}") from markdown_error
         if parsed is None:
@@ -713,7 +585,7 @@ def _parse_content_fallback(tool_name: str, operation: str, content: str, markdo
         return OneShotResponse(parsed, OneShotSource.PLAIN_TEXT_CONTENT, content)
 
 
-def _parse_plain_text(tool_name: str, content: str, markdown_mode: bool) -> Any:
+def _parse_plain_text(tool_name: str, content: str) -> Any:
     text = _normalize_plain_text(content)
     if not text:
         return None
@@ -738,15 +610,8 @@ def _parse_plain_text(tool_name: str, content: str, markdown_mode: bool) -> Any:
     if tool_name == "bind_compose_hunks":
         return parse_compose_binding_markdown(text)
     if tool_name == "create_commit_summary":
-        return {"summary": parse_summary_markdown(text) if markdown_mode else strip_type_prefix(text)}
+        return {"summary": parse_summary_markdown(text)}
     return None
-
-
-def _parse_tool_arguments(args: str, operation: str) -> Any:
-    try:
-        return _parse_json_payload(args)
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        raise LgitError(f"Failed to parse {operation} tool arguments: {exc}") from exc
 
 
 def _parse_json_payload(text: str) -> Any:
@@ -776,18 +641,14 @@ def _normalize_plain_text(content: str) -> str:
     return fenced.group(1).strip() if fenced else trimmed
 
 
-def _extract_anthropic_content(response_text: str, tool_name: str) -> tuple[Any | None, str, str | None]:
+def _extract_anthropic_content(response_text: str) -> tuple[str, str | None]:
     value = json.loads(response_text)
     stop_reason = value.get("stop_reason")
-    tool_input = None
     text_parts: list[str] = []
     for item in value.get("content") or []:
-        item_type = item.get("type", "")
-        if item_type == "tool_use" and item.get("name") == tool_name:
-            tool_input = item.get("input")
-        elif item_type == "text" and isinstance(item.get("text"), str):
+        if item.get("type") == "text" and isinstance(item.get("text"), str):
             text_parts.append(item["text"])
-    return tool_input, "\n".join(text_parts), None if stop_reason is None else str(stop_reason)
+    return "\n".join(text_parts), None if stop_reason is None else str(stop_reason)
 
 
 def _coerce_spec(prompt: str | OneShotSpec | Mapping[str, Any] | None, **kwargs: Any) -> OneShotSpec:
@@ -803,23 +664,17 @@ def _coerce_spec(prompt: str | OneShotSpec | Mapping[str, Any] | None, **kwargs:
         if "cache" in values and "cacheable" not in values:
             values["cacheable"] = values.pop("cache")
         return OneShotSpec(**{key: value for key, value in values.items() if key in OneShotSpec.__dataclass_fields__})
-    schema = kwargs["schema"] or strict_json_schema({"response": {"type": "string"}}, ["response"])
-    schema_name = kwargs["schema_name"]
-    inferred_tool = kwargs["tool_name"] or (
-        schema_name if schema_name.startswith(("create_", "bind_")) else f"create_{schema_name}"
-    )
+    tool_name = kwargs["tool_name"] or "create_response"
+    operation = kwargs["operation"] or tool_name
     return OneShotSpec(
-        operation=kwargs["operation"] or schema_name,
+        operation=operation,
         model=resolve_model_name(str(kwargs["model"] or "")) if kwargs["model"] else None,
         prompt_family=kwargs["prompt_family"],
-        prompt_variant=kwargs["prompt_variant"],
         system_prompt=kwargs["system_prompt"] or "",
         user_prompt=str(prompt or ""),
-        tool_name=inferred_tool,
-        tool_description=kwargs["tool_description"] or f"Create {schema_name}",
-        schema=schema,
-        progress_label=kwargs["operation"] or schema_name,
-        debug=_coerce_debug(kwargs["debug"], kwargs["debug_label"] or schema_name),
+        tool_name=tool_name,
+        progress_label=operation,
+        debug=_coerce_debug(kwargs["debug"], kwargs["debug_label"] or operation),
         cacheable=bool(kwargs["cacheable"]),
     )
 
@@ -841,7 +696,7 @@ def _resolved_mode(config: Any, model: str) -> ResolvedApiMode:
     return config.resolved_api_mode
 
 
-def _build_cache_entry(config: Any, spec: OneShotSpec, markdown_mode: bool) -> tuple[Any, str] | None:
+def _build_cache_entry(config: Any, spec: OneShotSpec) -> tuple[Any, str] | None:
     if not spec.cacheable:
         return None
     cache_obj = llm_cache.global_cache()
@@ -853,12 +708,9 @@ def _build_cache_entry(config: Any, spec: OneShotSpec, markdown_mode: bool) -> t
             operation=spec.operation,
             model=spec.model or "",
             tool_name=spec.tool_name,
-            tool_description=spec.tool_description,
             system_prompt=spec.system_prompt,
             user_prompt=spec.user_prompt,
-            schema=spec.schema or {},
             api_mode=mode,
-            markdown_output=markdown_mode,
         )
     )
     return cache_obj, key
@@ -874,28 +726,6 @@ def _record_failure(
         sink.put_failure(
             cache_entry[1] if cache_entry else "", spec.model or "", spec.operation, request, response, str(error)
         )
-
-
-def _openai_tool(name: str, description: str, schema: Mapping[str, Any]) -> dict[str, Any]:
-    if "properties" not in schema:
-        raise LgitError("Schema must include top-level properties")
-    required = schema.get("required")
-    if not isinstance(required, (list, tuple)) or not all(isinstance(value, str) for value in required):
-        raise LgitError("Schema must include top-level required array of strings")
-    parameters = {
-        "type": "object",
-        "properties": dict(schema["properties"]),
-        "required": list(required),
-        "additionalProperties": False,
-    }
-    return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
-
-
-def _anthropic_tool(name: str, description: str, schema: Mapping[str, Any], cache: bool) -> dict[str, Any]:
-    tool = {"name": name, "description": description, "input_schema": dict(schema)}
-    if cache:
-        tool["cache_control"] = {"type": "ephemeral"}
-    return tool
 
 
 def _anthropic_text(text: str, cache: bool) -> dict[str, Any]:
@@ -918,7 +748,7 @@ def _openai_prompt_cache_key(config: Any, spec: OneShotSpec) -> str | None:
     base_url = str(getattr(config, "api_base_url", "")).lower()
     if not spec.system_prompt.strip() or "api.openai.com" not in base_url:
         return None
-    return f"llm-git:v1:{spec.model}:{spec.prompt_family}:{spec.prompt_variant}"
+    return f"llm-git:v1:{spec.model}:{spec.prompt_family}"
 
 
 def _is_context_length_error(body: str) -> bool:
@@ -943,18 +773,15 @@ def _save_debug_text(debug: OneShotDebug | Mapping[str, Any] | str | Path | None
     path.write_text(text, encoding="utf-8")
 
 
-def _render_with_template_helper(
-    templates: Any, family: str, variant: str, context: Mapping[str, Any]
-) -> tuple[str, str] | None:
+def _render_with_template_helper(templates: Any, family: str, context: Mapping[str, Any]) -> tuple[str, str] | None:
     helper = getattr(templates, f"render_{family.replace('-', '_')}_prompt", None)
     if not callable(helper):
         return None
     match family:
         case "analysis" | "fast":
-            parts = helper(variant=variant, **dict(context))
+            parts = helper(**dict(context))
         case "summary":
             parts = helper(
-                variant,
                 str(context.get("commit_type", "")),
                 str(context.get("scope") or ""),
                 str(context.get("chars", "")),
@@ -963,10 +790,9 @@ def _render_with_template_helper(
                 context.get("user_context"),
             )
         case "map":
-            parts = helper(variant, context.get("files", ()), str(context.get("context_header", "")))
+            parts = helper(context.get("files", ()), str(context.get("context_header", "")))
         case "reduce":
             parts = helper(
-                variant,
                 str(context.get("observations", "")),
                 str(context.get("stat", "")),
                 str(context.get("scope_candidates", "")),
@@ -978,7 +804,7 @@ def _render_with_template_helper(
 
 
 def _split_prompt(text: str) -> tuple[str, str]:
-    marker = "======USER======="
+    marker = "<!-- USER -->"
     if marker in text:
         system, user = text.split(marker, 1)
         return system.strip(), user.strip()
@@ -1060,7 +886,6 @@ __all__ = [
     "OneShotResponse",
     "OneShotSource",
     "OneShotSpec",
-    "build_analysis_schema",
     "decode_cache_payload",
     "encode_cache_payload",
     "fallback_summary",
@@ -1072,6 +897,5 @@ __all__ = [
     "summary_from_holistic_analysis",
     "render_prompt",
     "run_oneshot",
-    "strict_json_schema",
     "strip_type_prefix",
 ]

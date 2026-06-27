@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+import json
 import os
 import platform
 import shutil
@@ -14,6 +15,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from . import cache, git, profile, repo, style
 from .analysis import ScopeAnalyzer, extract_scope_candidates
@@ -496,8 +499,9 @@ async def _generate_fast_message(
         with profile.section("validate_fast_commit", collector):
             if validate_commit_message(message, config, stat=stat).ok:
                 return message
-    except Exception:
-        pass
+    except (LgitError, httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        # Fast generation is best-effort; surface the failure, then fall back to full analysis.
+        style.status(style.dim(f"fast commit generation failed ({exc}); using full analysis"))
     analysis = await _generate_analysis(config, stat, diff, scope_candidates, user_context, args, collector)
     return await _message_from_analysis(analysis, config, stat, user_context, args, collector)
 
