@@ -153,7 +153,7 @@ async def run_map_reduce(*args: Any, **kwargs: Any) -> ConventionalAnalysis:
 
     counter = counter or create_token_counter(config)
     reduce_model = resolve_model_name(
-        str(model_name or getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.5")))
+        str(model_name or getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))
     )
     map_model = resolve_model_name(str(getattr(config, "summary_model", getattr(config, "model", reduce_model))))
     observations = await observe_diff_files(str(diff), map_model, config, counter)

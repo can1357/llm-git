@@ -23,7 +23,7 @@ from .models import (
 )
 
 DEFAULT_API_BASE_URL = "http://localhost:4000"
-DEFAULT_ANALYSIS_MODEL = "claude-opus-4.5"
+DEFAULT_ANALYSIS_MODEL = "claude-opus-4.8"
 DEFAULT_SUMMARY_MODEL = "claude-haiku-4-5"
 DEFAULT_CONFIG_SUBPATH = Path(".config/llm-git/config.toml")
 

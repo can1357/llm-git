@@ -12,7 +12,7 @@ from lgit.tokens import TokenCounter
 
 
 def _test_counter() -> TokenCounter:
-    return TokenCounter.new("http://localhost:4000", None, "claude-sonnet-4.5")
+    return TokenCounter.new("http://localhost:4000", None, "claude-sonnet-4.6")
 
 
 def _file_with_tokens(filename: str, token_estimate: int) -> FileDiff:

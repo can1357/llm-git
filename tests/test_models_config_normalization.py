@@ -38,8 +38,8 @@ def test_commit_type_vocabulary_and_model_aliases_are_resource_backed() -> None:
     assert CommitType.from_raw("feature") == "feat"
     assert ConventionalCommit.from_raw(commit_type="configuration", summary="updated settings").commit_type == "config"
 
-    assert resolve_model_name("sonnet") == "claude-sonnet-4.5"
-    assert resolve_model_name("gpt5-codex") == "gpt-5-codex"
+    assert resolve_model_name("sonnet") == "claude-sonnet-4.6"
+    assert resolve_model_name("gpt5-codex") == "gpt-5.3-codex"
     assert resolve_model_name("custom/provider-model") == "custom/provider-model"
 
 

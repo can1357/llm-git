@@ -148,7 +148,7 @@ async def run_oneshot(
         built = replace(
             built,
             model=resolve_model_name(
-                str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.5")))
+                str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))
             ),
         )
     response = await _run_oneshot_response(config, built, markdown_output=markdown_output)
@@ -193,7 +193,7 @@ async def generate_conventional_analysis(
     type_enum = list(getattr(config, "types", {}) or {"chore": None})
     spec = OneShotSpec(
         operation="analysis",
-        model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.5")))),
+        model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))),
         prompt_family="analysis",
         prompt_variant=variant,
         system_prompt=system_prompt,
@@ -365,7 +365,7 @@ async def generate_fast_commit(
     type_enum = list(getattr(config, "types", {}) or {"chore": None})
     spec = OneShotSpec(
         operation="fast",
-        model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.5")))),
+        model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))),
         prompt_family="fast",
         prompt_variant=variant,
         system_prompt=system_prompt,
