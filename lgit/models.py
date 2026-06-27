@@ -787,37 +787,37 @@ class ComposeFile:
         object.__setattr__(self, "hunk_ids", _string_tuple(self.hunk_ids))
 
 
-class WorktreePinKind(StrEnum):
-    """Kinds of worktree pins captured for compose staging."""
+class StagedPinKind(StrEnum):
+    """Kinds of staged-index pins captured for compose staging."""
 
     OBJECT = "object"
     DELETED = "deleted"
 
 
 @dataclass(frozen=True, slots=True)
-class WorktreePin:
-    """A captured worktree path state for compose snapshot staging."""
+class StagedPin:
+    """A captured staged-index entry for a path, used for compose snapshot staging."""
 
-    kind: WorktreePinKind
+    kind: StagedPinKind
     mode: str | None = None
     oid: str | None = None
 
     @classmethod
     def object(cls, *, mode: str, oid: str) -> Self:
         """Pin a path to an object already written to the object database."""
-        return cls(kind=WorktreePinKind.OBJECT, mode=mode, oid=oid)
+        return cls(kind=StagedPinKind.OBJECT, mode=mode, oid=oid)
 
     @classmethod
     def deleted(cls) -> Self:
-        """Pin a path as absent from the worktree."""
-        return cls(kind=WorktreePinKind.DELETED)
+        """Pin a path as absent from the staged tree (staged for deletion)."""
+        return cls(kind=StagedPinKind.DELETED)
 
     def __post_init__(self) -> None:
-        kind = WorktreePinKind(self.kind)
+        kind = StagedPinKind(self.kind)
         object.__setattr__(self, "kind", kind)
-        if kind is WorktreePinKind.OBJECT and (not self.mode or not self.oid):
+        if kind is StagedPinKind.OBJECT and (not self.mode or not self.oid):
             raise ValidationFailure("object pins require mode and oid", field="pins")
-        if kind is WorktreePinKind.DELETED and (self.mode is not None or self.oid is not None):
+        if kind is StagedPinKind.DELETED and (self.mode is not None or self.oid is not None):
             raise ValidationFailure("deleted pins cannot include mode or oid", field="pins")
 
 
@@ -829,7 +829,7 @@ class ComposeSnapshot:
     stat: str
     files: tuple[ComposeFile, ...]
     hunks: tuple[ComposeHunk, ...]
-    pins: Mapping[str, WorktreePin] = field(default_factory=dict)
+    pins: Mapping[str, StagedPin] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "files", tuple(self.files))
@@ -905,7 +905,7 @@ __all__ = [
     "ComposeAnalysis",
     "ComposeHunk",
     "ComposeFile",
-    "WorktreePinKind",
-    "WorktreePin",
+    "StagedPinKind",
+    "StagedPin",
     "ComposeSnapshot",
 ]

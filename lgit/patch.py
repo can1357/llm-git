@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import os
-import stat
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 
 from .errors import GitError, ValidationFailure
 from .git import run_git, run_git_bytes
-from .models import ComposeFile, ComposeHunk, ComposeSnapshot, WorktreePin, WorktreePinKind
+from .models import ComposeFile, ComposeHunk, ComposeSnapshot, StagedPin, StagedPinKind
 
 
 @dataclass(slots=True)
@@ -214,37 +212,41 @@ def build_compose_snapshot(diff: str, stat: str) -> ComposeSnapshot:
     return ComposeSnapshot(diff=diff, stat=stat, files=tuple(files), hunks=tuple(hunks), pins={})
 
 
-def pin_snapshot_worktree_state(snapshot: ComposeSnapshot, dir: str | os.PathLike[str] = ".") -> ComposeSnapshot:
-    """Pin snapshot paths to object ids captured from the current worktree."""
-    root = Path(dir)
-    regular_paths: list[str] = []
-    pins = dict(snapshot.pins)
-    for file in snapshot.files:
-        full_path = root / file.path
-        try:
-            metadata = full_path.lstat()
-        # Keep this before OSError so missing paths are recorded as deletions.
-        except FileNotFoundError:
-            pins[file.path] = WorktreePin.deleted()
-            continue
-        except OSError as exc:
-            raise GitError(f"Failed to inspect worktree path {full_path}: {exc}") from exc
-        if stat.S_ISLNK(metadata.st_mode):
-            target = os.readlink(full_path)
-            oid = _hash_blob_bytes(os.fsencode(target), file.path, dir)
-            pins[file.path] = WorktreePin.object(mode="120000", oid=oid)
-        elif stat.S_ISDIR(metadata.st_mode):
-            submodule_oid = _submodule_head(full_path)
-            if submodule_oid:
-                pins[file.path] = WorktreePin.object(mode="160000", oid=submodule_oid)
-        elif "\n" not in file.path:
-            regular_paths.append(file.path)
+def pin_snapshot_staged_state(snapshot: ComposeSnapshot, dir: str | os.PathLike[str] = ".") -> ComposeSnapshot:
+    """Pin snapshot paths to their staged index blobs, captured once.
 
-    for path, oid in zip(regular_paths, _hash_worktree_paths(regular_paths, dir), strict=True):
-        pins[path] = WorktreePin.object(mode=_worktree_file_mode(root / path), oid=oid)
+    Compose commits the staged tree, so each path is pinned to its index entry (mode + oid),
+    or marked deleted when staged for removal. Reading the index — never the worktree — keeps
+    later unstaged edits to a staged file out of the generated commits, and covers regular
+    blobs, symlinks (``120000``), and submodule gitlinks (``160000``) uniformly.
+    """
+    pins = dict(snapshot.pins)
+    staged = _staged_index_entries([file.path for file in snapshot.files], dir)
+    for file in snapshot.files:
+        entry = staged.get(file.path)
+        if entry is None:
+            pins[file.path] = StagedPin.deleted()
+        else:
+            mode, oid = entry
+            pins[file.path] = StagedPin.object(mode=mode, oid=oid)
     return ComposeSnapshot(
         diff=snapshot.diff, stat=snapshot.stat, files=snapshot.files, hunks=snapshot.hunks, pins=pins
     )
+
+
+def _staged_index_entries(paths: Sequence[str], dir: str | os.PathLike[str]) -> dict[str, tuple[str, str]]:
+    """Map each staged path to its ``(mode, oid)`` from the index; absent paths are omitted."""
+    if not paths:
+        return {}
+    records = run_git(["ls-files", "-s", "-z", "--", *paths], cwd=dir).stdout
+    entries: dict[str, tuple[str, str]] = {}
+    for record in records.split("\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition("\t")
+        mode, oid, _stage = meta.split()
+        entries[path] = (mode, oid)
+    return entries
 
 
 def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> ComposeGroupPatch:
@@ -336,7 +338,7 @@ def stage_executable_group_in_index(
         if pin is None:
             run_git(["add", "--", path], cwd=dir, index_file=index_file)
             result = result.combine(StageResult.STAGED)
-        elif pin.kind == WorktreePinKind.DELETED:
+        elif pin.kind == StagedPinKind.DELETED:
             result = result.combine(_remove_index_path(path, dir, index_file))
         else:
             result = result.combine(
@@ -681,30 +683,6 @@ def _hash_blob_bytes(contents: bytes, path: str, dir: str | os.PathLike[str]) ->
     return oid
 
 
-def _hash_worktree_paths(paths: Sequence[str], dir: str | os.PathLike[str]) -> list[str]:
-    if not paths:
-        return []
-    result = run_git(["hash-object", "-w", "--stdin-paths"], cwd=dir, input_text="\n".join(paths) + "\n")
-    oids = result.stdout.splitlines()
-    if len(oids) != len(paths):
-        raise GitError(f"git hash-object returned {len(oids)} oids for {len(paths)} paths")
-    return oids
-
-
-def _worktree_file_mode(path: Path) -> str:
-    try:
-        mode = path.stat().st_mode
-    except OSError:
-        return "100644"
-    return "100755" if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) else "100644"
-
-
-def _submodule_head(path: Path) -> str | None:
-    result = run_git(["rev-parse", "HEAD"], cwd=path, check=False)
-    oid = result.stdout.strip()
-    return oid if result.returncode == 0 and oid else None
-
-
 def _resolve_base_blob(file: ComposeFile, dir: str | os.PathLike[str]) -> tuple[bytes, str]:
     index_line = next((line for line in file.patch_header.splitlines() if line.startswith("index ")), None)
     base_oid = None
@@ -800,6 +778,6 @@ __all__ = [
     "build_compose_snapshot",
     "create_executable_group_patch",
     "force_stage_file_from_base_in_index",
-    "pin_snapshot_worktree_state",
+    "pin_snapshot_staged_state",
     "stage_executable_group_in_index",
 ]
