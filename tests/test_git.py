@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from lgit import git
 
-RunGit = Callable[..., CompletedProcess[str]]
+type RunGit = Callable[..., CompletedProcess[str]]
 
 
 def test_git_command_env_applies_background_feature_overrides_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

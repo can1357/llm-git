@@ -15,7 +15,7 @@ from lgit.changelog import (
 )
 from lgit.models import ChangelogCategory
 
-RunGit = Callable[..., CompletedProcess[str]]
+type RunGit = Callable[..., CompletedProcess[str]]
 
 BASE_CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2020-01-01\n\n### Added\n\n- Old entry.\n"
 

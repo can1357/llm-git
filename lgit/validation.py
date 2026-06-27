@@ -14,7 +14,7 @@ from importlib import resources
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
-IssueSeverity = Literal["error", "warning"]
+type IssueSeverity = Literal["error", "warning"]
 
 _DEFAULT_GUIDELINE = 72
 _DEFAULT_SOFT_LIMIT = 96

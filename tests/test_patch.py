@@ -18,7 +18,7 @@ from lgit.patch import (
     stage_executable_group_in_index,
 )
 
-GitRunner = Callable[..., subprocess.CompletedProcess[str]]
+type GitRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _write(repo: Path, path: str, contents: str) -> None:
