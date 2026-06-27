@@ -479,6 +479,15 @@ class AnalysisDetail:
         return cls(text=text)
 
 
+@dataclass(frozen=True, slots=True)
+class ScopeCandidate:
+    """Candidate conventional-commit scope with percentage and confidence metadata."""
+
+    path: str
+    percentage: float
+    confidence: float
+
+
 def _coerce_analysis_detail(value: Any) -> AnalysisDetail | None:
     if isinstance(value, AnalysisDetail):
         return value if value.text else None
@@ -772,6 +781,7 @@ class ComposeFile:
     deletions: int
     is_binary: bool = False
     synthetic_only: bool = False
+    old_path: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "hunk_ids", _string_tuple(self.hunk_ids))
@@ -842,6 +852,15 @@ class ComposeSnapshot:
         """Return all hunks belonging to a snapshot file."""
         return [hunk for hunk in self.hunks if hunk.file_id == file_id]
 
+    def touched_paths(self) -> list[str]:
+        """Worktree paths affected by the snapshot, including pre-rename source paths."""
+        paths: list[str] = []
+        for file in self.files:
+            paths.append(file.path)
+            if file.old_path is not None:
+                paths.append(file.old_path)
+        return paths
+
 
 def _format_body_line(line: str) -> str:
     stripped = line.strip()
@@ -876,6 +895,7 @@ __all__ = [
     "CommitSummary",
     "ConventionalCommit",
     "AnalysisDetail",
+    "ScopeCandidate",
     "ConventionalAnalysis",
     "CommitMetadata",
     "ChangelogCategory",

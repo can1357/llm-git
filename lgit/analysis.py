@@ -6,18 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-try:  # Import defensively while shared model work lands independently.
-    from .models import ScopeCandidate
-except Exception:  # pragma: no cover - bootstrap fallback
-
-    @dataclass(slots=True)
-    class ScopeCandidate:  # type: ignore[no-redef]
-        """Candidate conventional-commit scope with confidence metadata."""
-
-        path: str
-        percentage: float
-        confidence: float
-
+from .models import ScopeCandidate
 
 PLACEHOLDER_DIRS = {
     "src",
@@ -124,8 +113,8 @@ class ScopeAnalyzer:
     def analyze_wide_change(numstat: str) -> str | None:
         """Detect an abstract category for cross-cutting changes."""
 
-        paths = [_path_from_numstat_line(line) for line in numstat.splitlines()]
-        paths = [path for path in paths if path]
+        raw_paths = (_path_from_numstat_line(line) for line in numstat.splitlines())
+        paths = [path for path in raw_paths if path]
         if not paths:
             return None
 
