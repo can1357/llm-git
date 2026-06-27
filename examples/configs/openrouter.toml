@@ -34,7 +34,3 @@ connect_timeout_secs = 30
 # Diff Processing
 max_diff_length = 100000
 wide_change_threshold = 0.50
-
-# Compose Mode
-compose_max_rounds = 5
-

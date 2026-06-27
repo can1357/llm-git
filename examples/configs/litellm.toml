@@ -27,10 +27,6 @@ connect_timeout_secs = 30
 max_diff_length = 100000
 wide_change_threshold = 0.50
 
-# Compose Mode
-compose_max_rounds = 5
-
-
 # GPG Signing (set to true to always sign commits)
 # Can also use --sign/-S CLI flag
 gpg_sign = false
