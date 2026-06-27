@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -14,7 +13,8 @@ from typing import Any
 from .diffing import smart_truncate_diff
 from .errors import GitError, ValidationFailure
 from .git import run_git
-from .models import ChangelogCategory
+from .markdown_output import parse_changelog_response
+from .models import ChangelogCategory, resolve_model_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,10 +258,8 @@ async def generate_changelog_entries(
 ) -> dict[ChangelogCategory, list[str]]:
     """Ask the configured model for Keep a Changelog entries."""
 
-    variant = "markdown" if bool(getattr(config, "markdown_output", True)) else "default"
     system_prompt, user_prompt = _render_prompt(
         "changelog",
-        variant,
         {
             "changelog_path": os.fspath(changelog_path),
             "is_package_changelog": is_package_changelog,
@@ -270,72 +268,22 @@ async def generate_changelog_entries(
             "existing_entries": existing_entries or "",
         },
     )
-    schema = {
-        "type": "object",
-        "properties": {
-            "entries": {
-                "type": "object",
-                "description": "Changelog entries grouped by category",
-                "properties": {
-                    "Added": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "New features or capabilities",
-                    },
-                    "Changed": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Changes to existing functionality",
-                    },
-                    "Fixed": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Bug fixes",
-                    },
-                    "Deprecated": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Features marked for removal",
-                    },
-                    "Removed": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Removed features",
-                    },
-                    "Security": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Security-related changes",
-                    },
-                    "Breaking Changes": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Breaking API or behavior changes",
-                    },
-                },
-                "additionalProperties": False,
-            }
-        },
-        "required": ["entries"],
-        "additionalProperties": False,
-    }
-    output = await _call_run_oneshot(
+    from .api import OneShotSpec, run_oneshot
+
+    response = await run_oneshot(
         config,
-        {
-            "operation": "changelog",
-            "model": getattr(config, "analysis_model", getattr(config, "model", None)),
-            "prompt_family": "changelog",
-            "prompt_variant": variant,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "tool_name": "create_changelog_entries",
-            "tool_description": "Generate changelog entries grouped by category",
-            "schema": schema,
-            "progress_label": "changelog",
-            "debug": None,
-            "cacheable": True,
-        },
+        OneShotSpec(
+            operation="changelog",
+            model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "")) or "")),
+            prompt_family="changelog",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            tool_name="create_changelog_entries",
+            progress_label="changelog",
+            cacheable=True,
+        ),
     )
+    output = response.output if hasattr(response, "output") else response
     payload = _parse_jsonish(output)
     entries = payload.get("entries", payload) if isinstance(payload, dict) else {}
     return _coerce_entries(entries if isinstance(entries, Mapping) else {})
@@ -440,8 +388,8 @@ def _is_package_changelog(path: Path, dir: Path) -> bool:
         return parent != dir
 
 
-def _render_prompt(family: str, variant: str, values: Mapping[str, Any]) -> tuple[str, str]:
-    text = (resources.files("lgit.resources") / "prompts" / family / f"{variant}.md").read_text(encoding="utf-8")
+def _render_prompt(family: str, values: Mapping[str, Any]) -> tuple[str, str]:
+    text = (resources.files("lgit.resources") / "prompts" / f"{family}.md").read_text(encoding="utf-8")
     try:
         from jinja2 import Template
 
@@ -450,7 +398,7 @@ def _render_prompt(family: str, variant: str, values: Mapping[str, Any]) -> tupl
         for key, value in values.items():
             text = text.replace("{{ " + key + " }}", str(value))
             text = text.replace("{{" + key + "}}", str(value))
-    marker = "======USER======"
+    marker = "<!-- USER -->"
     if marker in text:
         system, user = text.split(marker, 1)
     else:
@@ -458,51 +406,25 @@ def _render_prompt(family: str, variant: str, values: Mapping[str, Any]) -> tupl
     return system.strip(), user.strip()
 
 
-async def _call_run_oneshot(config: Any, spec_values: Mapping[str, Any]) -> Any:
-    from .api import run_oneshot
-
-    prompt = str(spec_values.get("user_prompt", ""))
-    cacheable = bool(spec_values.get("cacheable", True))
-    kwargs = {
-        "system_prompt": spec_values.get("system_prompt"),
-        "model": spec_values.get("model"),
-        "schema": spec_values.get("schema"),
-        "schema_name": spec_values.get("tool_name") or "response",
-        "tool_name": spec_values.get("tool_name"),
-        "tool_description": spec_values.get("tool_description"),
-        "operation": spec_values.get("operation"),
-        "prompt_family": spec_values.get("prompt_family", "custom"),
-        "prompt_variant": spec_values.get("prompt_variant", "default"),
-        "debug_label": spec_values.get("operation"),
-        "markdown_output": getattr(config, "markdown_output", None),
-        "cache": cacheable,
-        "cacheable": cacheable,
-    }
-    try:
-        result = run_oneshot(config, prompt, **kwargs)
-    except TypeError:
-        try:
-            result = run_oneshot(config=config, prompt=prompt, **kwargs)
-        except TypeError:
-            spec: Any = dict(spec_values)
-            try:
-                from .api import OneShotSpec
-
-                spec = OneShotSpec(**spec_values)
-            except Exception:
-                pass
-            result = run_oneshot(config, spec)
-    if inspect.isawaitable(result):
-        result = await result
-    return getattr(result, "output", result)
-
-
 def _parse_jsonish(value: Any) -> Any:
+    """Coerce a model changelog response into a mapping.
+
+    Markdown is the canonical changelog format, so a raw string is parsed with
+    ``parse_changelog_response``. A string that looks like a JSON object/array
+    (or a ```json fenced block) is decoded with ``json.loads`` first, since the
+    rare provider that still emits JSON has bullet lines like ``"Added": [...]``
+    that the markdown parser would misread as headings.
+    """
     if isinstance(value, str):
         text = value.strip()
         if text.startswith("```"):
             text = text.strip("`").removeprefix("json").strip()
-        return json.loads(text)
+        if text.startswith(("{", "[")):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+        return parse_changelog_response(text)
     if hasattr(value, "model_dump"):
         return value.model_dump()
     if hasattr(value, "__dict__"):

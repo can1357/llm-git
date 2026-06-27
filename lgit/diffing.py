@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Protocol
 
 
@@ -23,6 +24,18 @@ _DEFAULT_LOW_PRIORITY_EXTENSIONS = {
     "tmp",
     "bak",
 }
+
+
+class _Priority(IntEnum):
+    """Context-retention priority for a diff file; higher survives truncation first."""
+
+    BINARY = -100
+    TEST = 10
+    LOW = 20
+    DEFAULT = 50
+    MANIFEST = 70
+    SCRIPT = 80
+    SOURCE = 100
 
 
 @dataclass(slots=True)
@@ -58,33 +71,33 @@ class FileDiff:
         """Rank this file for context retention; higher values are kept first."""
 
         if self.is_binary:
-            return -100
+            return _Priority.BINARY
 
         filename_lower = self.filename.lower()
         if filename_lower.endswith(("cargo.toml", "package.json", "go.mod", "requirements.txt", "pyproject.toml")):
-            return 70
+            return _Priority.MANIFEST
         if "prompt" in filename_lower or "system" in filename_lower:
-            return 100
+            return _Priority.SOURCE  # prompt/system assets rank with source code
         if (
             "/test" in self.filename
             or "test_" in self.filename
             or "_test." in self.filename
             or ".test." in self.filename
         ):
-            return 10
+            return _Priority.TEST
 
         low_priority = getattr(config, "low_priority_extensions", _DEFAULT_LOW_PRIORITY_EXTENSIONS)
         ext = self.filename.rsplit(".", 1)[-1] if "." in self.filename else ""
         if any(str(item).lstrip(".") == ext for item in low_priority):
-            return 20
+            return _Priority.LOW
 
         match ext:
             case "rs" | "go" | "py" | "js" | "ts" | "tsx" | "jsx" | "java" | "c" | "cpp" | "h" | "hpp":
-                return 100
+                return _Priority.SOURCE
             case "sql" | "sh" | "bash":
-                return 80
+                return _Priority.SCRIPT
             case _:
-                return 50
+                return _Priority.DEFAULT
 
     def truncate(self, max_size: int) -> None:
         """Truncate content in place while preserving headers and useful edges."""
