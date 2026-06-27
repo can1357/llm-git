@@ -20,26 +20,22 @@ Exclude: import reordering, whitespace/formatting, comment-only changes, debug s
 </scope>
 
 <output_format>
-Return exactly one `create_file_observations` payload with a `files` array.
+You MUST return the result in this format WITHOUT the fences:
+```
+# src/config.rs
+- added TOML configuration loading
+- changed default timeout to 30s
 
-Each item must:
-- Use `path` exactly as shown in the input `<file path="...">`
-- Use `observations` as an array of strings
-- Include every input file, using an empty array when a file has no relevant observations
+# src/main.rs
+- changed CLI parsing to accept config paths
 
-Example:
-{
-  "files": [
-    {
-      "path": "src/config.rs",
-      "observations": ["added TOML configuration loading"]
-    },
-    {
-      "path": "src/main.rs",
-      "observations": ["changed CLI parsing to accept config paths"]
-    }
-  ]
-}
+# src/empty.rs
+```
+
+Rules:
+- One `# ` header per input file, using the `path` exactly as shown in `<file path="...">`.
+- List observations as `-` bullets under each header.
+- Include EVERY input file. If a file has no relevant observations, emit just its `# ` header with no bullets.
 </output_format>
 
 <verification>
@@ -50,7 +46,7 @@ Example:
 
 Observations only. Reduce phase handles classification and synthesis.
 
-======USER=======
+<!-- USER -->
 
 <files>
 {% for f in files %}
