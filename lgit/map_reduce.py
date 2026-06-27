@@ -11,11 +11,9 @@ from typing import Any
 
 from .api import (
     OneShotSpec,
-    build_analysis_schema,
     format_types_description,
     render_prompt,
     run_oneshot,
-    strict_json_schema,
 )
 from .diffing import FileDiff, parse_diff, reconstruct_diff
 from .markdown_output import analysis_from_mapping, fallback_summary, parse_conventional_analysis_markdown
@@ -90,9 +88,7 @@ async def reduce_phase(
     observations_json = json.dumps(
         [_observation_to_mapping(item) for item in observations], ensure_ascii=False, indent=2
     )
-    variant = "markdown" if bool(getattr(config, "markdown_output", True)) else "default"
     system_prompt, user_prompt = _render_reduce_prompt(
-        variant,
         observations_json,
         stat,
         scope_candidates,
@@ -104,12 +100,9 @@ async def reduce_phase(
             operation="map-reduce/reduce",
             model=resolve_model_name(model_name),
             prompt_family="reduce",
-            prompt_variant=variant,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             tool_name="create_conventional_analysis",
-            tool_description="Analyze file observations and classify as a conventional commit",
-            schema=build_analysis_schema(type_enum, config),
             progress_label="reduce file observations",
             cacheable=True,
         ),
@@ -206,20 +199,16 @@ async def _map_file_batch(
 ) -> list[FileObservation]:
     rendered = [_render_file_diff_for_batch(file, counter) for file in files]
     prompt_files = [{"path": file.filename, "diff": diff} for file, diff in zip(files, rendered, strict=True)]
-    variant = "markdown" if bool(getattr(config, "markdown_output", True)) else "default"
-    system_prompt, user_prompt = _render_map_prompt(variant, prompt_files, context_header)
+    system_prompt, user_prompt = _render_map_prompt(prompt_files, context_header)
     response = await run_oneshot(
         config,
         OneShotSpec(
             operation="map-reduce/map",
             model=resolve_model_name(model_name),
             prompt_family="map",
-            prompt_variant=variant,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             tool_name="create_file_observations",
-            tool_description="Extract observations from a batch of file changes",
-            schema=_batch_observation_schema(),
             progress_label=progress_label,
             cacheable=True,
         ),
@@ -366,49 +355,27 @@ def _ensure_sentence(text: str) -> str:
     return stripped if not stripped or stripped.endswith((".", "!", "?")) else f"{stripped}."
 
 
-def _batch_observation_schema() -> dict[str, Any]:
-    return strict_json_schema(
-        {
-            "files": {
-                "type": "array",
-                "description": "Per-file observations for every file in the map batch.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Exact input file path."},
-                        "observations": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["path", "observations"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        ["files"],
-    )
-
-
-def _render_map_prompt(variant: str, files: Sequence[Mapping[str, str]], context_header: str) -> tuple[str, str]:
+def _render_map_prompt(files: Sequence[Mapping[str, str]], context_header: str) -> tuple[str, str]:
     try:
         from .templates import render_map_prompt
 
-        parts = render_map_prompt(variant, files, context_header)
+        parts = render_map_prompt(files, context_header)
         return parts.system, parts.user
     except Exception:
-        return render_prompt("map", variant, {"files": files, "context_header": context_header})
+        return render_prompt("map", {"files": files, "context_header": context_header})
 
 
 def _render_reduce_prompt(
-    variant: str, observations: str, stat: str, scope_candidates: str, types_description: str
+    observations: str, stat: str, scope_candidates: str, types_description: str
 ) -> tuple[str, str]:
     try:
         from .templates import render_reduce_prompt
 
-        parts = render_reduce_prompt(variant, observations, stat, scope_candidates, types_description)
+        parts = render_reduce_prompt(observations, stat, scope_candidates, types_description)
         return parts.system, parts.user
     except Exception:
         return render_prompt(
             "reduce",
-            variant,
             {
                 "observations": observations,
                 "stat": stat,

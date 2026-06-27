@@ -3,27 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import warnings
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import StrEnum
-from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol
 
-from . import git, style
+from . import api, diffing, git, map_reduce, style, templates, tokens
 from .errors import GitError, NoChanges, ValidationFailure
 from .models import (
-    AnalysisDetail,
     CommitSummary,
     CommitType,
     ComposeSnapshot,
-    ConventionalAnalysis,
     Scope,
     coerce_optional_scope,
 )
@@ -37,6 +33,32 @@ from .patch import (
     stage_executable_group_in_index,
 )
 from .validation import validate_commit_message
+
+
+class _ComposeConfig(Protocol):
+    """Configuration fields read during compose planning and execution."""
+
+    compose_max_rounds: int
+    analysis_model: str
+    summary_model: str
+    max_diff_length: int
+    max_diff_tokens: int
+    summary_hard_limit: int
+    gpg_sign: bool
+    signoff: bool
+
+
+class _ComposeArgs(Protocol):
+    """Command-line arguments read during compose planning and execution."""
+
+    dir: str | os.PathLike[str]
+    compose_preview: bool
+    compose_max_commits: int | None
+    compose_test_after_each: bool
+    sign: bool
+    signoff: bool
+    debug_output: str | None
+
 
 COMPOSE_PLAN_SCHEMA_VERSION = "v3"
 COMPOSE_MESSAGE_PARALLELISM = 8
@@ -238,10 +260,10 @@ def compute_dependency_order(
             adjacency[dep_idx].append(idx)
             in_degree[idx] += 1
 
-    queue = [idx for idx, degree in enumerate(in_degree) if degree == 0]
+    queue = deque(idx for idx, degree in enumerate(in_degree) if degree == 0)
     order: list[int] = []
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         order.append(node)
         for neighbor in adjacency[node]:
             in_degree[neighbor] -= 1
@@ -252,26 +274,26 @@ def compute_dependency_order(
     return tuple(order)
 
 
-def capture_compose_base_state(dir: str | os.PathLike[str] = ".") -> ComposeBaseState:
+def capture_compose_base_state(repo_dir: str | os.PathLike[str] = ".") -> ComposeBaseState:
     """Capture HEAD/ref/index state once before compose planning or LLM calls."""
     return ComposeBaseState(
-        head_hash=git.get_head_hash(dir),
-        head_ref=git.current_head_ref(dir),
-        index_tree=git.write_real_index_tree(dir),
+        head_hash=git.get_head_hash(repo_dir),
+        head_ref=git.current_head_ref(repo_dir),
+        index_tree=git.write_real_index_tree(repo_dir),
     )
 
 
-async def run_compose_mode(args: Any, config: Any) -> list[str]:
+async def run_compose_mode(args: _ComposeArgs, config: _ComposeConfig) -> list[str]:
     """Run compose rounds until preview, no changes remain, or max rounds is reached."""
-    max_rounds = int(getattr(config, "compose_max_rounds", 5) or 5)
+    max_rounds = int(config.compose_max_rounds or 5)
     all_hashes: list[str] = []
     for round_number in range(1, max_rounds + 1):
         hashes = await run_compose_round(args, config, round_number)
         all_hashes.extend(hashes)
-        if bool(getattr(args, "compose_preview", False)):
+        if args.compose_preview:
             break
         try:
-            git.get_compose_diff_with_config(_arg_dir(args), config)
+            git.get_compose_diff(args.dir, config)
         except NoChanges:
             break
         if round_number == max_rounds:
@@ -303,41 +325,38 @@ def _print_executable_plan(snapshot: ComposeSnapshot, plan: ComposeExecutablePla
             print(f"   Depends on: {', '.join(group.dependencies)}")
 
 
-async def run_compose_round(args: Any, config: Any, round: int = 1) -> list[str]:
+async def run_compose_round(args: _ComposeArgs, config: _ComposeConfig, round_number: int = 1) -> list[str]:
     """Plan one immutable compose snapshot and optionally execute it in isolation."""
-    dir = _arg_dir(args)
-    base_state = capture_compose_base_state(dir)
-    diff = git.get_compose_diff_with_config(dir, config)
-    stat = git.get_compose_stat(dir)
+    repo_dir = args.dir
+    base_state = capture_compose_base_state(repo_dir)
+    diff = git.get_compose_diff(repo_dir, config)
+    stat = git.get_compose_stat(repo_dir)
     snapshot = build_compose_snapshot(diff, stat)
-    pin_snapshot_worktree_state(snapshot, dir)
-    _save_debug_artifact(args, f"compose_round_{round}_snapshot.json", _snapshot_to_jsonable(snapshot))
+    pin_snapshot_worktree_state(snapshot, repo_dir)
+    _save_debug_artifact(args, f"compose_round_{round_number}_snapshot.json", _snapshot_to_jsonable(snapshot))
 
     token_counter = _create_token_counter(config)
     observations = []
     if _should_collect_compose_observations(snapshot, config, token_counter):
-        observations = await _observe_diff_files(
-            snapshot.diff,
-            str(getattr(config, "summary_model", getattr(config, "model", "")) or ""),
-            config,
-            token_counter,
-        )
+        observations = await map_reduce.observe_diff_files(snapshot.diff, config.summary_model, config, token_counter)
     if observations:
         _save_debug_artifact(
-            args, f"compose_round_{round}_observations.json", [_observation_to_jsonable(item) for item in observations]
+            args,
+            f"compose_round_{round_number}_observations.json",
+            [_observation_to_jsonable(item) for item in observations],
         )
 
-    max_commits = int(getattr(args, "compose_max_commits", None) or 20)
-    model = str(getattr(config, "analysis_model", getattr(args, "model", "")) or "")
-    plan = _load_cached_plan(dir, snapshot, max_commits, model)
+    max_commits = args.compose_max_commits or 20
+    model = config.analysis_model
+    plan = _load_cached_plan(repo_dir, snapshot, max_commits, model)
     if plan is None:
         plan = await plan_compose_snapshot(snapshot, config, args, max_commits=max_commits, observations=observations)
-        _save_cached_plan(dir, snapshot, max_commits, model, plan)
-    _save_debug_artifact(args, f"compose_round_{round}_executable_plan.json", _plan_to_jsonable(plan))
+        _save_cached_plan(repo_dir, snapshot, max_commits, model, plan)
+    _save_debug_artifact(args, f"compose_round_{round_number}_executable_plan.json", _plan_to_jsonable(plan))
 
     _print_executable_plan(snapshot, plan)
 
-    if bool(getattr(args, "compose_preview", False)):
+    if args.compose_preview:
         preview_message = f"{style.icons.SUCCESS} Preview complete (use --compose without --compose-preview to execute)"
         print(f"\n{style.success(preview_message)}")
         return []
@@ -346,76 +365,75 @@ async def run_compose_round(args: Any, config: Any, round: int = 1) -> list[str]
 
 async def plan_compose_snapshot(
     snapshot: ComposeSnapshot,
-    config: Any,
-    args: Any | None = None,
+    config: _ComposeConfig,
+    args: _ComposeArgs | None = None,
     *,
     max_commits: int = 20,
     observations: Sequence[Any] = (),
 ) -> ComposeExecutablePlan:
     """Build or request an executable compose plan for a pinned snapshot."""
-    intent_plan = await _analyze_compose_intent(
-        snapshot, observations, config, max_commits, getattr(args, "debug_output", None)
-    )
+    debug_dir = args.debug_output if args is not None else None
+    intent_plan = await _analyze_compose_intent(snapshot, observations, config, max_commits, debug_dir)
     _save_debug_artifact(args, "compose_intent_plan.json", _intent_plan_to_jsonable(intent_plan))
-    return await _bind_compose_plan(snapshot, intent_plan, config, getattr(args, "debug_output", None))
+    return await _bind_compose_plan(snapshot, intent_plan, config, debug_dir)
 
 
 async def execute_compose(
     snapshot: ComposeSnapshot,
     plan: ComposeExecutablePlan,
-    config: Any,
-    args: Any,
+    config: _ComposeConfig,
+    args: _ComposeArgs,
     base_state: ComposeBaseState,
 ) -> list[str]:
     """Create compose commits from a temp index, then checked-update the real ref."""
-    if bool(getattr(args, "compose_preview", False)):
+    if args.compose_preview:
         return []
 
-    dir = _arg_dir(args)
+    repo_dir = args.dir
     ordered_groups = [plan.groups[idx] for idx in plan.dependency_order]
     group_patches = [create_executable_group_patch(snapshot, group) for group in ordered_groups]
     prepared_messages = await _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args)
 
-    with git.TempGitIndex(dir) as index:
-        git.read_tree_into_index(index.path, base_state.head_hash, dir)
+    with git.TempGitIndex(repo_dir) as index:
+        git.read_tree_into_index(index.path, base_state.head_hash, repo_dir)
         parent_hash = base_state.head_hash
         commit_hashes: list[str] = []
         for position, group in enumerate(ordered_groups):
-            outcome = stage_executable_group_in_index(snapshot, group, dir, index.path)
+            outcome = stage_executable_group_in_index(snapshot, group, repo_dir, index.path)
             staged_anything = outcome.result == StageResult.STAGED
             for skipped in outcome.skipped:
                 file = snapshot.file_by_path(skipped.path)
                 if file is None:
                     continue
                 cumulative = _cumulative_file_hunk_ids(plan, position, snapshot, file.file_id)
-                force_stage_file_from_base_in_index(snapshot, file.file_id, cumulative, dir, index.path)
+                force_stage_file_from_base_in_index(snapshot, file.file_id, cumulative, repo_dir, index.path)
                 staged_anything = True
             if not staged_anything:
                 continue
             message = prepared_messages[position]
-            tree = git.write_index_tree(index.path, dir)
-            sign = bool(getattr(args, "sign", False) or getattr(config, "gpg_sign", False))
-            commit_hash = git.commit_tree(tree, [parent_hash], message, dir, sign=sign)
+            tree = git.write_index_tree(index.path, repo_dir)
+            sign = bool(args.sign or config.gpg_sign)
+            commit_hash = git.commit_tree(tree, [parent_hash], message, repo_dir, sign=sign)
             parent_hash = commit_hash
             commit_hashes.append(commit_hash)
-            if bool(getattr(args, "compose_test_after_each", False)):
+            if args.compose_test_after_each:
                 raise GitError("--compose-test-after-each is incompatible with isolated compose execution")
 
     if not commit_hashes:
         return []
 
-    git.update_ref_checked(base_state.head_ref, parent_hash, base_state.head_hash, dir)
-    current_index_tree = git.write_real_index_tree(dir)
+    git.update_ref_checked(base_state.head_ref, parent_hash, base_state.head_hash, repo_dir)
+    current_index_tree = git.write_real_index_tree(repo_dir)
     if current_index_tree == base_state.index_tree:
-        git.reset_mixed_to(parent_hash, dir)
+        git.reset_mixed_to(parent_hash, repo_dir)
     else:
         paths = [file.path for file in snapshot.files]
-        git.reset_paths_to(parent_hash, paths, dir)
+        git.reset_paths_to(parent_hash, paths, repo_dir)
     return commit_hashes
 
 
 def _analyze_compose_intent_from_mapping(
-    raw: Any, snapshot: ComposeSnapshot, config: Any, max_commits: int
+    raw: Any, snapshot: ComposeSnapshot, config: _ComposeConfig, max_commits: int
 ) -> tuple[ComposeIntentGroup, ...]:
     data = _object_mapping(raw)
     raw_groups = data.get("groups", ())
@@ -427,22 +445,13 @@ def _analyze_compose_intent_from_mapping(
 async def _analyze_compose_intent(
     snapshot: ComposeSnapshot,
     observations: Sequence[Any],
-    config: Any,
+    config: _ComposeConfig,
     max_commits: int,
     debug_dir: str | os.PathLike[str] | None,
 ) -> tuple[ComposeIntentGroup, ...]:
     planning_index = _build_planning_index(snapshot)
-    try:
-        api = import_module("lgit.api")
-        templates = import_module("lgit.templates")
-    except ModuleNotFoundError:
-        return _fallback_intent_groups(snapshot, planning_index, max_commits, config)
-
-    schema = _build_intent_schema(config)
-    variant = "markdown" if bool(getattr(config, "markdown_output", True)) else "default"
-    types_description = api.format_types_description(config) if hasattr(api, "format_types_description") else None
+    types_description = api.format_types_description(config)
     parts = templates.render_compose_intent_prompt(
-        variant=variant,
         max_commits=max_commits,
         stat=_render_planning_stat(planning_index),
         snapshot_summary=_render_planning_snapshot_summary(snapshot, observations, planning_index),
@@ -456,20 +465,17 @@ async def _analyze_compose_intent(
             config,
             api.OneShotSpec(
                 operation="compose/intent",
-                model=str(getattr(config, "analysis_model", getattr(config, "model", "")) or ""),
+                model=config.analysis_model,
                 prompt_family="compose-intent",
-                prompt_variant=variant,
                 system_prompt=parts.system,
                 user_prompt=parts.user,
                 tool_name="create_compose_intent_plan",
-                tool_description="Plan logical commit groups over the provided planning target IDs",
-                schema=schema,
                 progress_label="compose intent planner",
                 debug=api.OneShotDebug(debug_dir, None, "compose_intent") if debug_dir else None,
                 cacheable=True,
             ),
         )
-        output = response.output if hasattr(response, "output") else response
+        output = response.output
         groups = _analyze_compose_intent_from_mapping(output, snapshot, config, max_commits)
     except Exception as exc:
         warnings.warn(
@@ -484,7 +490,7 @@ async def _analyze_compose_intent(
 async def _bind_compose_plan(
     snapshot: ComposeSnapshot,
     intent_plan: Sequence[ComposeIntentGroup],
-    config: Any,
+    config: _ComposeConfig,
     debug_dir: str | os.PathLike[str] | None,
 ) -> ComposeExecutablePlan:
     assigned_by_group, ambiguous_files = _auto_assign_hunks(snapshot, intent_plan)
@@ -521,29 +527,11 @@ async def _bind_compose_plan(
     return plan
 
 
-def _fallback_plan(snapshot: ComposeSnapshot, *, max_commits: int) -> ComposeExecutablePlan:
-    planning_index = _build_planning_index(snapshot)
-    intent = _fallback_intent_groups(snapshot, planning_index, max(1, max_commits), None)
-    assigned: dict[str, set[str]] = {
-        group.group_id: {
-            hunk_id
-            for file_id in group.file_ids
-            for file in [snapshot.file_by_id(file_id)]
-            if file
-            for hunk_id in file.hunk_ids
-        }
-        for group in intent
-    }
-    plan = _finalize_executable_plan(snapshot, intent, assigned)
-    _validate_executable_plan(snapshot, plan)
-    return plan
-
-
 def _fallback_intent_groups(
     snapshot: ComposeSnapshot,
     planning_index: PlanningIndex,
     max_commits: int,
-    config: Any,
+    config: _ComposeConfig,
 ) -> tuple[ComposeIntentGroup, ...]:
     del config
     if planning_index.mode is PlanningMode.AREA:
@@ -596,47 +584,22 @@ def _fallback_area_bins(
     return [tuple(_ordered_file_ids(snapshot, set(file_ids))) for file_ids, _ in bins if file_ids]
 
 
-def _guess_commit_type(files: Sequence[Any]) -> str:
-    paths = [file.path for file in files]
-    if any(_is_dependency_manifest(path) for path in paths):
-        return "build"
-    if all(path.startswith(("test/", "tests/")) or "test" in Path(path).stem.lower() for path in paths):
-        return "test"
-    if all(
-        path.lower().endswith((".md", ".rst", ".adoc")) or Path(path).name.lower().startswith("readme")
-        for path in paths
-    ):
-        return "docs"
-    return "chore"
-
-
-def _guess_scope(files: Sequence[Any]) -> Scope | None:
-    first = files[0].path if files else ""
-    parts = [part for part in first.replace("\\", "/").split("/") if part]
-    raw = Path(parts[0]).stem if parts else None
-    return coerce_optional_scope(raw) if raw else None
-
-
 def _is_dependency_manifest(path: str) -> bool:
     name = Path(path).name
     return name in _DEPENDENCY_MANIFESTS or Path(name).suffix.lower() in {".lock", ".lockb"}
 
 
-def _compose_analysis_strategy(diff: str, config: Any, counter: Any) -> ComposeAnalysisStrategy:
+def _compose_analysis_strategy(diff: str, config: _ComposeConfig, counter: Any) -> ComposeAnalysisStrategy:
     if _should_use_map_reduce(diff, config, counter):
         return ComposeAnalysisStrategy.MAP_REDUCE
     diff_tokens = _count_tokens(counter, diff)
-    if len(diff) > int(getattr(config, "max_diff_length", 100_000)) or diff_tokens > int(
-        getattr(config, "max_diff_tokens", 25_000)
-    ):
+    if len(diff) > config.max_diff_length or diff_tokens > config.max_diff_tokens:
         return ComposeAnalysisStrategy.SMART_TRUNCATE
     return ComposeAnalysisStrategy.DIRECT
 
 
-def _compose_truncation_length(config: Any) -> int:
-    return max(
-        1, min(int(getattr(config, "max_diff_length", 100_000)), int(getattr(config, "max_diff_tokens", 25_000)) * 4)
-    )
+def _compose_truncation_length(config: _ComposeConfig) -> int:
+    return max(1, min(config.max_diff_length, config.max_diff_tokens * 4))
 
 
 def _count_tokens(counter: Any, text: str) -> int:
@@ -649,26 +612,22 @@ def _count_tokens(counter: Any, text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _create_token_counter(config: Any) -> Any:
+def _create_token_counter(config: _ComposeConfig) -> Any:
     try:
-        return import_module("lgit.tokens").create_token_counter(config)
+        return tokens.create_token_counter(config)
     except Exception as exc:
         warnings.warn(f"token counter unavailable; using character-count fallback: {exc}", RuntimeWarning, stacklevel=2)
         return SimpleNamespace(count_sync=lambda text: max(1, len(str(text)) // 4))
 
 
-def _should_use_map_reduce(diff: str, config: Any, counter: Any | None = None) -> bool:
+def _should_use_map_reduce(diff: str, config: _ComposeConfig, counter: Any | None = None) -> bool:
     try:
-        return bool(import_module("lgit.map_reduce").should_use_map_reduce(diff, config, counter))
+        return bool(map_reduce.should_use_map_reduce(diff, config, counter))
     except Exception as exc:
         warnings.warn(
             f"map-reduce availability check failed; using direct analysis path: {exc}", RuntimeWarning, stacklevel=2
         )
         return False
-
-
-async def _observe_diff_files(diff: str, model: str, config: Any, counter: Any | None = None) -> list[Any]:
-    return await import_module("lgit.map_reduce").observe_diff_files(diff, model, config, counter)
 
 
 def _is_large_compose_snapshot(snapshot: ComposeSnapshot) -> bool:
@@ -678,16 +637,8 @@ def _is_large_compose_snapshot(snapshot: ComposeSnapshot) -> bool:
     )
 
 
-def _planning_mode_for_snapshot(snapshot: ComposeSnapshot) -> PlanningMode:
-    if _is_large_compose_snapshot(snapshot):
-        return PlanningMode.AREA
-    return PlanningMode.FILE
-
-
-def _should_collect_compose_observations(snapshot: ComposeSnapshot, config: Any, counter: Any) -> bool:
-    return _planning_mode_for_snapshot(snapshot) is not PlanningMode.AREA and _should_use_map_reduce(
-        snapshot.diff, config, counter
-    )
+def _should_collect_compose_observations(snapshot: ComposeSnapshot, config: _ComposeConfig, counter: Any) -> bool:
+    return not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(snapshot.diff, config, counter)
 
 
 def _snapshot_summary_budget(snapshot: ComposeSnapshot) -> SnapshotSummaryBudget:
@@ -762,7 +713,7 @@ def _render_snapshot_summary(snapshot: ComposeSnapshot, observations: Sequence[A
 
 
 def _build_planning_index(snapshot: ComposeSnapshot) -> PlanningIndex:
-    mode = _planning_mode_for_snapshot(snapshot)
+    mode = PlanningMode.AREA if _is_large_compose_snapshot(snapshot) else PlanningMode.FILE
     targets = tuple(
         _build_file_planning_targets(snapshot) if mode is PlanningMode.FILE else _build_area_planning_targets(snapshot)
     )
@@ -948,67 +899,6 @@ def _render_split_bias(index: PlanningIndex) -> str:
     return "Prefer splitting unrelated areas into separate groups. Only return one broad group if nearly every area clearly belongs to the same atomic change."
 
 
-def _build_intent_schema(config: Any) -> dict[str, Any]:
-    type_enum = list(getattr(config, "types", {}) or {"chore": None})
-    return {
-        "type": "object",
-        "properties": {
-            "groups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "group_id": {"type": "string", "description": "Stable identifier like G1, G2, G3"},
-                        "file_ids": {
-                            "type": "array",
-                            "description": "Planning target IDs that belong to this logical commit. Use the exact IDs supplied in the prompt, even when they represent path-based areas instead of individual files. Never place group IDs or placeholder strings here. Repeat IDs across groups when a target is shared.",
-                            "items": {"type": "string"},
-                        },
-                        "type": {
-                            "type": "string",
-                            "enum": type_enum,
-                            "description": "Conventional commit type for this group",
-                        },
-                        "scope": {"type": "string", "description": "Optional scope (module/component). Omit if broad."},
-                        "rationale": {"type": "string", "description": "Brief explanation of the logical change"},
-                        "dependencies": {
-                            "type": "array",
-                            "description": "Group IDs this group depends on",
-                            "items": {"type": "string"},
-                        },
-                    },
-                    "required": ["group_id", "file_ids", "type", "rationale", "dependencies"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["groups"],
-        "additionalProperties": False,
-    }
-
-
-def _build_binding_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "assignments": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "group_id": {"type": "string"},
-                        "hunk_ids": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["group_id", "hunk_ids"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["assignments"],
-        "additionalProperties": False,
-    }
-
-
 def _normalize_file_reference(raw_file_ref: str) -> str:
     value = raw_file_ref.strip().strip("`'\"").strip()
     for token in ("file", "path", "target"):
@@ -1108,7 +998,7 @@ def _normalize_intent_plan(
     snapshot: ComposeSnapshot,
     planning_index: PlanningIndex,
     groups: Sequence[ComposeIntentGroup],
-    config: Any,
+    config: _ComposeConfig,
     max_commits: int,
 ) -> tuple[ComposeIntentGroup, ...]:
     del config
@@ -1463,20 +1353,13 @@ async def _request_binding(
     snapshot: ComposeSnapshot,
     groups: Sequence[ComposeIntentGroup],
     ambiguous_files: Sequence[Mapping[str, Any]],
-    config: Any,
+    config: _ComposeConfig,
     debug_dir: str | os.PathLike[str] | None,
     debug_name: str,
 ) -> list[Mapping[str, Any]]:
     if not ambiguous_files:
         return []
-    try:
-        api = import_module("lgit.api")
-        templates = import_module("lgit.templates")
-    except ModuleNotFoundError:
-        return []
-    variant = "markdown" if bool(getattr(config, "markdown_output", True)) else "default"
     parts = templates.render_compose_bind_prompt(
-        variant=variant,
         groups=_render_binding_groups(groups),
         ambiguous_files=_render_binding_ambiguous_files(snapshot, ambiguous_files),
     )
@@ -1485,14 +1368,11 @@ async def _request_binding(
             config,
             api.OneShotSpec(
                 operation="compose/bind",
-                model=str(getattr(config, "analysis_model", getattr(config, "model", "")) or ""),
+                model=config.analysis_model,
                 prompt_family="compose-bind",
-                prompt_variant=variant,
                 system_prompt=parts.system,
                 user_prompt=parts.user,
                 tool_name="bind_compose_hunks",
-                tool_description="Assign hunk IDs to existing compose groups",
-                schema=_build_binding_schema(),
                 progress_label="compose hunk binder",
                 debug=api.OneShotDebug(debug_dir, None, debug_name) if debug_dir else None,
                 cacheable=True,
@@ -1501,7 +1381,7 @@ async def _request_binding(
     except Exception as exc:
         warnings.warn(f"compose hunk binder failed; using deterministic fallback: {exc}", RuntimeWarning, stacklevel=2)
         return []
-    output = response.output if hasattr(response, "output") else response
+    output = response.output
     data = _object_mapping(output)
     assignments = data.get("assignments", ())
     return [_object_mapping(item) for item in assignments]
@@ -1776,8 +1656,8 @@ async def _prepare_group_messages(
     snapshot: ComposeSnapshot,
     groups: Sequence[ComposeExecutableGroup],
     group_patches: Sequence[Any],
-    config: Any,
-    args: Any,
+    config: _ComposeConfig,
+    args: _ComposeArgs,
 ) -> list[str]:
     semaphore = asyncio.Semaphore(min(COMPOSE_MESSAGE_PARALLELISM, max(len(groups), 1)))
     counter = _create_token_counter(config)
@@ -1800,8 +1680,8 @@ async def _generate_group_message(
     group: ComposeExecutableGroup,
     stat: str,
     diff: str,
-    config: Any,
-    args: Any,
+    config: _ComposeConfig,
+    args: _ComposeArgs,
     counter: Any,
     debug_prefix: str,
 ) -> str:
@@ -1811,7 +1691,7 @@ async def _generate_group_message(
     commit = SimpleNamespace(
         commit_type=group.commit_type,
         scope=group.scope,
-        summary=CommitSummary.from_raw(summary, max_length=int(getattr(config, "summary_hard_limit", 128))),
+        summary=CommitSummary.from_raw(summary, max_length=config.summary_hard_limit),
         body=list(body),
         footers=[],
     )
@@ -1821,8 +1701,8 @@ async def _generate_group_message(
         first = report.errors[0]
         raise ValidationFailure(first.message, field=first.field, value=first.value)
     message = format_commit_message(commit)
-    if bool(getattr(args, "signoff", False) or getattr(config, "signoff", False)):
-        message = git.append_signoff_trailer(message, _arg_dir(args))
+    if bool(args.signoff or config.signoff):
+        message = git.append_signoff_trailer(message, args.dir)
     return message
 
 
@@ -1830,98 +1710,44 @@ async def _message_parts_from_api(
     group: ComposeExecutableGroup,
     stat: str,
     diff: str,
-    config: Any,
-    args: Any,
+    config: _ComposeConfig,
+    args: _ComposeArgs,
     counter: Any,
     debug_prefix: str,
 ) -> tuple[list[str], str | None]:
-    try:
-        api = import_module("lgit.api")
-    except ModuleNotFoundError:
-        return [group.rationale], None
-    analysis_fn = getattr(api, "generate_conventional_analysis", None)
-    summary_fn = getattr(api, "generate_summary_from_analysis", None)
-    if analysis_fn is None or summary_fn is None:
-        return [group.rationale], None
-
     strategy = _compose_analysis_strategy(diff, config, counter)
     if strategy is ComposeAnalysisStrategy.MAP_REDUCE:
-        analysis = import_module("lgit.map_reduce").run_map_reduce(
+        analysis = await map_reduce.run_map_reduce(
             diff,
             stat,
             group.rationale,
-            str(getattr(config, "analysis_model", getattr(config, "model", "")) or ""),
+            config.analysis_model,
             config,
             counter,
         )
     else:
         analysis_diff = diff
         if strategy is ComposeAnalysisStrategy.SMART_TRUNCATE:
-            analysis_diff = import_module("lgit.diffing").smart_truncate_diff(
-                diff, _compose_truncation_length(config), config, counter
-            )
-        try:
-            analysis = analysis_fn(
-                config=config,
-                stat=stat,
-                diff=analysis_diff,
-                scope_candidates=group.rationale,
-                user_context=group.rationale,
-                debug_output=getattr(args, "debug_output", None),
-                debug_prefix=debug_prefix,
-            )
-        except TypeError:
-            analysis = analysis_fn(
-                config,
-                stat,
-                analysis_diff,
-                group.rationale,
-                user_context=group.rationale,
-                debug_output=getattr(args, "debug_output", None),
-            )
-    analysis = await analysis if inspect.isawaitable(analysis) else analysis
-    body = _analysis_body(analysis) or [group.rationale]
-    if not isinstance(analysis, ConventionalAnalysis):
-        analysis = ConventionalAnalysis(
-            commit_type=group.commit_type,
-            scope=group.scope,
-            summary=None,
-            details=tuple(AnalysisDetail(text=item) for item in body),
-            issue_refs=(),
-        )
-    try:
-        summary = summary_fn(
+            analysis_diff = diffing.smart_truncate_diff(diff, _compose_truncation_length(config), config, counter)
+        analysis = await api.generate_conventional_analysis(
             config=config,
-            analysis=analysis,
             stat=stat,
+            diff=analysis_diff,
+            scope_candidates=group.rationale,
             user_context=group.rationale,
-            debug_output=getattr(args, "debug_output", None),
+            debug_output=args.debug_output,
             debug_prefix=debug_prefix,
         )
-    except TypeError:
-        summary = summary_fn(
-            config,
-            analysis,
-            stat=stat,
-            user_context=group.rationale,
-            debug_output=getattr(args, "debug_output", None),
-        )
-    return body, str(getattr(summary, "value", summary)) if summary is not None else None
-
-
-def _analysis_body(analysis: Any) -> list[str]:
-    if analysis is None:
-        return []
-    body_texts = getattr(analysis, "body_texts", None)
-    if callable(body_texts):
-        return [str(value) for value in body_texts()]
-    details = getattr(analysis, "details", None)
-    if details:
-        return [str(getattr(detail, "text", detail)) for detail in details]
-    if isinstance(analysis, Mapping):
-        details = analysis.get("details") or analysis.get("body") or ()
-        return [str(getattr(detail, "text", detail)) for detail in details]
-    return []
+    body = analysis.body_texts() or [group.rationale]
+    summary = await api.generate_summary_from_analysis(
+        config=config,
+        analysis=analysis,
+        stat=stat,
+        user_context=group.rationale,
+        debug_output=args.debug_output,
+        debug_prefix=debug_prefix,
+    )
+    return body, summary
 
 
 def _fallback_summary(group: ComposeExecutableGroup, snapshot: ComposeSnapshot) -> str:
@@ -1950,12 +1776,8 @@ def _cumulative_file_hunk_ids(
     return hunk_ids
 
 
-def _arg_dir(args: Any) -> str | os.PathLike[str]:
-    return getattr(args, "dir", ".")
-
-
-def _cache_file(dir: str | os.PathLike[str], key: str) -> Path:
-    cache_dir = git.get_git_dir(dir) / "llm-git"
+def _cache_file(repo_dir: str | os.PathLike[str], key: str) -> Path:
+    cache_dir = git.get_git_dir(repo_dir) / "llm-git"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"compose-plan-{key}.json"
 
@@ -1983,10 +1805,10 @@ def _snapshot_cache_key(snapshot: ComposeSnapshot, max_commits: int, model: str)
 
 
 def _load_cached_plan(
-    dir: str | os.PathLike[str], snapshot: ComposeSnapshot, max_commits: int, model: str
+    repo_dir: str | os.PathLike[str], snapshot: ComposeSnapshot, max_commits: int, model: str
 ) -> ComposeExecutablePlan | None:
     key = _snapshot_cache_key(snapshot, max_commits, model)
-    path = _cache_file(dir, key)
+    path = _cache_file(repo_dir, key)
     if not path.exists():
         return None
     try:
@@ -2006,10 +1828,14 @@ def _load_cached_plan(
 
 
 def _save_cached_plan(
-    dir: str | os.PathLike[str], snapshot: ComposeSnapshot, max_commits: int, model: str, plan: ComposeExecutablePlan
+    repo_dir: str | os.PathLike[str],
+    snapshot: ComposeSnapshot,
+    max_commits: int,
+    model: str,
+    plan: ComposeExecutablePlan,
 ) -> None:
     key = _snapshot_cache_key(snapshot, max_commits, model)
-    path = _cache_file(dir, key)
+    path = _cache_file(repo_dir, key)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(
         json.dumps(
@@ -2022,10 +1848,10 @@ def _save_cached_plan(
     tmp.replace(path)
 
 
-def _save_debug_artifact(args: Any, filename: str, value: Any) -> None:
+def _save_debug_artifact(args: _ComposeArgs | None, filename: str, value: Any) -> None:
     if args is None:
         return
-    debug_dir = getattr(args, "debug_output", None)
+    debug_dir = args.debug_output
     if not debug_dir:
         return
     path = Path(debug_dir)

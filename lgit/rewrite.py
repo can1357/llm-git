@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -15,6 +13,7 @@ from typing import Any
 
 from . import style
 from .analysis import extract_scope_candidates
+from .api import generate_conventional_analysis, generate_summary_from_analysis
 from .diffing import smart_truncate_diff
 from .errors import ValidationFailure
 from .git import (
@@ -27,7 +26,6 @@ from .git import (
     rewrite_history,
     run_git,
 )
-from .models import ConventionalAnalysis
 from .normalization import format_commit_message, post_process_commit_message
 from .validation import validate_commit_message
 
@@ -174,11 +172,17 @@ async def generate_for_commit(commit: Any, config: Any, dir: str | os.PathLike[s
         diff = smart_truncate_diff(diff, max_diff_length, config)
 
     scope_candidates, _ = extract_scope_candidates("commit", commit_hash, dir, config)
-    analysis = await _generate_analysis(stat, diff, scope_candidates, config)
-    commit_type, scope, details, analysis_summary = _analysis_parts(analysis)
-    summary = analysis_summary or await _generate_summary(stat, analysis, commit_type, scope, details, config)
+    analysis = await generate_conventional_analysis(
+        config, stat, diff, scope_candidates, user_context=None, debug_output=None
+    )
+    commit_type = str(analysis.commit_type)
+    scope = None if analysis.scope is None else str(analysis.scope)
+    details = analysis.body_texts()
+    summary = analysis.summary or str(
+        await generate_summary_from_analysis(config, analysis, stat=stat, user_context=None)
+    )
 
-    message = SimpleNamespace(commit_type=commit_type, scope=scope, summary=summary, body=list(details), footers=[])
+    message = SimpleNamespace(commit_type=commit_type, scope=scope, summary=summary, body=details, footers=[])
     post_process_commit_message(message, config)
     report = validate_commit_message(message, config, stat=stat)
     if not report.ok:
@@ -195,144 +199,6 @@ def create_backup_branch(dir: str | os.PathLike[str] = ".") -> str:
     branch = f"backup-rewrite-{timestamp}"
     run_git(["branch", branch, head], cwd=dir)
     return branch
-
-
-async def _generate_analysis(stat: str, diff: str, scope_candidates: str, config: Any) -> Any:
-    try:
-        from .api import generate_conventional_analysis
-    except Exception:
-        generate_conventional_analysis = None
-
-    if generate_conventional_analysis is not None:
-        result = generate_conventional_analysis(
-            config,
-            stat,
-            diff,
-            scope_candidates,
-            user_context=None,
-            debug_output=None,
-        )
-        if inspect.isawaitable(result):
-            result = await result
-        return result
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "type": {"type": "string"},
-            "commit_type": {"type": "string"},
-            "scope": {"type": ["string", "null"]},
-            "summary": {"type": ["string", "null"]},
-            "details": {"type": "array"},
-        },
-        "additionalProperties": True,
-    }
-    prompt = (
-        "Produce JSON conventional-commit analysis for this commit. "
-        "Use fields type, scope, summary, and details.\n\n"
-        f"Scope candidates:\n{scope_candidates}\n\nStat:\n{stat}\n\nDiff:\n{diff}"
-    )
-    return await _run_oneshot(
-        config,
-        prompt,
-        system_prompt="You classify git diffs into conventional commit metadata.",
-        model=getattr(config, "analysis_model", getattr(config, "model", None)),
-        schema=schema,
-        schema_name="conventional_analysis",
-        debug_label="rewrite-analysis",
-        cache=True,
-    )
-
-
-async def _generate_summary(
-    stat: str,
-    analysis: Any,
-    commit_type: str,
-    scope: str | None,
-    details: Sequence[str],
-    config: Any,
-) -> str:
-    try:
-        from .api import generate_summary_from_analysis
-    except Exception:
-        generate_summary_from_analysis = None
-
-    if generate_summary_from_analysis is not None:
-        result = generate_summary_from_analysis(config, analysis, stat=stat, user_context=None)
-        if inspect.isawaitable(result):
-            result = await result
-        return str(result)
-
-    prompt = (
-        "Write only the lowercase, past-tense summary text for this conventional commit. "
-        "No type prefix and no trailing period.\n\n"
-        f"Type: {commit_type}\nScope: {scope or '(none)'}\nDetails:\n"
-        + "\n".join(f"- {detail}" for detail in details)
-        + f"\n\nStat:\n{stat}"
-    )
-    result = await _run_oneshot(
-        config,
-        prompt,
-        system_prompt="You write concise conventional commit summaries.",
-        model=getattr(config, "summary_model", getattr(config, "analysis_model", getattr(config, "model", None))),
-        schema=None,
-        schema_name="create_commit_summary",
-        debug_label="rewrite-summary",
-        cache=True,
-    )
-    return str(result).strip()
-
-
-def _analysis_parts(analysis: Any) -> tuple[str, str | None, tuple[str, ...], str | None]:
-    if isinstance(analysis, ConventionalAnalysis):
-        return (
-            str(analysis.commit_type),
-            None if analysis.scope is None else str(analysis.scope),
-            tuple(analysis.body_texts()),
-            analysis.summary,
-        )
-    payload = _jsonish(analysis)
-    if not isinstance(payload, Mapping):
-        raise ValidationFailure("analysis response was not an object", field="rewrite")
-    commit_type = str(payload.get("commit_type") or payload.get("type") or "chore")
-    raw_scope = payload.get("scope")
-    scope = None if raw_scope in (None, "", "null") else str(raw_scope)
-    summary = payload.get("summary")
-    details = payload.get("details") or payload.get("body") or []
-    texts: list[str] = []
-    for detail in details:
-        if isinstance(detail, Mapping):
-            text = detail.get("text") or detail.get("description")
-        else:
-            text = detail
-        if text is not None and str(text).strip():
-            texts.append(str(text).strip())
-    return commit_type, scope, tuple(texts), None if summary in (None, "") else str(summary)
-
-
-async def _run_oneshot(config: Any, prompt: str, **kwargs: Any) -> Any:
-    from .api import run_oneshot
-
-    try:
-        result = run_oneshot(config, prompt, **kwargs)
-    except TypeError:
-        result = run_oneshot(config=config, prompt=prompt, **kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    return getattr(result, "output", result)
-
-
-def _jsonish(value: Any) -> Any:
-    if isinstance(value, str):
-        text = value.strip()
-        if text.startswith("```"):
-            text = text.strip("`").removeprefix("json").strip()
-        return json.loads(text)
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    if hasattr(value, "__dict__"):
-        return vars(value)
-    return value
 
 
 def _rewrite_config(config: Any) -> Any:
