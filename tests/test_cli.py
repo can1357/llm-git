@@ -55,6 +55,27 @@ def test_commit_staged_commits_snapshot_on_index_drift(
     assert (repo / "b.txt").read_text(encoding="utf-8") == "drift\n"
 
 
+def test_emit_commit_hash_only_prints_to_stdout_when_piped(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lgit import style
+
+    # Piped (no TTY): the bare hash is the machine-readable stdout output for scripts.
+    monkeypatch.setattr(style, "_PIPE_MODE", True)
+    cli._emit_commit_hash("b6eed6edf4b3805b55640b1d69dd665652b9370a")
+    assert capsys.readouterr().out.strip() == "b6eed6edf4b3805b55640b1d69dd665652b9370a"
+
+    # On a TTY: suppressed, since the success status line already reports the hash.
+    monkeypatch.setattr(style, "_PIPE_MODE", False)
+    cli._emit_commit_hash("b6eed6edf4b3805b55640b1d69dd665652b9370a")
+    assert capsys.readouterr().out == ""
+
+    # Nothing committed: never prints.
+    monkeypatch.setattr(style, "_PIPE_MODE", True)
+    cli._emit_commit_hash(None)
+    assert capsys.readouterr().out == ""
+
+
 def test_trace_output_flag_enables_file_profiling() -> None:
     args = _args("--trace-output", "profile.jsonl", "--dry-run")
 

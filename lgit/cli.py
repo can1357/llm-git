@@ -313,8 +313,7 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
         style.status(f"\n{style.info('Preparing to commit...')}")
         with profile.section("git_commit", collector):
             commit_hash = _commit_staged_message(formatted_message, snapshot_tree, args, config)
-        if commit_hash:
-            print(commit_hash)
+        _emit_commit_hash(commit_hash)
         if args.push and not args.dry_run:
             with profile.section("git_push", collector):
                 _push_changes(args.dir)
@@ -778,6 +777,16 @@ def _commit_staged_message(
         f"{style.success(style.icons.SUCCESS)} {style.success(f'Successfully committed as {commit_hash[:8]}')}"
     )
     return commit_hash
+
+
+def _emit_commit_hash(commit_hash: str | None) -> None:
+    """Print the raw commit hash to stdout for scripts (`h=$(lgit)`).
+
+    Suppressed on a TTY, where ``_commit_staged_message`` already reports the hash in its success
+    line — otherwise the full hash would appear redundantly right after it.
+    """
+    if commit_hash and style.pipe_mode():
+        print(commit_hash)
 
 
 def _print_message(message: ConventionalCommit, *, title: str) -> None:
