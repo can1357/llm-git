@@ -12,10 +12,10 @@ from dataclasses import asdict, dataclass, is_dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from . import api, diffing, git, map_reduce, style, templates, tokens
-from .errors import GitError, NoChanges, ValidationFailure
+from .errors import GitError, ValidationFailure
 from .models import (
     CommitSummary,
     CommitType,
@@ -35,18 +35,8 @@ from .patch import (
 from .validation import validate_commit_message
 
 
-class _ComposeConfig(Protocol):
-    """Configuration fields read during compose planning and execution."""
-
-    compose_max_rounds: int
-    analysis_model: str
-    summary_model: str
-    max_diff_length: int
-    max_diff_tokens: int
-    summary_hard_limit: int
-    gpg_sign: bool
-    signoff: bool
-
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 class _ComposeArgs(Protocol):
     """Command-line arguments read during compose planning and execution."""
@@ -365,7 +355,7 @@ async def run_compose_round(args: _ComposeArgs, config: _ComposeConfig, round_nu
 
 async def plan_compose_snapshot(
     snapshot: ComposeSnapshot,
-    config: _ComposeConfig,
+    config: CommitConfig,
     args: _ComposeArgs | None = None,
     *,
     max_commits: int = 20,
@@ -381,7 +371,7 @@ async def plan_compose_snapshot(
 async def execute_compose(
     snapshot: ComposeSnapshot,
     plan: ComposeExecutablePlan,
-    config: _ComposeConfig,
+    config: CommitConfig,
     args: _ComposeArgs,
     base_state: ComposeBaseState,
 ) -> list[str]:
@@ -433,7 +423,7 @@ async def execute_compose(
 
 
 def _analyze_compose_intent_from_mapping(
-    raw: Any, snapshot: ComposeSnapshot, config: _ComposeConfig, max_commits: int
+    raw: Any, snapshot: ComposeSnapshot, config: CommitConfig, max_commits: int
 ) -> tuple[ComposeIntentGroup, ...]:
     data = _object_mapping(raw)
     raw_groups = data.get("groups", ())
@@ -445,7 +435,7 @@ def _analyze_compose_intent_from_mapping(
 async def _analyze_compose_intent(
     snapshot: ComposeSnapshot,
     observations: Sequence[Any],
-    config: _ComposeConfig,
+    config: CommitConfig,
     max_commits: int,
     debug_dir: str | os.PathLike[str] | None,
 ) -> tuple[ComposeIntentGroup, ...]:
@@ -490,7 +480,7 @@ async def _analyze_compose_intent(
 async def _bind_compose_plan(
     snapshot: ComposeSnapshot,
     intent_plan: Sequence[ComposeIntentGroup],
-    config: _ComposeConfig,
+    config: CommitConfig,
     debug_dir: str | os.PathLike[str] | None,
 ) -> ComposeExecutablePlan:
     assigned_by_group, ambiguous_files = _auto_assign_hunks(snapshot, intent_plan)
@@ -531,7 +521,7 @@ def _fallback_intent_groups(
     snapshot: ComposeSnapshot,
     planning_index: PlanningIndex,
     max_commits: int,
-    config: _ComposeConfig,
+    config: CommitConfig,
 ) -> tuple[ComposeIntentGroup, ...]:
     del config
     if planning_index.mode is PlanningMode.AREA:
@@ -589,7 +579,7 @@ def _is_dependency_manifest(path: str) -> bool:
     return name in _DEPENDENCY_MANIFESTS or Path(name).suffix.lower() in {".lock", ".lockb"}
 
 
-def _compose_analysis_strategy(diff: str, config: _ComposeConfig, counter: Any) -> ComposeAnalysisStrategy:
+def _compose_analysis_strategy(diff: str, config: CommitConfig, counter: Any) -> ComposeAnalysisStrategy:
     if _should_use_map_reduce(diff, config, counter):
         return ComposeAnalysisStrategy.MAP_REDUCE
     diff_tokens = _count_tokens(counter, diff)
@@ -598,7 +588,7 @@ def _compose_analysis_strategy(diff: str, config: _ComposeConfig, counter: Any) 
     return ComposeAnalysisStrategy.DIRECT
 
 
-def _compose_truncation_length(config: _ComposeConfig) -> int:
+def _compose_truncation_length(config: CommitConfig) -> int:
     return max(1, min(config.max_diff_length, config.max_diff_tokens * 4))
 
 
@@ -612,7 +602,7 @@ def _count_tokens(counter: Any, text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _create_token_counter(config: _ComposeConfig) -> Any:
+def _create_token_counter(config: CommitConfig) -> Any:
     try:
         return tokens.create_token_counter(config)
     except Exception as exc:
@@ -620,7 +610,7 @@ def _create_token_counter(config: _ComposeConfig) -> Any:
         return SimpleNamespace(count_sync=lambda text: max(1, len(str(text)) // 4))
 
 
-def _should_use_map_reduce(diff: str, config: _ComposeConfig, counter: Any | None = None) -> bool:
+def _should_use_map_reduce(diff: str, config: CommitConfig, counter: Any | None = None) -> bool:
     try:
         return bool(map_reduce.should_use_map_reduce(diff, config, counter))
     except Exception as exc:
@@ -990,7 +980,7 @@ def _normalize_intent_plan(
     snapshot: ComposeSnapshot,
     planning_index: PlanningIndex,
     groups: Sequence[ComposeIntentGroup],
-    config: _ComposeConfig,
+    config: CommitConfig,
     max_commits: int,
 ) -> tuple[ComposeIntentGroup, ...]:
     del config
@@ -1345,7 +1335,7 @@ async def _request_binding(
     snapshot: ComposeSnapshot,
     groups: Sequence[ComposeIntentGroup],
     ambiguous_files: Sequence[Mapping[str, Any]],
-    config: _ComposeConfig,
+    config: CommitConfig,
     debug_dir: str | os.PathLike[str] | None,
     debug_name: str,
 ) -> list[Mapping[str, Any]]:
@@ -1648,7 +1638,7 @@ async def _prepare_group_messages(
     snapshot: ComposeSnapshot,
     groups: Sequence[ComposeExecutableGroup],
     group_patches: Sequence[Any],
-    config: _ComposeConfig,
+    config: CommitConfig,
     args: _ComposeArgs,
 ) -> list[str]:
     semaphore = asyncio.Semaphore(min(COMPOSE_MESSAGE_PARALLELISM, max(len(groups), 1)))
@@ -1672,7 +1662,7 @@ async def _generate_group_message(
     group: ComposeExecutableGroup,
     stat: str,
     diff: str,
-    config: _ComposeConfig,
+    config: CommitConfig,
     args: _ComposeArgs,
     counter: Any,
     debug_prefix: str,
@@ -1702,7 +1692,7 @@ async def _message_parts_from_api(
     group: ComposeExecutableGroup,
     stat: str,
     diff: str,
-    config: _ComposeConfig,
+    config: CommitConfig,
     args: _ComposeArgs,
     counter: Any,
     debug_prefix: str,

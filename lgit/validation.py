@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from functools import cache
 from importlib import resources
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 type IssueSeverity = Literal["error", "warning"]
 
@@ -225,7 +228,7 @@ def is_past_tense_first_word(token: str) -> bool:
 
 def validate_commit_message(
     msg: Any,
-    config: Any | None = None,
+    config: CommitConfig | None = None,
     *,
     stat: str = "",
     project_names: Iterable[str] = (),
@@ -301,7 +304,7 @@ def _validate_summary(
     summary: str,
     commit_type: str,
     scope: str | None,
-    config: Any | None,
+    config: CommitConfig | None,
     builder: _IssueBuilder,
 ) -> None:
     if not summary.strip():

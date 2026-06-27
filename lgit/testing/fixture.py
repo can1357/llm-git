@@ -8,9 +8,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from lgit.models import AnalysisDetail, ChangelogCategory, ConventionalAnalysis
+
+if TYPE_CHECKING:
+    from lgit.config import CommitConfig
 
 FIXTURES_DIR = "tests/fixtures"
 
@@ -204,7 +207,7 @@ class Fixture:
 
 
 async def add_fixture(
-    fixtures_dir: str | Path, commit_hash: str, name: str, repo_dir: str | Path = ".", config: Any | None = None
+    fixtures_dir: str | Path, commit_hash: str, name: str, repo_dir: str | Path = ".", config: CommitConfig | None = None
 ) -> Fixture:
     """Create a fixture from a commit and add it to the manifest."""
 

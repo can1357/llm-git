@@ -8,13 +8,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .diffing import smart_truncate_diff
 from .errors import GitError, ValidationFailure
 from .git import run_git
 from .markdown_output import parse_changelog_response
 from .models import ChangelogCategory, resolve_model_name
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +40,7 @@ class ChangelogBoundary:
     stat: str = ""
 
 
-async def run_changelog_flow(args: Any, config: Any) -> list[ChangelogBoundary]:
+async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogBoundary]:
     """Generate and stage changelog entries for currently staged files."""
 
     repo_dir = Path(getattr(args, "dir", "."))
@@ -54,7 +57,7 @@ async def run_changelog_flow(args: Any, config: Any) -> list[ChangelogBoundary]:
     updated: list[ChangelogBoundary] = []
     untracked_to_stage: list[str] = []
 
-    max_diff_length = int(getattr(config, "max_diff_length", 100_000))
+    max_diff_length = config.max_diff_length
     for boundary in boundaries:
         diff = _diff_for_files(boundary.files, repo_dir, max_diff_length)
         if not diff.strip():
@@ -254,7 +257,7 @@ async def generate_changelog_entries(
     stat: str,
     diff: str,
     existing_entries: str | None,
-    config: Any,
+    config: CommitConfig,
 ) -> dict[ChangelogCategory, list[str]]:
     """Ask the configured model for Keep a Changelog entries."""
 
@@ -274,7 +277,7 @@ async def generate_changelog_entries(
         config,
         OneShotSpec(
             operation="changelog",
-            model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "")) or "")),
+            model=resolve_model_name(config.analysis_model),
             prompt_family="changelog",
             system_prompt=system_prompt,
             user_prompt=user_prompt,

@@ -5,10 +5,13 @@ from __future__ import annotations
 import math
 import unicodedata
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .models import ConventionalCommit
 from .validation import is_past_tense_verb, present_to_past, split_verb_token, verb_stem
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 _DEFAULT_MAX_DETAIL_TOKENS = 200
 _DEFAULT_SUMMARY_HARD_LIMIT = 128
@@ -249,7 +252,7 @@ def normalize_summary_verb(summary: str, commit_type: str) -> str:
     return _join_first_rest(f"{past}{suffix}", rest)
 
 
-def post_process_commit_message(msg: Any, config: Any | None = None) -> Any:
+def post_process_commit_message(msg: Any, config: CommitConfig | None = None) -> Any:
     """Return a normalized conventional commit, rebuilding frozen dataclasses."""
 
     summary = normalize_unicode(_summary_text(msg))
@@ -379,7 +382,7 @@ def _coerce_summary(current: Any, value: str, max_length: int) -> Any:
     return CommitSummary.from_raw(value, max_length=max_length)
 
 
-def _summary_hard_limit(config: Any | None) -> int:
+def _summary_hard_limit(config: CommitConfig | None) -> int:
     return int(getattr(config, "summary_hard_limit", _DEFAULT_SUMMARY_HARD_LIMIT))
 
 

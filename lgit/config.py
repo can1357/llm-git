@@ -82,7 +82,6 @@ class CommitConfig:
     request_timeout_secs: int = 120
     connect_timeout_secs: int = 30
     disable_git_background_features: bool = True
-    compose_max_rounds: int = 5
     summary_guideline: int = 72
     summary_soft_limit: int = 96
     summary_hard_limit: int = 128
@@ -390,7 +389,6 @@ _FIELD_COERCERS = {
     "request_timeout_secs": _to_int,
     "connect_timeout_secs": _to_int,
     "disable_git_background_features": _to_bool,
-    "compose_max_rounds": _to_int,
     "summary_guideline": _to_int,
     "summary_soft_limit": _to_int,
     "summary_hard_limit": _to_int,

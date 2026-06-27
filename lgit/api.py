@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 import httpx
@@ -36,6 +36,9 @@ from .markdown_output import (
 from .models import CommitSummary, ConventionalAnalysis, ConventionalCommit, ResolvedApiMode, resolve_model_name
 from .normalization import post_process_commit_message
 from .validation import is_past_tense_first_word, validate_summary_quality
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 ANTHROPIC_REQUIRED_MAX_TOKENS = 16_384
 _CONTEXT_LENGTH_MARKERS = (
@@ -93,7 +96,7 @@ class OneShotResponse:
 
 
 async def run_oneshot(
-    config: Any,
+    config: CommitConfig,
     prompt: str | OneShotSpec | Mapping[str, Any] | None = None,
     *,
     spec: OneShotSpec | Mapping[str, Any] | None = None,
@@ -124,18 +127,13 @@ async def run_oneshot(
         cacheable=cache if cacheable is None else cacheable,
     )
     if not built.model:
-        built = replace(
-            built,
-            model=resolve_model_name(
-                str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))
-            ),
-        )
+        built = replace(built, model=resolve_model_name(config.analysis_model))
     response = await _run_oneshot_response(config, built)
     return response if return_response else response.output
 
 
 async def generate_conventional_analysis(
-    config: Any,
+    config: CommitConfig,
     stat: str,
     diff: str,
     scope_candidates: str = "",
@@ -163,10 +161,10 @@ async def generate_conventional_analysis(
     )
     if user_context:
         user_prompt = f"{user_prompt}\n\n<user_context>\n{user_context}\n</user_context>"
-    type_enum = list(getattr(config, "types", {}) or {"chore": None})
+    type_enum = list(config.types or {"chore": None})
     spec = OneShotSpec(
         operation="analysis",
-        model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))),
+        model=resolve_model_name(config.analysis_model),
         prompt_family="analysis",
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -199,7 +197,7 @@ def strip_type_prefix(summary: str, commit_type: str | None = None, scope: str |
     return text
 
 
-def summary_from_holistic_analysis(analysis: ConventionalAnalysis, config: Any, stat: str = "") -> str | None:
+def summary_from_holistic_analysis(analysis: ConventionalAnalysis, config: CommitConfig, stat: str = "") -> str | None:
     """Return a hard-limit-validated holistic summary from analysis, or None."""
 
     del stat
@@ -212,11 +210,11 @@ def summary_from_holistic_analysis(analysis: ConventionalAnalysis, config: Any, 
     ).rstrip(" .")
     if not summary:
         return None
-    return str(CommitSummary.from_raw(summary, max_length=int(getattr(config, "summary_hard_limit", 128))))
+    return str(CommitSummary.from_raw(summary, max_length=config.summary_hard_limit))
 
 
 async def generate_summary_from_analysis(
-    config: Any,
+    config: CommitConfig,
     analysis: ConventionalAnalysis,
     stat: str = "",
     *,
@@ -229,7 +227,7 @@ async def generate_summary_from_analysis(
     commit_type = str(analysis.commit_type)
     scope = None if analysis.scope is None else str(analysis.scope)
     prefix_len = len(commit_type) + 2 + (len(scope) + 2 if scope else 0)
-    chars = max(20, int(getattr(config, "summary_guideline", 72)) - prefix_len)
+    chars = max(20, config.summary_guideline - prefix_len)
     details = "\n".join(f"- {detail}" for detail in analysis.body_texts()) or f"- {analysis.summary or ''}"
     system_prompt, user_prompt = render_prompt(
         "summary",
@@ -244,7 +242,7 @@ async def generate_summary_from_analysis(
     )
     spec = OneShotSpec(
         operation="summary",
-        model=resolve_model_name(str(getattr(config, "summary_model", getattr(config, "model", "claude-haiku-4-5")))),
+        model=resolve_model_name(config.summary_model),
         prompt_family="summary",
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -262,18 +260,18 @@ async def generate_summary_from_analysis(
         summary
         or analysis.summary
         or fallback_summary(
-            stat, analysis.body_texts(), limit=int(getattr(config, "summary_hard_limit", 128)), commit_type=commit_type
+            stat, analysis.body_texts(), limit=config.summary_hard_limit, commit_type=commit_type
         )
     )
     if not validate_summary_quality(summary, commit_type, stat).ok:
         summary = _fallback_summary_for_commit(
-            stat, analysis.body_texts(), commit_type, int(getattr(config, "summary_hard_limit", 128))
+            stat, analysis.body_texts(), commit_type, config.summary_hard_limit
         )
-    return summary[: int(getattr(config, "summary_hard_limit", 128))].rstrip(" .")
+    return summary[: config.summary_hard_limit].rstrip(" .")
 
 
 async def generate_analysis_with_map_reduce(
-    config: Any, stat: str, diff: str, scope_candidates: str = "", **kwargs: Any
+    config: CommitConfig, stat: str, diff: str, scope_candidates: str = "", **kwargs: Any
 ) -> ConventionalAnalysis:
     """Generate analysis directly or through map-reduce for large diffs."""
 
@@ -286,12 +284,12 @@ async def generate_analysis_with_map_reduce(
         count_sync = getattr(counter, "count_sync", None)
         token_count = int(count_sync(diff)) if callable(count_sync) else max(1, len(diff) // 4)
         style.print_info(f"Large diff detected ({token_count} tokens), using map-reduce...")
-        return await run_map_reduce(config, stat, diff, scope_candidates, counter=counter, **kwargs)
+        return await run_map_reduce(config, stat, diff, scope_candidates, model_name=kwargs.get("model_name"), counter=counter)
     return await generate_conventional_analysis(config, stat, diff, scope_candidates, **kwargs)
 
 
 async def generate_fast_commit(
-    config: Any,
+    config: CommitConfig,
     stat: str,
     diff: str,
     scope_candidates: str = "",
@@ -312,10 +310,10 @@ async def generate_fast_commit(
             "types_description": format_types_description(config),
         },
     )
-    type_enum = list(getattr(config, "types", {}) or {"chore": None})
+    type_enum = list(config.types or {"chore": None})
     spec = OneShotSpec(
         operation="fast",
-        model=resolve_model_name(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))),
+        model=resolve_model_name(config.analysis_model),
         prompt_family="fast",
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -380,18 +378,18 @@ def render_prompt(family: str, context: Mapping[str, Any]) -> tuple[str, str]:
     return system, user
 
 
-def format_types_description(config: Any) -> str:
+def format_types_description(config: CommitConfig) -> str:
     """Format configured commit-type guidance for prompts."""
 
     lines: list[str] = []
-    for name, type_config in (getattr(config, "types", {}) or {}).items():
+    for name, type_config in (config.types or {}).items():
         description = getattr(type_config, "description", "")
         hint = getattr(type_config, "hint", "")
         line = f"- {name}: {description}".rstrip()
         if hint:
             line += f" ({hint})"
         lines.append(line)
-    classifier_hint = str(getattr(config, "classifier_hint", "") or "").strip()
+    classifier_hint = str(config.classifier_hint or "").strip()
     if classifier_hint:
         lines.append(classifier_hint)
     return "\n".join(lines)
@@ -425,7 +423,7 @@ def decode_cache_payload(tool_name: str, operation: str, stored: str) -> tuple[A
     return output, payload if is_raw else None
 
 
-async def _run_oneshot_response(config: Any, spec: OneShotSpec) -> OneShotResponse:
+async def _run_oneshot_response(config: CommitConfig, spec: OneShotSpec) -> OneShotResponse:
     mode = _resolved_mode(config, spec.model or "")
     cache_entry = _build_cache_entry(config, spec)
     if cache_entry is not None:
@@ -438,7 +436,7 @@ async def _run_oneshot_response(config: Any, spec: OneShotSpec) -> OneShotRespon
                 profile.print_llm_progress(lambda: f"cache hit {spec.operation} ({spec.model})")
                 return OneShotResponse(output=output, source=OneShotSource.CACHE, text_content=text)
 
-    attempts = max(1, int(getattr(config, "max_retries", 3)))
+    attempts = max(1, config.max_retries)
     request_json = ""
     response_text = ""
     last_error: Exception | None = None
@@ -472,25 +470,21 @@ async def _run_oneshot_response(config: Any, spec: OneShotSpec) -> OneShotRespon
             last_error = exc
             last_retry_from_error = True
         if attempt < attempts:
-            await asyncio.sleep(max(0, int(getattr(config, "initial_backoff_ms", 1000))) / 1000 * (2 ** (attempt - 1)))
+            await asyncio.sleep(max(0, config.initial_backoff_ms) / 1000 * (2 ** (attempt - 1)))
     if last_retry_from_error and last_error is not None:
         raise last_error
     raise LgitError(f"Max retries exceeded for {spec.operation}: {last_error}")
 
 
-async def _send_oneshot(config: Any, spec: OneShotSpec, mode: ResolvedApiMode) -> tuple[dict[str, Any], str]:
-    timeout = httpx.Timeout(
-        float(getattr(config, "request_timeout_secs", 120)), connect=float(getattr(config, "connect_timeout_secs", 30))
-    )
+async def _send_oneshot(config: CommitConfig, spec: OneShotSpec, mode: ResolvedApiMode) -> tuple[dict[str, Any], str]:
+    timeout = httpx.Timeout(float(config.request_timeout_secs), connect=float(config.connect_timeout_secs))
     headers = {"content-type": "application/json"}
-    api_key = getattr(config, "api_key", None)
+    api_key = config.api_key
     if mode == ResolvedApiMode.CHAT_COMPLETIONS:
         if api_key:
             headers["authorization"] = f"Bearer {api_key}"
         request = _openai_request(config, spec)
-        url = urljoin(
-            str(getattr(config, "api_base_url", "http://localhost:4000")).rstrip("/") + "/", "chat/completions"
-        )
+        url = urljoin(config.api_base_url.rstrip("/") + "/", "chat/completions")
     else:
         headers["anthropic-version"] = "2023-06-01"
         if api_key:
@@ -499,7 +493,7 @@ async def _send_oneshot(config: Any, spec: OneShotSpec, mode: ResolvedApiMode) -
         if _anthropic_prompt_caching_enabled(config):
             headers["anthropic-beta"] = "prompt-caching-2024-07-31"
         request = _anthropic_request(config, spec)
-        url = _anthropic_messages_url(str(getattr(config, "api_base_url", "")))
+        url = _anthropic_messages_url(config.api_base_url)
     _save_debug(spec.debug, "request", request)
     profile.print_llm_progress(lambda: f"query {spec.operation} model={spec.model}")
     start = time.monotonic()
@@ -523,7 +517,7 @@ async def _send_oneshot(config: Any, spec: OneShotSpec, mode: ResolvedApiMode) -
     return request, text
 
 
-def _openai_request(config: Any, spec: OneShotSpec) -> dict[str, Any]:
+def _openai_request(config: CommitConfig, spec: OneShotSpec) -> dict[str, Any]:
     messages = []
     if spec.system_prompt.strip():
         messages.append({"role": "system", "content": spec.system_prompt})
@@ -535,7 +529,7 @@ def _openai_request(config: Any, spec: OneShotSpec) -> dict[str, Any]:
     return request
 
 
-def _anthropic_request(config: Any, spec: OneShotSpec) -> dict[str, Any]:
+def _anthropic_request(config: CommitConfig, spec: OneShotSpec) -> dict[str, Any]:
     prompt_caching = _anthropic_prompt_caching_enabled(config)
     request: dict[str, Any] = {
         "model": spec.model,
@@ -689,14 +683,11 @@ def _coerce_debug(debug: OneShotDebug | Mapping[str, Any] | str | Path | None, n
     return OneShotDebug(debug, None, name)
 
 
-def _resolved_mode(config: Any, model: str) -> ResolvedApiMode:
-    resolver = getattr(config, "resolve_api_mode", None)
-    if callable(resolver):
-        return resolver(model)
-    return config.resolved_api_mode
+def _resolved_mode(config: CommitConfig, model: str) -> ResolvedApiMode:
+    return config.resolve_api_mode(model)
 
 
-def _build_cache_entry(config: Any, spec: OneShotSpec) -> tuple[Any, str] | None:
+def _build_cache_entry(config: CommitConfig, spec: OneShotSpec) -> tuple[Any, str] | None:
     if not spec.cacheable:
         return None
     cache_obj = llm_cache.LlmCache.instance()
@@ -717,7 +708,7 @@ def _build_cache_entry(config: Any, spec: OneShotSpec) -> tuple[Any, str] | None
 
 
 def _record_failure(
-    config: Any, cache_entry: tuple[Any, str] | None, spec: OneShotSpec, request: str, response: str, error: Exception
+    config: CommitConfig, cache_entry: tuple[Any, str] | None, spec: OneShotSpec, request: str, response: str, error: Exception
 ) -> None:
     sink = llm_cache.LlmCache.instance()
     if sink is None and cache_entry is not None:
@@ -735,8 +726,8 @@ def _anthropic_text(text: str, cache: bool) -> dict[str, Any]:
     return content
 
 
-def _anthropic_prompt_caching_enabled(config: Any) -> bool:
-    return "anthropic.com" in str(getattr(config, "api_base_url", "")).lower()
+def _anthropic_prompt_caching_enabled(config: CommitConfig) -> bool:
+    return "anthropic.com" in config.api_base_url.lower()
 
 
 def _anthropic_messages_url(base_url: str) -> str:
@@ -744,8 +735,8 @@ def _anthropic_messages_url(base_url: str) -> str:
     return f"{trimmed}/messages" if trimmed.endswith("/v1") else f"{trimmed}/v1/messages"
 
 
-def _openai_prompt_cache_key(config: Any, spec: OneShotSpec) -> str | None:
-    base_url = str(getattr(config, "api_base_url", "")).lower()
+def _openai_prompt_cache_key(config: CommitConfig, spec: OneShotSpec) -> str | None:
+    base_url = config.api_base_url.lower()
     if not spec.system_prompt.strip() or "api.openai.com" not in base_url:
         return None
     return f"llm-git:v1:{spec.model}:{spec.prompt_family}"

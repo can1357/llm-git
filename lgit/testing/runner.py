@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from lgit.api import generate_analysis_with_map_reduce, generate_summary_from_analysis, summary_from_holistic_analysis
 from lgit.errors import ValidationFailure
@@ -15,6 +15,9 @@ from lgit.normalization import format_commit_message, post_process_commit_messag
 
 from .compare import CompareResult, compare_analysis
 from .fixture import Fixture, add_fixture, discover_fixtures, load_fixtures
+
+if TYPE_CHECKING:
+    from lgit.config import CommitConfig
 
 
 @dataclass(slots=True)
@@ -59,7 +62,7 @@ class TestSummary:
 class TestRunner:
     """Run lgit fixture tests and update golden files."""
 
-    def __init__(self, fixtures_dir: str | Path, config: Any) -> None:
+    def __init__(self, fixtures_dir: str | Path, config: CommitConfig) -> None:
         self.fixtures_dir = Path(fixtures_dir)
         self.config = config
         self.filter: str | None = None
@@ -114,7 +117,7 @@ class TestRunner:
         return RunResult(name=name, comparison=comparison, analysis=analysis, final_message=final_message)
 
     async def _final_message(self, fixture: Fixture, analysis: ConventionalAnalysis) -> str:
-        limit = int(getattr(self.config, "summary_hard_limit", 128))
+        limit = self.config.summary_hard_limit
         details = analysis.body_texts()
 
         def build_fallback_summary() -> str:
@@ -171,7 +174,7 @@ class TestRunner:
         fixture.save(self.fixtures_dir)
 
 
-async def run_test_mode(args: Any, config: Any) -> TestSummary:
+async def run_test_mode(args: Any, config: CommitConfig) -> TestSummary:
     """CLI entry point for ``--test`` fixture mode."""
 
     from . import fixtures_dir as default_fixtures_dir

@@ -7,7 +7,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .api import (
     OneShotSpec,
@@ -19,6 +19,9 @@ from .diffing import FileDiff, parse_diff, reconstruct_diff
 from .markdown_output import analysis_from_mapping, fallback_summary, parse_conventional_analysis_markdown
 from .models import AnalysisDetail, ConventionalAnalysis, resolve_model_name
 from .tokens import create_token_counter
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 MAX_FILE_TOKENS = 50_000
 MAP_PHASE_CONCURRENCY = 16
@@ -35,10 +38,10 @@ class FileObservation:
     deletions: int = 0
 
 
-def should_use_map_reduce(diff: str, config: Any, counter: Any | None = None) -> bool:
+def should_use_map_reduce(diff: str, config: CommitConfig, counter: Any | None = None) -> bool:
     """Return whether ``diff`` should be analyzed with map-reduce."""
 
-    if not bool(getattr(config, "map_reduce_enabled", True)):
+    if not config.map_reduce_enabled:
         return False
     counter = counter or create_token_counter(config)
     total_tokens = 0
@@ -49,9 +52,9 @@ def should_use_map_reduce(diff: str, config: Any, counter: Any | None = None) ->
         if file_tokens > MAX_FILE_TOKENS:
             return True
         total_tokens += file_tokens
-        if total_tokens >= int(getattr(config, "map_reduce_threshold", 5000)):
+        if total_tokens >= config.map_reduce_threshold:
             return True
-    return has_included_file and total_tokens >= int(getattr(config, "map_reduce_threshold", 5000))
+    return has_included_file and total_tokens >= config.map_reduce_threshold
 
 
 def build_file_batches(files: Sequence[FileDiff], counter: Any, budget: int) -> list[list[int]]:
@@ -68,7 +71,7 @@ def build_llm_file_batches(files: Sequence[FileDiff], counter: Any, budget: int)
 
 
 async def observe_diff_files(
-    diff: str, map_model_name: str, config: Any, counter: Any | None = None
+    diff: str, map_model_name: str, config: CommitConfig, counter: Any | None = None
 ) -> list[FileObservation]:
     """Run the map phase and return per-file observations."""
 
@@ -80,11 +83,11 @@ async def observe_diff_files(
 
 
 async def reduce_phase(
-    observations: Sequence[FileObservation], stat: str, scope_candidates: str, model_name: str, config: Any
+    observations: Sequence[FileObservation], stat: str, scope_candidates: str, model_name: str, config: CommitConfig
 ) -> ConventionalAnalysis:
     """Synthesize map observations into final conventional analysis."""
 
-    type_enum = list(getattr(config, "types", {}) or {"chore": None})
+    type_enum = list(config.types or {"chore": None})
     observations_json = json.dumps(
         [_observation_to_mapping(item) for item in observations], ensure_ascii=False, indent=2
     )
@@ -122,42 +125,29 @@ async def reduce_phase(
     return _fallback_reduce_analysis(observations, config)
 
 
-async def run_map_reduce(*args: Any, **kwargs: Any) -> ConventionalAnalysis:
-    """Run map and reduce phases for a large diff.
-
-    Accepts Python order ``(config, stat, diff, scope_candidates=...)`` and the
-    Rust-port order ``(diff, stat, scope_candidates, model_name, config, counter)``.
-    """
-
-    if args and isinstance(args[0], str):
-        diff = args[0]
-        stat = args[1] if len(args) > 1 else kwargs.get("stat", "")
-        scope_candidates = args[2] if len(args) > 2 else kwargs.get("scope_candidates", "")
-        model_name = args[3] if len(args) > 3 else kwargs.get("model_name")
-        config = args[4] if len(args) > 4 else kwargs["config"]
-        counter = args[5] if len(args) > 5 else kwargs.get("counter")
-    else:
-        config = args[0] if args else kwargs["config"]
-        stat = args[1] if len(args) > 1 else kwargs.get("stat", "")
-        diff = args[2] if len(args) > 2 else kwargs.get("diff", "")
-        scope_candidates = args[3] if len(args) > 3 else kwargs.get("scope_candidates", "")
-        model_name = kwargs.get("model_name")
-        counter = kwargs.get("counter")
+async def run_map_reduce(
+    config: CommitConfig,
+    stat: str,
+    diff: str,
+    scope_candidates: str = "",
+    *,
+    model_name: str | None = None,
+    counter: Any | None = None,
+) -> ConventionalAnalysis:
+    """Run the map and reduce phases for a large diff."""
 
     counter = counter or create_token_counter(config)
-    reduce_model = resolve_model_name(
-        str(model_name or getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8")))
-    )
-    map_model = resolve_model_name(str(getattr(config, "summary_model", getattr(config, "model", reduce_model))))
-    observations = await observe_diff_files(str(diff), map_model, config, counter)
-    return await reduce_phase(observations, str(stat), str(scope_candidates), reduce_model, config)
+    reduce_model = resolve_model_name(model_name or config.analysis_model)
+    map_model = resolve_model_name(config.summary_model)
+    observations = await observe_diff_files(diff, map_model, config, counter)
+    return await reduce_phase(observations, stat, scope_candidates, reduce_model, config)
 
 
 async def _map_phase(
-    files: Sequence[FileDiff], map_model_name: str, config: Any, counter: Any
+    files: Sequence[FileDiff], map_model_name: str, config: CommitConfig, counter: Any
 ) -> list[FileObservation]:
     context_headers = _ContextHeaders(files)
-    batches = build_llm_file_batches(files, counter, int(getattr(config, "map_batch_token_budget", 16000)))
+    batches = build_llm_file_batches(files, counter, config.map_batch_token_budget)
     observations_by_index: list[FileObservation | None] = [None] * len(files)
     for idx, file in enumerate(files):
         if file.is_binary:
@@ -195,7 +185,7 @@ async def _map_phase(
 
 
 async def _map_file_batch(
-    files: Sequence[FileDiff], context_header: str, model_name: str, config: Any, counter: Any, progress_label: str
+    files: Sequence[FileDiff], context_header: str, model_name: str, config: CommitConfig, counter: Any, progress_label: str
 ) -> list[FileObservation]:
     rendered = [_render_file_diff_for_batch(file, counter) for file in files]
     prompt_files = [{"path": file.filename, "diff": diff} for file, diff in zip(files, rendered, strict=True)]
@@ -312,8 +302,8 @@ def _build_file_batches_for_indices(
     return batches
 
 
-def _included_files(files: Sequence[FileDiff], config: Any) -> list[FileDiff]:
-    excluded = tuple(str(item) for item in getattr(config, "excluded_files", ()))
+def _included_files(files: Sequence[FileDiff], config: CommitConfig) -> list[FileDiff]:
+    excluded = tuple(str(item) for item in config.excluded_files)
     return [file for file in files if not any(file.filename.endswith(pattern) for pattern in excluded)]
 
 
@@ -338,10 +328,10 @@ def _fallback_observation_text(filename: str) -> str:
 
 
 def _fallback_reduce_analysis(
-    observations: Sequence[FileObservation], config: Any, stat: str = ""
+    observations: Sequence[FileObservation], config: CommitConfig, stat: str = ""
 ) -> ConventionalAnalysis:
     details = [obs for item in observations for obs in item.observations if obs]
-    summary = fallback_summary(stat=stat, details=details, limit=int(getattr(config, "summary_hard_limit", 128)))
+    summary = fallback_summary(stat=stat, details=details, limit=config.summary_hard_limit)
     return ConventionalAnalysis.from_raw(
         commit_type="chore",
         summary=summary,

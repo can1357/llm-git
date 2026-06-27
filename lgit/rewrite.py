@@ -6,10 +6,10 @@ import asyncio
 import os
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import style
 from .analysis import extract_scope_candidates
@@ -28,6 +28,9 @@ from .git import (
 )
 from .normalization import format_commit_message, post_process_commit_message
 from .validation import validate_commit_message
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +75,7 @@ class _GeneratedMessages(list[str]):
         self.failures = failures
 
 
-async def run_rewrite_mode(args: Any, config: Any) -> RewriteResult:
+async def run_rewrite_mode(args: Any, config: CommitConfig) -> RewriteResult:
     """Regenerate commit messages and optionally rewrite history."""
 
     repo_dir = os.fspath(getattr(args, "dir", "."))
@@ -101,7 +104,7 @@ async def run_rewrite_mode(args: Any, config: Any) -> RewriteResult:
         )
         return RewriteResult(conversions, applied=False, dry_run=True, preview=preview)
 
-    rewrite_config = _rewrite_config(config)
+    rewrite_config = replace(config, exclude_old_message=True)
     messages = await generate_messages_parallel(commits, rewrite_config, args, repo_dir)
     failures = {failure.index: failure.error for failure in getattr(messages, "failures", ())}
     hide_old_types = bool(getattr(args, "rewrite_hide_old_types", False))
@@ -129,7 +132,7 @@ async def run_rewrite_mode(args: Any, config: Any) -> RewriteResult:
 
 async def generate_messages_parallel(
     commits: Sequence[Any],
-    config: Any,
+    config: CommitConfig,
     args: Any,
     dir: str | os.PathLike[str] = ".",
 ) -> list[str]:
@@ -161,13 +164,13 @@ async def generate_messages_parallel(
     return _GeneratedMessages(results, failure_records)
 
 
-async def generate_for_commit(commit: Any, config: Any, dir: str | os.PathLike[str] = ".") -> str:
+async def generate_for_commit(commit: Any, config: CommitConfig, dir: str | os.PathLike[str] = ".") -> str:
     """Generate and validate one replacement conventional commit message."""
 
     commit_hash = commit.hash
     diff = get_git_diff("commit", commit_hash, dir, config)
     stat = get_git_stat("commit", commit_hash, dir, config)
-    max_diff_length = int(getattr(config, "max_diff_length", 100_000))
+    max_diff_length = config.max_diff_length
     if len(diff) > max_diff_length:
         diff = smart_truncate_diff(diff, max_diff_length, config)
 
@@ -199,19 +202,6 @@ def create_backup_branch(dir: str | os.PathLike[str] = ".") -> str:
     branch = f"backup-rewrite-{timestamp}"
     run_git(["branch", branch, head], cwd=dir)
     return branch
-
-
-def _rewrite_config(config: Any) -> Any:
-    return _ExcludeOldMessageProxy(config)
-
-
-@dataclass(frozen=True, slots=True)
-class _ExcludeOldMessageProxy:
-    base: Any
-    exclude_old_message: bool = True
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.base, name)
 
 
 def _print_conversion_failure(failure: _RewriteFailure, total: int) -> None:
