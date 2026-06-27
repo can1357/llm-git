@@ -6,6 +6,7 @@ import os
 import stat as stat_module
 import subprocess
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -367,7 +368,7 @@ def get_git_numstat(
         numstat = run_git(["diff", "--numstat"], cwd=dir).stdout
         return _append_untracked_numstat(numstat, dir, _list_untracked_files(dir))
     if mode_name == "compose":
-        raise GitError("compose mode numstat is handled by get_compose_numstat")
+        raise GitError("compose mode does not produce numstat")
     raise ValidationFailure(f"unknown mode: {mode!r}")
 
 
@@ -391,12 +392,6 @@ def get_compose_diff(dir: str | os.PathLike[str] = ".", config: object | None = 
     return diff
 
 
-def get_compose_diff_with_config(dir: str | os.PathLike[str] = ".", config: object | None = None) -> str:
-    """Compatibility-free named entry point for compose diff with config."""
-
-    return get_compose_diff(dir, config)
-
-
 def get_compose_stat(dir: str | os.PathLike[str] = ".") -> str:
     """Return compose-mode --stat output against HEAD, including untracked files."""
 
@@ -405,16 +400,6 @@ def get_compose_stat(dir: str | os.PathLike[str] = ".") -> str:
     if not stat.strip():
         raise NoChanges("compose")
     return stat
-
-
-def get_compose_numstat(dir: str | os.PathLike[str] = ".") -> str:
-    """Return compose-mode --numstat output against HEAD, including untracked files."""
-
-    numstat = run_git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--numstat"], cwd=dir).stdout
-    numstat = _append_untracked_numstat(numstat, dir, _list_untracked_files(dir))
-    if not numstat.strip():
-        raise NoChanges("compose")
-    return numstat
 
 
 def write_real_index_tree(dir: str | os.PathLike[str] = ".") -> str:
@@ -427,12 +412,6 @@ def index_matches_tree(tree: str, dir: str | os.PathLike[str] = ".") -> bool:
     """Return true when the live index currently writes to `tree`."""
 
     return write_real_index_tree(dir) == tree
-
-
-def index_drifted_from(tree: str, dir: str | os.PathLike[str] = ".") -> bool:
-    """Return true when the live index no longer matches a captured tree."""
-
-    return not index_matches_tree(tree, dir)
 
 
 def read_tree_into_index(index_file: str | os.PathLike[str], treeish: str, dir: str | os.PathLike[str] = ".") -> None:
@@ -605,12 +584,12 @@ def get_recent_commits(dir: str | os.PathLike[str] = ".", count: int = 10) -> li
 def get_common_scopes(dir: str | os.PathLike[str] = ".", limit: int = 100) -> list[tuple[str, int]]:
     """Extract common conventional-commit scopes from history."""
 
-    counts: dict[str, int] = {}
+    counts: Counter[str] = Counter()
     for line in run_git(["log", f"-{limit}", "--pretty=format:%s"], cwd=dir).stdout.splitlines():
         scope = _extract_scope_from_commit(line)
         if scope:
-            counts[scope] = counts.get(scope, 0) + 1
-    return sorted(counts.items(), key=lambda item: item[1], reverse=True)
+            counts[scope] += 1
+    return counts.most_common()
 
 
 def extract_style_patterns(commits: Sequence[str]) -> StylePatterns | None:
@@ -618,10 +597,9 @@ def extract_style_patterns(commits: Sequence[str]) -> StylePatterns | None:
 
     if not commits:
         return None
-    scope_count = 0
+    verb_counts: Counter[str] = Counter()
+    scope_counts: Counter[str] = Counter()
     lowercase_count = 0
-    verb_counts: dict[str, int] = {}
-    scope_counts: dict[str, int] = {}
     lengths: list[int] = []
 
     for commit in commits:
@@ -631,26 +609,24 @@ def extract_style_patterns(commits: Sequence[str]) -> StylePatterns | None:
         summary = summary.strip()
         scope = _extract_scope_from_prefix(prefix)
         if scope:
-            scope_count += 1
-            scope_counts[scope] = scope_counts.get(scope, 0) + 1
+            scope_counts[scope] += 1
         if summary[:1].islower():
             lowercase_count += 1
         words = summary.split()
         if words:
-            verb = words[0].lower()
-            verb_counts[verb] = verb_counts.get(verb, 0) + 1
+            verb_counts[words[0].lower()] += 1
         lengths.append(len(summary))
 
     total = len(commits)
     avg_length = sum(lengths) // len(lengths) if lengths else 0
     length_range = (min(lengths), max(lengths)) if lengths else (0, 0)
     return StylePatterns(
-        scope_usage_pct=scope_count / total * 100,
-        common_verbs=sorted(verb_counts.items(), key=lambda item: item[1], reverse=True),
+        scope_usage_pct=scope_counts.total() / total * 100,
+        common_verbs=verb_counts.most_common(),
         avg_length=avg_length,
         length_range=length_range,
         lowercase_pct=lowercase_count / total * 100,
-        top_scopes=sorted(scope_counts.items(), key=lambda item: item[1], reverse=True),
+        top_scopes=scope_counts.most_common(),
     )
 
 
