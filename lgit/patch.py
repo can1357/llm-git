@@ -33,6 +33,7 @@ class _ParsedFile:
     additions: int = 0
     deletions: int = 0
     is_binary: bool = False
+    old_path: str | None = None
 
 
 class StageResult(StrEnum):
@@ -90,6 +91,7 @@ class ComposeGroupPatch:
     apply_patches: tuple[_FilePatch, ...] = ()
     fallback_files: tuple[str, ...] = ()
     index_blobs: tuple[_IndexBlob, ...] = ()
+    removed_paths: tuple[str, ...] = ()
 
 
 def build_compose_snapshot(diff: str, stat: str) -> ComposeSnapshot:
@@ -139,6 +141,8 @@ def build_compose_snapshot(diff: str, stat: str) -> ComposeSnapshot:
             continue
         if line.startswith("Binary files "):
             current_file.is_binary = True
+        elif line.startswith("rename from "):
+            current_file.old_path = line.removeprefix("rename from ")
         current_file.header_lines.append(line)
     finish_file()
 
@@ -204,6 +208,7 @@ def build_compose_snapshot(diff: str, stat: str) -> ComposeSnapshot:
                 deletions=parsed.deletions,
                 is_binary=parsed.is_binary,
                 synthetic_only=not parsed.hunks,
+                old_path=parsed.old_path,
             )
         )
     return ComposeSnapshot(diff=diff, stat=stat, files=tuple(files), hunks=tuple(hunks), pins={})
@@ -213,30 +218,33 @@ def pin_snapshot_worktree_state(snapshot: ComposeSnapshot, dir: str | os.PathLik
     """Pin snapshot paths to object ids captured from the current worktree."""
     root = Path(dir)
     regular_paths: list[str] = []
+    pins = dict(snapshot.pins)
     for file in snapshot.files:
         full_path = root / file.path
         try:
             metadata = full_path.lstat()
         # Keep this before OSError so missing paths are recorded as deletions.
         except FileNotFoundError:
-            snapshot.pins[file.path] = WorktreePin.deleted()
+            pins[file.path] = WorktreePin.deleted()
             continue
         except OSError as exc:
             raise GitError(f"Failed to inspect worktree path {full_path}: {exc}") from exc
         if stat.S_ISLNK(metadata.st_mode):
             target = os.readlink(full_path)
             oid = _hash_blob_bytes(os.fsencode(target), file.path, dir)
-            snapshot.pins[file.path] = WorktreePin.object(mode="120000", oid=oid)
+            pins[file.path] = WorktreePin.object(mode="120000", oid=oid)
         elif stat.S_ISDIR(metadata.st_mode):
-            oid = _submodule_head(full_path)
-            if oid:
-                snapshot.pins[file.path] = WorktreePin.object(mode="160000", oid=oid)
+            submodule_oid = _submodule_head(full_path)
+            if submodule_oid:
+                pins[file.path] = WorktreePin.object(mode="160000", oid=submodule_oid)
         elif "\n" not in file.path:
             regular_paths.append(file.path)
 
     for path, oid in zip(regular_paths, _hash_worktree_paths(regular_paths, dir), strict=True):
-        snapshot.pins[path] = WorktreePin.object(mode=_worktree_file_mode(root / path), oid=oid)
-    return snapshot
+        pins[path] = WorktreePin.object(mode=_worktree_file_mode(root / path), oid=oid)
+    return ComposeSnapshot(
+        diff=snapshot.diff, stat=snapshot.stat, files=snapshot.files, hunks=snapshot.hunks, pins=pins
+    )
 
 
 def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> ComposeGroupPatch:
@@ -247,12 +255,21 @@ def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> C
     apply_patches: list[_FilePatch] = []
     fallback_files: list[str] = []
     index_blobs: list[_IndexBlob] = []
+    removed_paths: list[str] = []
 
     for file in snapshot.files:
         selected_for_file = selected_by_file.get(file.file_id)
         if not selected_for_file:
             continue
         ordered_hunks = _ordered_selected_hunks(file, selected_for_file)
+        if file.old_path is not None:
+            # A rename is atomic: stage the entire destination blob and drop the source path
+            # in the same group, so a whole-file move never splits into add + delete commits.
+            removed_paths.append(file.old_path)
+            fallback_files.append(file.path)
+            diff_parts.append(file.full_patch)
+            stat_parts.append(_stat_line(file.path, file.additions, file.deletions, file.is_binary))
+            continue
         if file.synthetic_only or file.is_binary:
             if not _selected_hunks_cover_file(file, selected_for_file):
                 raise ValidationFailure(
@@ -287,6 +304,7 @@ def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> C
         apply_patches=tuple(apply_patches),
         fallback_files=tuple(sorted(set(fallback_files))),
         index_blobs=tuple(index_blobs),
+        removed_paths=tuple(dict.fromkeys(removed_paths)),
     )
 
 
@@ -327,6 +345,9 @@ def stage_executable_group_in_index(
 
     for blob in group_patch.index_blobs:
         result = result.combine(_stage_index_blob(blob, dir, index_file))
+
+    for path in group_patch.removed_paths:
+        result = result.combine(_remove_index_path(path, dir, index_file))
 
     return ComposeStageOutcome(result=result, skipped=tuple(skipped))
 

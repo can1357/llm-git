@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat as stat_module
 import subprocess
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -372,8 +374,34 @@ def get_git_numstat(
     raise ValidationFailure(f"unknown mode: {mode!r}")
 
 
+@contextmanager
+def _compose_rename_index(dir: str | os.PathLike[str]) -> Iterator[str | os.PathLike[str] | None]:
+    """Yield a temp index (real index + intent-to-add of untracked files) for rename detection.
+
+    `git diff HEAD` ignores untracked files, so an unstaged move shows up as a tracked
+    deletion plus an untracked addition that git can never pair into a rename. Marking the
+    untracked paths intent-to-add in a throwaway index lets `--find-renames` see both halves
+    and emit a single rename entry, without touching the real index. Yields ``None`` when
+    there is nothing untracked to add, so callers fall back to the live index.
+    """
+
+    untracked = _list_untracked_files(dir)
+    if not untracked:
+        yield None
+        return
+    real_index = run_git(["rev-parse", "--git-path", "index"], cwd=dir).stdout.strip()
+    real_index_path = Path(real_index)
+    if not real_index_path.is_absolute():
+        real_index_path = Path(dir) / real_index
+    with TempGitIndex(dir) as index:
+        if real_index_path.exists():
+            shutil.copyfile(real_index_path, index.path)
+        run_git(["add", "-N", "--", *untracked], cwd=dir, index_file=index.path)
+        yield index.path
+
+
 def get_compose_diff(dir: str | os.PathLike[str] = ".", config: object | None = None) -> str:
-    """Return the compose-mode diff against HEAD, including untracked files."""
+    """Return the compose-mode diff against HEAD, with rename detection across untracked files."""
 
     max_len = int(getattr(config, "max_diff_length", 200_000))
     args = [
@@ -381,22 +409,24 @@ def get_compose_diff(dir: str | os.PathLike[str] = ".", config: object | None = 
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
+        "--find-renames",
         "--src-prefix=a/",
         "--dst-prefix=b/",
         "HEAD",
     ]
-    diff = _diff_with_retry(args, dir, max_len, insert_u1_before="HEAD")
-    diff = _append_untracked_diff(diff, dir, _list_untracked_files(dir))
+    with _compose_rename_index(dir) as index_file:
+        diff = _diff_with_retry(args, dir, max_len, insert_u1_before="HEAD", index_file=index_file)
     if not diff.strip():
         raise NoChanges("compose")
     return diff
 
 
 def get_compose_stat(dir: str | os.PathLike[str] = ".") -> str:
-    """Return compose-mode --stat output against HEAD, including untracked files."""
+    """Return compose-mode --stat output against HEAD, with rename detection across untracked files."""
 
-    stat = run_git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--stat"], cwd=dir).stdout
-    stat = _append_untracked_stat(stat, dir, _list_untracked_files(dir))
+    args = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "HEAD", "--stat"]
+    with _compose_rename_index(dir) as index_file:
+        stat = run_git(args, cwd=dir, index_file=index_file).stdout
     if not stat.strip():
         raise NoChanges("compose")
     return stat
@@ -671,8 +701,9 @@ def _diff_with_retry(
     max_len: int,
     *,
     insert_u1_before: str | None = None,
+    index_file: str | os.PathLike[str] | None = None,
 ) -> str:
-    result = run_git(args, cwd=dir)
+    result = run_git(args, cwd=dir, index_file=index_file)
     if len(result.stdout.encode()) <= max_len:
         return result.stdout
     retry_args = args.copy()
@@ -680,7 +711,7 @@ def _diff_with_retry(
         retry_args.insert(retry_args.index(insert_u1_before), "-U1")
     else:
         retry_args.append("-U1")
-    return run_git(retry_args, cwd=dir).stdout
+    return run_git(retry_args, cwd=dir, index_file=index_file).stdout
 
 
 def _list_untracked_files(dir: str | os.PathLike[str]) -> list[str]:
@@ -806,7 +837,7 @@ def _index_lock_error(stderr: str, dir: str | os.PathLike[str]) -> GitIndexLocke
             continue
         candidate = line[start + 1 : end]
         if candidate.endswith("index.lock"):
-            return GitIndexLocked(candidate)
+            return GitIndexLocked(Path(candidate))
     return GitIndexLocked(Path(dir) / ".git" / "index.lock")
 
 
