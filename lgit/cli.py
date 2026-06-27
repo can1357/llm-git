@@ -623,7 +623,7 @@ async def _validate_and_process(
         if attempt == 0 and _first_line_length(current) > int(config.summary_soft_limit):
             print(f"Summary too long ({_first_line_length(current)} chars), retrying generation...", file=sys.stderr)
             try:
-                retry_analysis = ConventionalAnalysis(
+                retry_analysis = ConventionalAnalysis.from_raw(
                     commit_type=str(current.commit_type),
                     scope=None if current.scope is None else str(current.scope),
                     details=detail_points,

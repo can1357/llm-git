@@ -160,7 +160,7 @@ def parse_conventional_analysis_markdown(text: str, *, default_type: str = "chor
             issue_refs.extend(_ISSUE_RE.findall(bullet))
 
     details = tuple(AnalysisDetail.simple(detail) for detail in _dedupe(detail_texts))
-    return ConventionalAnalysis(
+    return ConventionalAnalysis.from_raw(
         commit_type=commit_type, scope=scope, summary=summary, details=details, issue_refs=tuple(_dedupe(issue_refs))
     )
 
@@ -196,7 +196,7 @@ def analysis_from_mapping(payload: Mapping[str, Any], *, default_type: str = "ch
         for item in _coerce_iterable(payload.get("issue_refs") or payload.get("issues") or ())
         if str(item).strip()
     )
-    return ConventionalAnalysis(
+    return ConventionalAnalysis.from_raw(
         commit_type=commit_type, scope=scope, summary=summary, details=details, issue_refs=issue_refs
     )
 

@@ -342,7 +342,7 @@ def _fallback_reduce_analysis(
 ) -> ConventionalAnalysis:
     details = [obs for item in observations for obs in item.observations if obs]
     summary = fallback_summary(stat=stat, details=details, limit=int(getattr(config, "summary_hard_limit", 128)))
-    return ConventionalAnalysis(
+    return ConventionalAnalysis.from_raw(
         commit_type="chore",
         summary=summary,
         details=tuple(AnalysisDetail.simple(_ensure_sentence(detail)) for detail in details[:6]),

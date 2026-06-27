@@ -87,7 +87,7 @@ class TestRunner:
             return RunResult(
                 name=name,
                 comparison=None,
-                analysis=ConventionalAnalysis(commit_type="chore"),
+                analysis=ConventionalAnalysis.from_raw(commit_type="chore"),
                 final_message="",
                 error=str(exc),
             )

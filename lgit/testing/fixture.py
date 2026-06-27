@@ -278,7 +278,7 @@ def analysis_from_json(content: str) -> ConventionalAnalysis:
         raise ValueError("analysis JSON must be an object")
     details = tuple(_detail_from_json(item) for item in (data.get("details") or ()))
     issue_refs = tuple(str(item) for item in (data.get("issue_refs") or ()))
-    return ConventionalAnalysis(
+    return ConventionalAnalysis.from_raw(
         commit_type=str(data.get("type", data.get("commit_type", "chore"))),
         scope=_optional_str(data.get("scope")),
         summary=_optional_str(data.get("summary")),
