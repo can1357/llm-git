@@ -10,9 +10,9 @@ import pytest
 from lgit import compose, git
 from lgit.compose import ComposeExecutableGroup, ComposeExecutablePlan, ComposeIntentGroup
 from lgit.config import CommitConfig
-from lgit.errors import ValidationFailure
+from lgit.errors import GitError, NoChanges, ValidationFailure
 from lgit.models import Scope
-from lgit.patch import build_compose_snapshot, pin_snapshot_worktree_state
+from lgit.patch import build_compose_snapshot, pin_snapshot_staged_state
 
 
 def _shared_file_diff() -> tuple[str, str]:
@@ -179,10 +179,11 @@ def test_execute_compose_with_temp_index_applies_two_group_plan(
     run_git(empty_repo, "commit", "-m", "initial")
     (empty_repo / "src" / "a.rs").write_text("fn a_changed() {}\n", encoding="utf-8")
     (empty_repo / "src" / "b.rs").write_text("fn b_changed() {}\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
 
     diff = git.get_compose_diff(empty_repo)
     stat = git.get_compose_stat(empty_repo)
-    snapshot = pin_snapshot_worktree_state(build_compose_snapshot(diff, stat), empty_repo)
+    snapshot = pin_snapshot_staged_state(build_compose_snapshot(diff, stat), empty_repo)
     a_file = snapshot.file_by_path("src/a.rs")
     b_file = snapshot.file_by_path("src/b.rs")
     assert a_file is not None and b_file is not None
@@ -237,13 +238,13 @@ def test_execute_compose_failure_before_update_ref_preserves_real_index(
 
     (empty_repo / "src" / "lib.rs").write_text("changed\n", encoding="utf-8")
     (empty_repo / "sentinel.txt").write_text("base\nstaged sentinel\n", encoding="utf-8")
-    run_git(empty_repo, "add", "sentinel.txt")
+    run_git(empty_repo, "add", ".")
     staged_before = run_git(empty_repo, "diff", "--cached").stdout
     assert "staged sentinel" in staged_before
 
     diff = git.get_compose_diff(empty_repo)
     stat = git.get_compose_stat(empty_repo)
-    snapshot = pin_snapshot_worktree_state(build_compose_snapshot(diff, stat), empty_repo)
+    snapshot = pin_snapshot_staged_state(build_compose_snapshot(diff, stat), empty_repo)
     source_file = snapshot.file_by_path("src/lib.rs")
     assert source_file is not None
     plan = ComposeExecutablePlan(
@@ -268,6 +269,44 @@ def test_execute_compose_failure_before_update_ref_preserves_real_index(
 
     assert git.get_head_hash(empty_repo) == initial_head
     assert run_git(empty_repo, "diff", "--cached").stdout == staged_before
+
+
+def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    rounds: list[int] = []
+
+    async def fake_round(args: object, config: object, round_number: int) -> list[str]:
+        rounds.append(round_number)
+        return [f"hash{round_number}"]
+
+    # First post-round check still sees staged changes; the second is clean.
+    remaining = iter(["staged diff remains"])
+
+    def fake_diff(*args: object, **kwargs: object) -> str:
+        try:
+            return next(remaining)
+        except StopIteration:
+            raise NoChanges("compose") from None
+
+    monkeypatch.setattr(compose, "run_compose_round", fake_round)
+    monkeypatch.setattr(compose.git, "get_compose_diff", fake_diff)
+    args = Namespace(dir=".", compose_preview=False)
+
+    hashes = asyncio.run(compose.run_compose_mode(args, CommitConfig()))
+
+    assert hashes == ["hash1", "hash2"]
+    assert rounds == [1, 2]
+
+
+def test_run_compose_mode_errors_when_a_round_makes_no_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_round(args: object, config: object, round_number: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(compose, "run_compose_round", fake_round)
+    monkeypatch.setattr(compose.git, "get_compose_diff", lambda *a, **k: "staged diff remains")
+    args = Namespace(dir=".", compose_preview=False)
+
+    with pytest.raises(GitError, match="no progress"):
+        asyncio.run(compose.run_compose_mode(args, CommitConfig()))
 
 
 def test_auto_assign_hunks_marks_shared_file_ambiguous() -> None:

@@ -14,7 +14,7 @@ from lgit.patch import (
     build_compose_snapshot,
     create_executable_group_patch,
     force_stage_file_from_base_in_index,
-    pin_snapshot_worktree_state,
+    pin_snapshot_staged_state,
     stage_executable_group_in_index,
 )
 
@@ -49,6 +49,8 @@ def _show_index_blob(repo: Path, index: TempGitIndex, path: str) -> str:
 
 
 def _snapshot(repo: Path) -> ComposeSnapshot:
+    # Compose now scopes to the staged tree, so stage everything before snapshotting.
+    lgit_run_git(["add", "-A"], cwd=repo)
     return build_compose_snapshot(get_compose_diff(repo), get_compose_stat(repo))
 
 
@@ -159,23 +161,24 @@ index 3333333..4444444 100644
     assert [hunk.hunk_id for hunk in first.hunks] == [hunk.hunk_id for hunk in second.hunks]
 
 
-def test_get_compose_diff_merges_staged_unstaged_and_untracked(empty_repo: Path, run_git: GitRunner) -> None:
+def test_get_compose_diff_scopes_to_staged_tree_only(empty_repo: Path, run_git: GitRunner) -> None:
     _write(empty_repo, "src/lib.rs", _fixture_file_original())
     _commit_all(empty_repo, run_git, "initial")
 
+    # Stage one file, then add an extra unstaged edit on top and an untracked file.
     _write(empty_repo, "src/lib.rs", _fixture_file_stage_only())
     run_git(empty_repo, "add", "src/lib.rs")
     _write(empty_repo, "src/lib.rs", _fixture_file_stage_and_unstaged())
-    _write(empty_repo, "notes.txt", "new untracked file\n")
+    _write(empty_repo, "other.rs", "fn other() {}\n")
 
-    snapshot = _snapshot(empty_repo)
+    snapshot = build_compose_snapshot(get_compose_diff(empty_repo), get_compose_stat(empty_repo))
 
-    assert len(snapshot.files) == 2
-    assert snapshot.file_by_path("src/lib.rs") is not None
-    assert snapshot.file_by_path("notes.txt") is not None
-    source_file = snapshot.file_by_path("src/lib.rs")
-    assert source_file is not None
-    assert len(source_file.hunk_ids) >= 2
+    # Compose mirrors the regular path: only the staged change is in scope; the unstaged
+    # `beta` edit and the untracked file are excluded.
+    assert [file.path for file in snapshot.files] == ["src/lib.rs"]
+    assert snapshot.file_by_path("other.rs") is None
+    assert "alpha staged" in snapshot.diff
+    assert "beta unstaged" not in snapshot.diff
 
 
 def test_stage_executable_group_partial_hunk_from_one_file(empty_repo: Path, run_git: GitRunner) -> None:
@@ -220,7 +223,7 @@ def test_pinned_staging_ignores_worktree_edits_after_snapshot(empty_repo: Path, 
     _write(empty_repo, "src/lib.rs", _fixture_file_original())
     _commit_all(empty_repo, run_git, "initial")
     _write(empty_repo, "src/lib.rs", _fixture_file_stage_only())
-    snapshot = pin_snapshot_worktree_state(_snapshot(empty_repo), empty_repo)
+    snapshot = pin_snapshot_staged_state(_snapshot(empty_repo), empty_repo)
     source_file = snapshot.file_by_path("src/lib.rs")
     assert source_file is not None
 
@@ -241,7 +244,7 @@ def test_pinned_staging_stages_deletion_even_if_file_recreated(empty_repo: Path,
     _write(empty_repo, "src/lib.rs", _fixture_file_original())
     _commit_all(empty_repo, run_git, "initial")
     (empty_repo / "src/lib.rs").unlink()
-    snapshot = pin_snapshot_worktree_state(_snapshot(empty_repo), empty_repo)
+    snapshot = pin_snapshot_staged_state(_snapshot(empty_repo), empty_repo)
     assert snapshot.pins.get("src/lib.rs") is not None
     _write(empty_repo, "src/lib.rs", "fn revived() {}\n")
     source_file = snapshot.file_by_path("src/lib.rs")
@@ -303,6 +306,7 @@ def test_stage_executable_groups_ignore_unplanned_files_between_commits(empty_re
     assert "b_changed" in staged
     assert "Dockerfile" not in staged
     run_git(empty_repo, "commit", "-m", "second")
+    run_git(empty_repo, "add", "Dockerfile")
     assert "Dockerfile" in get_compose_diff(empty_repo)
 
 
@@ -479,7 +483,7 @@ def test_stage_executable_group_renames_file_atomically(empty_repo: Path, run_gi
     _write(empty_repo, "src/old.rs", _fixture_file_original())
     _commit_all(empty_repo, run_git, "initial")
     (empty_repo / "src/old.rs").rename(empty_repo / "src/new.rs")
-    snapshot = pin_snapshot_worktree_state(_snapshot(empty_repo), empty_repo)
+    snapshot = pin_snapshot_staged_state(_snapshot(empty_repo), empty_repo)
     moved = snapshot.file_by_path("src/new.rs")
     assert moved is not None
     group = _group(moved.file_id, moved.hunk_ids, rationale="move file")
@@ -504,7 +508,7 @@ def test_stage_executable_group_renames_and_modifies_file(empty_repo: Path, run_
     _commit_all(empty_repo, run_git, "initial")
     (empty_repo / "src/old.rs").unlink()
     _write(empty_repo, "src/new.rs", _fixture_file_two_hunks())
-    snapshot = pin_snapshot_worktree_state(_snapshot(empty_repo), empty_repo)
+    snapshot = pin_snapshot_staged_state(_snapshot(empty_repo), empty_repo)
     moved = snapshot.file_by_path("src/new.rs")
     assert moved is not None
     assert moved.old_path == "src/old.rs"
@@ -543,7 +547,7 @@ def test_stage_executable_group_skips_file_whose_patch_no_longer_applies(empty_r
 
     _write(empty_repo, "src/a.rs", _fixture_file_original().replace("alpha", "alpha diverged"))
     run_git(empty_repo, "add", "src/a.rs")
-    run_git(empty_repo, "commit", "-m", "diverge a")
+    run_git(empty_repo, "commit", "src/a.rs", "-m", "diverge a")
     _reset_staging(empty_repo, run_git)
     _write(empty_repo, "src/b.rs", "fn b_changed() {}\n")
     outcome = _stage_live(snapshot, group, empty_repo)

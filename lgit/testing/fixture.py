@@ -207,7 +207,11 @@ class Fixture:
 
 
 async def add_fixture(
-    fixtures_dir: str | Path, commit_hash: str, name: str, repo_dir: str | Path = ".", config: CommitConfig | None = None
+    fixtures_dir: str | Path,
+    commit_hash: str,
+    name: str,
+    repo_dir: str | Path = ".",
+    config: CommitConfig | None = None,
 ) -> Fixture:
     """Create a fixture from a commit and add it to the manifest."""
 
