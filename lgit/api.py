@@ -699,7 +699,7 @@ def _resolved_mode(config: Any, model: str) -> ResolvedApiMode:
 def _build_cache_entry(config: Any, spec: OneShotSpec) -> tuple[Any, str] | None:
     if not spec.cacheable:
         return None
-    cache_obj = llm_cache.global_cache()
+    cache_obj = llm_cache.LlmCache.instance()
     if cache_obj is None:
         return None
     mode = str(_resolved_mode(config, spec.model or ""))
@@ -719,7 +719,7 @@ def _build_cache_entry(config: Any, spec: OneShotSpec) -> tuple[Any, str] | None
 def _record_failure(
     config: Any, cache_entry: tuple[Any, str] | None, spec: OneShotSpec, request: str, response: str, error: Exception
 ) -> None:
-    sink = llm_cache.global_cache()
+    sink = llm_cache.LlmCache.instance()
     if sink is None and cache_entry is not None:
         sink = cache_entry[0]
     if sink is not None:

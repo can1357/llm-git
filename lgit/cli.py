@@ -173,7 +173,7 @@ async def run_cli(args: argparse.Namespace) -> int:
         with profile.section("init_git_command_settings", collector):
             git.init_git_command_settings(config)
         with profile.section("init_cache", collector):
-            cache.init(config)
+            cache.LlmCache.init(config)
 
         if _wants_test(args):
             return await _run_test_mode(args, config)

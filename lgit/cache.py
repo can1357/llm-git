@@ -9,17 +9,16 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from blake3 import blake3
+
+if TYPE_CHECKING:
+    from .config import CommitConfig
 
 SCHEMA_VERSION = 3
 PRUNE_DIVISOR = 64
 MAX_FAILURES = 64
-
-_GLOBAL_LOCK = threading.Lock()
-_GLOBAL_INITIALIZED = False
-_GLOBAL: LlmCache | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +56,10 @@ class CacheMaterial:
 class LlmCache:
     """SQLite-backed cache of parsed LLM responses."""
 
+    _instance: ClassVar[LlmCache | None] = None
+    _instance_lock: ClassVar[threading.Lock] = threading.Lock()
+    _initialized: ClassVar[bool] = False
+
     def __init__(self, path: str | os.PathLike[str], ttl: timedelta | int | float = 0) -> None:
         self.path = Path(path)
         self.ttl_secs = _ttl_seconds(ttl)
@@ -72,6 +75,22 @@ class LlmCache:
         """Open or create a cache database at ``path``."""
 
         return cls(path, ttl)
+
+    @classmethod
+    def init(cls, config: CommitConfig) -> None:
+        """Initialize the process-global cache from configuration; first call wins."""
+
+        with cls._instance_lock:
+            if cls._initialized:
+                return
+            cls._instance = _build_from_config(config)
+            cls._initialized = True
+
+    @classmethod
+    def instance(cls) -> LlmCache | None:
+        """Return the initialized process-global cache handle, if any."""
+
+        return cls._instance
 
     def get_entry(self, key: str) -> CachedLlmResponse | None:
         """Return the stored request/response for ``key`` or ``None`` on miss."""
@@ -221,35 +240,6 @@ class LlmCache:
             self._conn.commit()
 
 
-def init(config: object) -> None:
-    """Initialize the process-global cache from configuration; first call wins."""
-
-    global _GLOBAL_INITIALIZED, _GLOBAL
-    with _GLOBAL_LOCK:
-        if _GLOBAL_INITIALIZED:
-            return
-        _GLOBAL = _build_from_config(config)
-        _GLOBAL_INITIALIZED = True
-
-
-def global_cache() -> LlmCache | None:
-    """Return the initialized process-global cache handle, if any."""
-
-    return _GLOBAL
-
-
-def get_global() -> LlmCache | None:
-    """Return the initialized process-global cache handle, if any."""
-
-    return global_cache()
-
-
-def global_() -> LlmCache | None:
-    """Return the initialized process-global cache handle, if any."""
-
-    return global_cache()
-
-
 def compute_key(material: CacheMaterial) -> str:
     """Compute a stable BLAKE3 cache key over request material."""
 
@@ -265,21 +255,21 @@ def compute_key(material: CacheMaterial) -> str:
     return hasher.hexdigest()
 
 
-def _build_from_config(config: object) -> LlmCache | None:
-    if not bool(getattr(config, "cache_enabled", True)):
+def _build_from_config(config: CommitConfig) -> LlmCache | None:
+    if not config.cache_enabled:
         return None
     cache_dir = _resolve_cache_dir(config)
     if cache_dir is None:
         return None
-    ttl_days = int(getattr(config, "cache_ttl_days", 14) or 0)
+    ttl_days = config.cache_ttl_days
     try:
         return LlmCache.open(cache_dir / "responses.sqlite", timedelta(days=ttl_days))
     except Exception:
         return None
 
 
-def _resolve_cache_dir(config: object) -> Path | None:
-    explicit = getattr(config, "cache_dir", None)
+def _resolve_cache_dir(config: CommitConfig) -> Path | None:
+    explicit = config.cache_dir
     if explicit:
         return Path(explicit)
     xdg = os.environ.get("XDG_CACHE_HOME")
@@ -308,11 +298,6 @@ def _write_field(hasher: Any, name: str, value: str) -> None:
     hasher.update(b"\n")
 
 
-# ``global`` is a Python keyword, but callers using getattr(lgit.cache, "global")
-# can still reach the Rust-compatible name.
-globals()["global"] = global_cache
-globals()["global_"] = global_
-
 __all__ = [
     "SCHEMA_VERSION",
     "CacheMaterial",
@@ -320,8 +305,4 @@ __all__ = [
     "FailureRecord",
     "LlmCache",
     "compute_key",
-    "get_global",
-    "global_",
-    "global_cache",
-    "init",
 ]
