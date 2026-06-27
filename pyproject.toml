@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lgit-cli"
+version = "3.7.0"
+description = "AI-powered git commit message generator using Claude and other LLMs via OpenAI-compatible APIs"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+authors = [
+  { name = "can1357", email = "me@can.ac" },
+]
+keywords = ["git", "commit", "ai", "claude", "llm"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Version Control :: Git",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "httpx",
+  "jinja2",
+  "blake3",
+]
+
+[project.urls]
+Homepage = "https://github.com/can1357/llm-git"
+Repository = "https://github.com/can1357/llm-git"
+Documentation = "https://github.com/can1357/llm-git"
+Issues = "https://github.com/can1357/llm-git/issues"
+
+[project.scripts]
+lgit = "lgit.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "ruff",
+  "mypy",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["lgit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["lgit", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+src = ["lgit", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+  "E501",   # line length is enforced by `ruff format`; remaining hits are unsplittable strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Empty-bullet fixtures carry intentional trailing whitespace.
+"tests/test_changelog.py" = ["W291"]
+
+[tool.mypy]
+files = ["lgit"]
+python_version = "3.14"
+ignore_missing_imports = true

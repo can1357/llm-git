@@ -1,6 +1,6 @@
 # Project Overview
 
-Git commit message generator using AI via LiteLLM. Generates conventional commit messages with concise summaries (≤72 chars) and structured detail points from git diffs.
+Git commit message generator using AI via LiteLLM (or any OpenAI-compatible API). Generates conventional commit messages with concise summaries (≤72 chars) and structured detail points from git diffs.
 
 **Three operational modes:**
 1. **Standard mode**: Single commit generation from staged/unstaged changes
@@ -13,71 +13,86 @@ Git commit message generator using AI via LiteLLM. Generates conventional commit
 
 # Commands
 
+This is a `uv`-managed Python project (`>=3.14`). `uv sync --dev` installs everything.
+
 **Build:**
 ```bash
-cargo build --release
-cargo build --release --bin lgit  # Main binary only
+uv build                    # sdist + wheel into dist/
+uv sync --dev               # install package + dev tools into .venv
 ```
 
 **Run:**
 ```bash
 # Standard mode
-cargo run --release --bin lgit                              # Analyze & commit staged changes
-cargo run --release --bin lgit -- --dry-run                 # Preview without committing
-cargo run --release --bin lgit -- --mode=unstaged           # Analyze unstaged (no commit)
-cargo run --release --bin lgit -- --mode=commit --target=HEAD~1  # Analyze specific commit
-cargo run --release --bin lgit -- --copy                    # Copy message to clipboard
-cargo run --release --bin lgit -- -m opus                   # Use Opus model
-cargo run --release --bin lgit -- Fixed regression from PR #123  # Add context
+uv run lgit                                 # Analyze & commit staged changes
+uv run lgit --dry-run                       # Preview without committing
+uv run lgit --mode=unstaged                 # Analyze unstaged (no commit)
+uv run lgit --mode=commit --target=HEAD~1   # Analyze specific commit
+uv run lgit --copy                          # Copy message to clipboard
+uv run lgit -m opus                         # Use Opus model
+uv run lgit Fixed regression from PR #123   # Add context
 
 # Compose mode - split large changesets into atomic commits
-cargo run --release --bin lgit -- --compose                 # Execute compose
-cargo run --release --bin lgit -- --compose --compose-preview  # Preview splits only
-cargo run --release --bin lgit -- --compose --compose-max-commits 3  # Limit to 3 commits
-cargo run --release --bin lgit -- --compose --compose-test-after-each  # Run tests after each
+uv run lgit --compose                       # Execute compose
+uv run lgit --compose --compose-preview     # Preview splits only
+uv run lgit --compose --compose-max-commits 3       # Limit to 3 commits
+uv run lgit --compose --compose-test-after-each     # Run tests after each
 ```
+
+After `uv tool install .` (or installing the wheel) the `lgit` command is on `PATH` directly, no `uv run` prefix needed.
 
 **Environment:**
 - Expects LiteLLM server running at `http://localhost:4000/chat/completions`
 
 **Testing:**
 ```bash
-cargo test                                  # Run all unit tests
-cargo test --lib                            # Library tests only
+uv run pytest                               # Run all tests
+uv run pytest tests/test_compose.py         # A single test module
+uv run pytest -k truncate                    # Match by name
 ```
 
 # Architecture
 
 ## Module Structure
 
-**Core library** (`src/lib.rs`):
+**Core package** (`lgit/`):
 - `analysis` - Scope candidate extraction from git numstat
-- `api` - OpenRouter/LiteLLM integration with function calling + retry logic
-- `compose` - AI-powered commit splitting (NEW)
-- `config` - Configuration loading, prompt template management
-- `diff` - Smart diff truncation with priority scoring
-- `error` - Error types with `thiserror`
+- `api` - LLM integration (OpenAI-compatible) with function calling, retry logic, and response caching
+- `cache` - On-disk cache of LLM responses (BLAKE3-keyed)
+- `changelog` - `CHANGELOG.md` maintenance against the staged tree
+- `compose` - AI-powered commit splitting
+- `config` - Configuration loading (TOML) and prompt-variant selection
+- `diffing` - Smart diff truncation with priority scoring
+- `errors` - Error/exception types
 - `git` - Git command wrappers (diff, stat, commit, history operations)
+- `map_reduce` - Parallel per-file analysis for large diffs
+- `markdown_output` - Markdown rendering and heuristic fallback summary
+- `models` - Type-safe commit types, scopes, summaries; model-name resolution; compose data types
 - `normalization` - Unicode normalization, commit message formatting
-- `patch` - Hunk-level staging for compose mode (NEW)
-- `templates` - Prompt template rendering with `tera`
-- `types` - Type-safe commit types, scopes, summaries with validation
+- `patch` - Hunk-level staging for compose mode
+- `profile` - Lightweight timing / JSONL profiling
+- `repo` - Repository metadata detection
+- `style` - Terminal styling helpers
+- `templates` - Prompt template rendering with Jinja2
+- `tokens` - Token counting helpers
 - `validation` - Commit message validation (past-tense verbs, length limits)
 - `rewrite` - History rewrite orchestration
+- `resources/` - Bundled prompt templates + JSON data (`commit_types.json`, `validation_data.json`)
 
 **Entry points:**
-- `src/main.rs` - CLI routing to standard/compose/rewrite modes
+- `lgit/cli.py` - CLI parsing (argparse) + routing to standard/compose/rewrite modes (`main`)
+- `lgit/__main__.py` - `python -m lgit` shim
 
 ## Core Workflows
 
-**Standard Mode** (`src/main.rs:run_generation`):
+**Standard Mode** (`lgit/cli.py`):
 1. `get_git_diff()` + `get_git_stat()` - Extract changes based on mode (staged/unstaged/commit)
 2. `smart_truncate_diff()` - Truncate if >100KB with priority-based selection:
    - Priority: source files > config > tests > binaries > lock files
    - Preserve ALL file headers, truncate content proportionally
    - Keep context (first 15 + last 10 lines per file)
 3. `extract_scope_candidates()` - Parse git numstat to identify changed modules/components
-4. `generate_conventional_analysis()` - AI call with function calling schema:
+4. Analysis call - AI call with function calling schema:
    - Tool: `create_conventional_analysis`
    - Returns: `{type, scope?, body: [details], issue_refs: [...]}`
 5. `generate_summary_from_analysis()` - AI call for summary generation:
@@ -86,88 +101,85 @@ cargo test --lib                            # Library tests only
    - Returns: `{summary}` (≤72 chars)
 6. `post_process_commit_message()` - Enforce capitalization, punctuation
 7. `validate_commit_message()` - Check past-tense verbs, length limits
-8. `git_commit()` - Create commit (unless dry-run)
+8. Create commit (unless dry-run)
 
-**Compose Mode** (`src/compose.rs:run_compose_mode`):
+**Compose Mode** (`lgit/compose.py:run_compose_mode`):
 1. Combine staged + unstaged diffs into single analysis
-2. `analyze_for_compose()` - AI identifies logical commit groups:
+2. Intent analysis - AI identifies logical commit groups:
    - Tool: `create_compose_analysis`
    - Returns: `{groups: [{changes: [{path, hunks}], type, scope?, rationale, dependencies}]}`
    - **CRITICAL**: Each group specifies file paths + hunk headers (e.g., `@@ -10,5 +10,7 @@`) or `["ALL"]`
-3. `compute_dependency_order()` - Topological sort (Kahn's algorithm) to ensure working state
+3. Dependency order - Topological sort (Kahn's algorithm) to ensure working state
 4. Display proposed splits, optionally stop (preview mode)
-5. `execute_compose()` - For each group in dependency order:
+5. Execute - For each group in dependency order:
    - Capture baseline diff once (against original HEAD)
-   - `stage_group_changes()` - Hunk-aware staging:
-     - If all hunks = `["ALL"]`: use `git add <files>`
+   - Hunk-aware staging:
+     - If all hunks = `["ALL"]`: stage whole files
      - Otherwise: extract specific hunks, `git apply --cached <patch>`
    - Generate commit message via standard flow
-   - `git_commit()` + capture new HEAD hash
+   - Create commit + capture new HEAD hash
    - Optionally run tests
 
-**Rewrite Mode** (`rewrite_history.py` + `src/rewrite.rs`):
+**Rewrite Mode** (`lgit/rewrite.py`):
 1. `get_commit_list()` - Extract commit hashes via `git rev-list --reverse`
-2. Parallel API calls to Haiku for message conversion
-3. `rewrite_history()` - Rebuild history with `git commit-tree`:
+2. Concurrent API calls (asyncio) to Haiku for message conversion
+3. Rebuild history with `git commit-tree`:
    - Preserves trees, authors, dates, parent relationships
    - Updates messages only
    - Updates branch ref to new head
 
-## Smart Truncation Strategy (`src/diff.rs`)
+## Smart Truncation Strategy (`lgit/diffing.py`)
 
 **Priority scoring** (higher = more important):
-```rust
-pub const PRIORITY_SOURCE: i32 = 100;    // .rs, .py, .js, .ts, etc.
-pub const PRIORITY_CONFIG: i32 = 80;     // .toml, .yaml, .json, etc.
-pub const PRIORITY_TEST: i32 = 60;       // test files
-pub const PRIORITY_DOC: i32 = 40;        // .md files
-pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
-```
+- Source files (`.py`, `.rs`, `.js`, `.ts`, …) — highest
+- Config (`.toml`, `.yaml`, `.json`, …)
+- Tests
+- Docs (`.md`)
+- Binaries (images, …) — lowest
 
-**Excluded files** (never included in diff): `Cargo.lock`, `package-lock.json`, `yarn.lock`, etc.
+**Excluded files** (never included in diff): `Cargo.lock`, `package-lock.json`, `yarn.lock`, `uv.lock`, etc.
 
 **Truncation logic:**
-1. Parse diff into `FileDiff` structs
+1. Parse diff into per-file records
 2. Calculate total length, determine how much to trim
 3. Show ALL file headers (crucial for context)
 4. Distribute remaining space proportionally by priority
 5. For each file: keep first 15 + last 10 lines, truncate middle
 6. Annotate with `[... X lines omitted ...]`
 
-## Hunk-Level Staging (`src/patch.rs`)
+## Hunk-Level Staging (`lgit/patch.py`)
 
 **Problem**: Staging from the live worktree (`git add <file>`) reads whatever is on disk *at staging time*. Compose spends minutes in LLM calls; any edits the user makes meanwhile would leak into the generated commits.
 
 **Solution**: Everything staged during compose comes from the immutable snapshot captured at invocation — never from the live worktree.
 
-**Key functions:**
-- `build_compose_snapshot()` - Parse the captured diff into `ComposeFile`/`ComposeHunk` with stable ids
-- `pin_snapshot_worktree_state()` - Hash every changed file's worktree content into the odb at capture time (`WorktreePin::Object { mode, oid }`, or `Deleted`); handles symlinks, submodule gitlinks, and binaries
-- `stage_executable_group_in_index()` - Stage a group into an isolated temp index:
-  - Partial file: `git apply --cached --3way` with the snapshot-derived patch; on conflict, re-splice from the base blob (`force_stage_file_from_base_in_index`)
+**Key steps:**
+- Build the compose snapshot - Parse the captured diff into `ComposeFile`/`ComposeHunk` records with stable ids
+- Pin worktree state - Hash every changed file's worktree content into the odb at capture time (object `{mode, oid}`, or deleted); handles symlinks, submodule gitlinks, and binaries
+- Stage a group into an isolated temp index:
+  - Partial file: `git apply --cached --3way` with the snapshot-derived patch; on conflict, re-splice from the base blob
   - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
-- `splice_hunks_into_base()` - Reconstruct file content from base blob + selected hunks without `git apply`
+- Splice hunks into base - Reconstruct file content from base blob + selected hunks without `git apply`
 
-**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). If the real index drifted mid-run, only the snapshot paths are refreshed (`reset_paths_to`) so mid-run staging stays staged; otherwise a full `reset --mixed` runs.
+**Important**: The snapshot (diff + pins) is captured ONCE in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement. If the real index drifted mid-run, only the snapshot paths are refreshed so mid-run staging stays staged; otherwise a full `reset --mixed` runs.
 
 **Snapshot isolation elsewhere:**
-- Standard/fast staged mode captures the index tree after auto-stage/changelog (`commit_staged` in `src/main.rs`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit_snapshot_tree`: `commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
-- Changelog maintenance (`src/changelog.rs`) generates entries against the *staged* copy of CHANGELOG.md and stages the result as an exact blob (`stage_changelog_blob`), so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately.
+- Standard/fast staged mode captures the index tree after auto-stage/changelog (`lgit/cli.py`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
+- Changelog maintenance (`lgit/changelog.py`) generates entries against the *staged* copy of `CHANGELOG.md` and stages the result as an exact blob, so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately.
 
 ## Prompt Engineering
 
-**Prompt versions**: V1 (default) vs V2 (behind `new_prompts` feature flag)
-- Located in `prompts/analysis/` and `prompts/summary/`
-- Rendered at runtime via `tera` templates
-- Config setting: `analysis_prompt_variant` / `summary_prompt_variant`
+**Prompt variants**: `default` vs `markdown`
+- Selected per call by the `markdown_output` config flag (markdown on by default); `analysis_prompt_variant` / `summary_prompt_variant` override the non-markdown variant.
+- Bundled under `lgit/resources/prompts/<family>/` (families: `analysis`, `summary`, `changelog`, `map`, `reduce`, `compose-intent`, `compose-bind`, `fast`).
+- Rendered at runtime via Jinja2 (`lgit/templates.py`). User overrides may live in `~/.llm-git/prompts/`.
 
 **Validation retry**: Summary generation retries once on validation failure with constraint injection
 - Validates: past-tense verb, no type repetition, type-file consistency heuristics
 - Fallback: Uses first detail or heuristic if retry exhausted
-- See `validate_summary_quality()` in `src/api/mod.rs:288-358`
+- See `validate_summary_quality()` in `lgit/validation.py`
 
-
-## Type System (`src/types.rs`)
+## Type System (`lgit/models.py`)
 
 **Type-safe wrappers** with validation:
 - `CommitType` - Validates against `[feat, fix, refactor, docs, test, chore, style, perf, build, ci, revert]`
@@ -175,9 +187,9 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
 - `CommitSummary` - Enforces length limits (72 guideline, 96 soft, 128 hard), warns on uppercase/period
 
 **Compose types**:
-- `FileChange` - `{path: String, hunks: Vec<String>}` - Hunk headers or `["ALL"]`
-- `ChangeGroup` - `{changes: Vec<FileChange>, commit_type, scope?, rationale, dependencies: Vec<usize>}`
-- `ComposeAnalysis` - `{groups: Vec<ChangeGroup>, dependency_order: Vec<usize>}`
+- `FileChange` - `{path: str, hunks: list[str]}` - Hunk headers or `["ALL"]`
+- `ChangeGroup` - `{changes: list[FileChange], commit_type, scope?, rationale, dependencies: list[int]}`
+- `ComposeAnalysis` - `{groups: list[ChangeGroup], dependency_order: list[int]}`
 
 **Model name resolution** (`resolve_model_name()`):
 - Short names: `sonnet` → `claude-sonnet-4.5`, `opus` → `claude-opus-4.1`, `haiku` → `claude-haiku-4-5`
@@ -185,7 +197,7 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
 - Gemini: `gemini` → `gemini-2.5-pro`, `flash` → `gemini-2.5-flash`
 - Pass-through for full names
 
-## API Integration (`src/api/mod.rs`)
+## API Integration (`lgit/api.py`)
 
 **Function calling schema**:
 1. `create_conventional_analysis` - Detail extraction:
@@ -211,8 +223,8 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
      "groups": [
        {
          "changes": [
-           {"path": "src/foo.rs", "hunks": ["@@ -10,5 +10,7 @@"]},
-           {"path": "src/bar.rs", "hunks": ["ALL"]}
+           {"path": "lgit/foo.py", "hunks": ["@@ -10,5 +10,7 @@"]},
+           {"path": "lgit/bar.py", "hunks": ["ALL"]}
          ],
          "type": "feat",
          "scope": "api",
@@ -223,12 +235,14 @@ pub const PRIORITY_BINARY: i32 = 20;     // images, etc.
    }
    ```
 
-**Retry logic** (`retry_api_call()`):
+**Retry logic**:
 - Exponential backoff: 1s, 2s, 4s (default 3 retries)
 - Retries on 5xx errors or transient failures
 - Configurable: `max_retries`, `initial_backoff_ms` in config
 
-**Fallback**: If AI calls fail, `fallback_summary()` generates heuristic summary from stat.
+**Caching**: Responses are cached on disk keyed by a BLAKE3 hash of `(model, prompt_family, prompt_variant, …)` (`lgit/cache.py`); set `LLM_GIT_CACHE_DISABLED=1` to bypass.
+
+**Fallback**: If AI calls fail, `fallback_summary()` (`lgit/markdown_output.py`) generates a heuristic summary from stat.
 
 ## Configuration (`~/.config/llm-git/config.toml`)
 
@@ -255,17 +269,13 @@ exclude_old_message = false   # When true, git show omits original message
 
 # Implementation Notes
 
-**Dependencies:**
-- `clap` - CLI parsing with derive macros
-- `reqwest` (blocking) - HTTP client for OpenRouter API
-- `serde` + `serde_json` - Serialization for function calling
-- `arboard` - Clipboard support for `--copy`
-- `tera` - Prompt template rendering
-- `rust-embed` - Embed prompt files in binary
-- `anyhow` + `thiserror` - Error handling
-- `rayon` - Parallel processing in rewrite mode
-- `chrono` - Timestamps for backup branches
-- `parking_lot` - High-performance Mutex/RwLock (ALWAYS use over `std::sync`)
+**Dependencies** (`uv` for env + lockfile):
+- `httpx` - HTTP client for the LLM API
+- `jinja2` - prompt template rendering
+- `blake3` - hashing for the LLM response cache
+- Standard library: `argparse` (CLI), `asyncio` (concurrent API calls), `tomllib` (config + test fixtures), `importlib.resources` (bundled prompts/JSON), `dataclasses`, `subprocess` (git + clipboard)
+- Clipboard (`--copy`): shells out to `pbcopy` (macOS), `clip` (Windows), or `wl-copy`/`xclip`/`xsel` (Linux) — no third-party clipboard library
+- Dev: `pytest`, `ruff`, `mypy`
 
 **Models:**
 - Default: Sonnet 4.5 for analysis, Haiku 4.5 for summary
@@ -283,22 +293,27 @@ exclude_old_message = false   # When true, git show omits original message
 - Compose mode: ~$0.05-0.15 per group (multiple analysis + summary calls)
 - Rewrite mode: ~$0.001/commit with Haiku (~$1-5 for 1000-5000 commits)
 
-# Linting
+# Linting & Formatting
 
-Project uses comprehensive Clippy linting (see `Cargo.toml`):
-- `all`, `pedantic`, `style`, `perf`, `correctness`, `suspicious`, `nursery` enabled
-- `allow_attributes_without_reason = "warn"` - MUST provide reason for `#[allow(...)]`
-- Many pragmatic allows for builder patterns, numeric casts, code organization
-- **CRITICAL**: Always use `parking_lot::{Mutex, RwLock}` instead of `std::sync`
+Tooling is `ruff` (lint + format) and `mypy` (local type checking), all run through `uv`:
+```bash
+uv run ruff format          # apply formatting
+uv run ruff format --check  # verify formatting (CI gate)
+uv run ruff check           # lint (CI gate)
+uv run mypy                 # optional local type check
+```
+- `ruff format` owns line length (`line-length = 120`); `E501` is therefore disabled in lint.
+- Lint rule set: `E`, `F`, `W`, `I`, `UP`, `B` (see `[tool.ruff.lint]` in `pyproject.toml`).
+- CI gates on `ruff format --check`, `ruff check`, and `pytest`; `mypy` is local-only (not a CI gate).
 
 # Common Issues
 
 **Compose mode empty commits**: Ensure AI returns hunk headers from diff, not fabricated. If model struggles, file may need `hunks: ["ALL"]` for entire file.
 
-**Hunk extraction fails**: Check `extract_file_diff()` correctly parses `diff --git a/... b/...` headers. File path matching is sensitive to `a/` and `b/` prefixes.
+**Hunk extraction fails**: Check the diff parser correctly handles `diff --git a/... b/...` headers. File path matching is sensitive to `a/` and `b/` prefixes.
 
 **Validation retry loops**: If summary validation fails repeatedly, check `validate_summary_quality()` constraints aren't overly strict for edge cases.
 
-**API timeouts**: Increase `timeout` in HTTP client (currently 120s) if large diffs take longer to process.
+**API timeouts**: Increase the httpx client `timeout` (currently 120s) if large diffs take longer to process.
 
-**Prompt changes not applied**: After editing `prompts/*.md`, rebuild to re-embed templates.
+**Prompt changes not applied**: Prompts load at runtime from `lgit/resources/prompts/` via `importlib.resources` — no rebuild step. For an installed wheel, reinstall (`uv sync`) to pick up edits, or drop overrides in `~/.llm-git/prompts/`.

@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="https://github.com/can1357/llm-git/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/llm-git/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
-  <a href="https://crates.io/crates/llm-git"><img src="https://img.shields.io/crates/v/llm-git?style=flat&colorA=222222&colorB=dea584" alt="Crates.io"></a>
+  <a href="https://pypi.org/project/lgit-cli/"><img src="https://img.shields.io/pypi/v/lgit-cli?style=flat&colorA=222222&colorB=3FB950" alt="PyPI"></a>
   <a href="https://github.com/can1357/llm-git/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/llm-git?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-nightly-dea584?style=flat&colorA=222222&logo=rust&logoColor=white" alt="Rust"></a>
+  <a href="https://www.python.org"><img src="https://img.shields.io/badge/Python-3.14%2B-3FB950?style=flat&colorA=222222&logo=python&logoColor=white" alt="Python"></a>
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 
 ```bash
 # Install
-cargo install llm-git
+uv tool install lgit-cli
 
 # Configure (pick one)
 export LLM_GIT_API_KEY=your_anthropic_key                    # Direct Anthropic
@@ -237,10 +237,12 @@ default = true
 
 ## Installation
 
-### From crates.io
+### From PyPI
 
 ```bash
-cargo install llm-git
+uv tool install lgit-cli    # recommended
+pipx install lgit-cli       # or
+pip install lgit-cli
 ```
 
 ### From source
@@ -248,12 +250,12 @@ cargo install llm-git
 ```bash
 git clone https://github.com/can1357/llm-git.git
 cd llm-git
-cargo install --path .
+uv tool install .
 ```
 
 ### Prerequisites
 
-- Rust nightly toolchain
+- Python 3.14+
 - Git
 - API access (Anthropic, OpenAI, OpenRouter, or local LiteLLM proxy)
 

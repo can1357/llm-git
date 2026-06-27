@@ -2,6 +2,5 @@
 
 # Force LF for embedded prompt templates so the USER separator parses
 # identically on Windows checkouts (Git's default core.autocrlf=true).
-prompts/**/*.md text eol=lf
-*.rs text eol=lf
+lgit/resources/prompts/**/*.md text eol=lf
 *.toml text eol=lf
