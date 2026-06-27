@@ -125,22 +125,30 @@ def _run_git_process(
     disable_background_features: bool | None,
 ) -> tuple[tuple[str, ...], subprocess.CompletedProcess]:
     argv = _git_argv(args)
-    run_kwargs: dict[str, object] = {
-        "cwd": os.fspath(cwd),
-        "input": input_data,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "env": git_command_env(
+    # Always feed stdin as raw bytes. A text-mode pipe rewrites "\n" -> os.linesep
+    # on Windows, which corrupts patches piped to `git apply` (CRLF context no
+    # longer matches the LF index blob) and appends stray CR to commit messages
+    # and stdin-paths. Encoding here keeps the bytes byte-exact on every platform.
+    stdin_bytes = input_data.encode("utf-8") if isinstance(input_data, str) else input_data
+    completed = subprocess.run(
+        argv,
+        cwd=os.fspath(cwd),
+        input=stdin_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=git_command_env(
             env,
             index_file=index_file,
             disable_background_features=disable_background_features,
         ),
-        "shell": False,
-        "check": False,
-    }
-    if text:
-        run_kwargs.update({"text": True, "encoding": "utf-8", "errors": "replace"})
-    return argv, subprocess.run(argv, **run_kwargs)
+        shell=False,
+        check=False,
+    )
+    if not text:
+        return argv, completed
+    stdout = completed.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    stderr = completed.stderr.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    return argv, subprocess.CompletedProcess(completed.args, completed.returncode, stdout, stderr)
 
 
 def _raise_git_error(
