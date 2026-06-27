@@ -1,9 +1,8 @@
 """Regression tests for Rust→Python parity features ported into the CLI.
 
 Each test pins a behavior that was missing or divergent in the Python port:
-extended commit-type acceptance, lossy analysis-scope coercion, the required
-``user_visible`` analysis field, compose markdown fallbacks reachable in tool
-mode, real shell completions, and phase-timing artifacts.
+extended commit-type acceptance, lossy analysis-scope coercion, compose markdown
+parsing, real shell completions, and phase-timing artifacts.
 """
 
 from __future__ import annotations
@@ -12,14 +11,7 @@ import json
 
 from lgit import api, cli, profile
 from lgit import markdown_output as md
-from lgit.config import CommitConfig
 from lgit.models import ConventionalAnalysis
-
-
-def test_analysis_schema_requires_user_visible() -> None:
-    schema = api.build_analysis_schema(["feat", "fix"], CommitConfig())
-    detail = schema["properties"]["details"]["items"]
-    assert "user_visible" in detail["required"]
 
 
 def test_heading_parser_accepts_extended_commit_types() -> None:
@@ -42,11 +34,10 @@ def test_compose_intent_markdown_fallback_parses_groups() -> None:
     assert groups and groups[0]["file_ids"] == ["src/auth.py"]
 
 
-def test_compose_markdown_fallback_reachable_in_tool_mode() -> None:
-    # markdown_mode=False must still fall back to markdown parsing when the
-    # model emits prose instead of a tool call.
+def test_compose_plain_text_parser_routes_markdown_groups() -> None:
+    # Prose output is routed through the markdown parser.
     parsed = api._parse_plain_text(
-        "create_compose_intent_plan", "G1 := feat(api): add login\n\nfiles:\n- G1: src/auth.py", False
+        "create_compose_intent_plan", "G1 := feat(api): add login\n\nfiles:\n- G1: src/auth.py"
     )
     groups = parsed.get("groups") if isinstance(parsed, dict) else None
     assert groups and groups[0]["file_ids"] == ["src/auth.py"]

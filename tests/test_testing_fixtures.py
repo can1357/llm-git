@@ -122,11 +122,11 @@ def test_holistic_summary_uses_rust_prefix_stripping() -> None:
 def test_generate_summary_falls_back_when_model_summary_fails_validation(monkeypatch) -> None:
     import lgit.api as api_module
 
-    async def fake_response(config, spec, *, markdown_output=None):
-        del config, spec, markdown_output
+    async def fake_response(config, spec):
+        del config, spec
         return api_module.OneShotResponse(
             output={"summary": "adds invalid present tense"},
-            source=api_module.OneShotSource.TOOL_CALL,
+            source=api_module.OneShotSource.OUTPUT_JSON_PARSE,
         )
 
     monkeypatch.setattr(api_module, "_run_oneshot_response", fake_response)

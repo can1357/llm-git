@@ -26,7 +26,7 @@ def _prepare_prompts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_split_prompt_template_lf() -> None:
-    content = "system text\nmore system\n======USER=======\nuser body\n"
+    content = "system text\nmore system\n<!-- USER -->\nuser body\n"
 
     system, user = split_prompt_template(content)
 
@@ -35,7 +35,7 @@ def test_split_prompt_template_lf() -> None:
 
 
 def test_split_prompt_template_crlf() -> None:
-    content = "system text\r\nmore system\r\n======USER=======\r\nuser body\r\n"
+    content = "system text\r\nmore system\r\n<!-- USER -->\r\nuser body\r\n"
 
     system, user = split_prompt_template(content)
 
@@ -57,7 +57,6 @@ def test_render_analysis_prompt_requests_holistic_summary(tmp_path: Path, monkey
 
     parts = render_analysis_prompt(
         AnalysisParams(
-            variant="default",
             stat="src/api/client.rs | 24 +++++++++++++++---------",
             diff="diff --git a/src/api/client.rs b/src/api/client.rs\n",
             scope_candidates="api",
@@ -65,32 +64,27 @@ def test_render_analysis_prompt_requests_holistic_summary(tmp_path: Path, monkey
     )
 
     assert "Generate Summary" in parts.system
-    assert '"summary"' in parts.system
+    assert "# type(scope): summary" in parts.system
     assert "umbrella headline for the whole changeset" in parts.system
     assert "Does not copy detail #1" in parts.system
 
 
-def test_render_changelog_prompt_variants_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_render_changelog_prompt_renders_markdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _prepare_prompts(tmp_path, monkeypatch)
 
-    for variant in ("default", "markdown"):
-        parts = render_changelog_prompt(
-            variant,
-            "CHANGELOG.md",
-            False,
-            "src/api.rs | 4 ++--",
-            "diff --git a/src/api.rs b/src/api.rs\n",
-            "- Added existing entry",
-        )
+    parts = render_changelog_prompt(
+        "CHANGELOG.md",
+        False,
+        "src/api.rs | 4 ++--",
+        "diff --git a/src/api.rs b/src/api.rs\n",
+        "- Added existing entry",
+    )
 
-        assert "src/api.rs" in parts.user
-        assert "Added existing entry" in parts.user
-        if variant == "markdown":
-            assert "# Added" in parts.system
-            assert '{"entries"' not in parts.system
-            assert "<exception>" in parts.system
-        else:
-            assert '{"entries"' in parts.system
+    assert "src/api.rs" in parts.user
+    assert "Added existing entry" in parts.user
+    assert "# Added" in parts.system
+    assert '{"entries"' not in parts.system
+    assert "<exception>" in parts.system
 
 
 def test_render_fast_prompt_surfaces_type_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,7 +92,6 @@ def test_render_fast_prompt_surfaces_type_guidance(tmp_path: Path, monkeypatch: 
 
     parts = render_fast_prompt(
         FastPromptParams(
-            variant="default",
             stat="prompts/analysis/default.md | 5 +++++",
             diff="diff --git a/prompts/analysis/default.md b/prompts/analysis/default.md\n",
             scope_candidates="prompts",
@@ -116,7 +109,6 @@ def test_render_fast_prompt_omits_commit_types_when_absent(tmp_path: Path, monke
 
     parts = render_fast_prompt(
         FastPromptParams(
-            variant="default",
             stat="src/main.rs | 5 +++++",
             diff="diff --git a/src/main.rs b/src/main.rs\n",
             scope_candidates="",
@@ -130,7 +122,6 @@ def test_render_reduce_prompt_guides_grouped_synthesis(tmp_path: Path, monkeypat
     _prepare_prompts(tmp_path, monkeypatch)
 
     parts = render_reduce_prompt(
-        "default",
         '[{"file":"src/a.rs","observations":["Added retry handling."]}]',
         "src/a.rs | 10 +++++-----",
         "api",
@@ -146,7 +137,6 @@ def test_render_compose_intent_prompt(tmp_path: Path, monkeypatch: pytest.Monkey
 
     parts = render_compose_intent_prompt(
         ComposeIntentPromptParams(
-            variant="default",
             max_commits=3,
             stat="src/foo.rs | 10 +++++-----",
             snapshot_summary="- F1 src/foo.rs",
@@ -157,7 +147,7 @@ def test_render_compose_intent_prompt(tmp_path: Path, monkeypatch: pytest.Monkey
         )
     )
 
-    assert "create_compose_intent_plan" in parts.system
+    assert "Plan atomic commits" in parts.system
     assert "max_commits: 3" in parts.user
     assert "src/foo.rs" in parts.user
     assert "<commit_types>" in parts.user
@@ -168,7 +158,6 @@ def test_render_summary_prompt_guides_umbrella_title(tmp_path: Path, monkeypatch
     _prepare_prompts(tmp_path, monkeypatch)
 
     parts = render_summary_prompt(
-        "default",
         "feat",
         "api",
         "72",
@@ -189,12 +178,11 @@ def test_render_compose_bind_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     parts = render_compose_bind_prompt(
         ComposeBindPromptParams(
-            variant="default",
             groups="- G1 [feat(api)] Added endpoint",
             ambiguous_files="- F2 src/api.rs candidates: G1",
         )
     )
 
-    assert "bind_compose_hunks" in parts.system
+    assert "Assign hunks to existing commit groups" in parts.system
     assert "G1" in parts.user
     assert "src/api.rs" in parts.user

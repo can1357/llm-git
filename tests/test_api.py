@@ -15,12 +15,9 @@ def _summary_spec() -> api_module.OneShotSpec:
         operation="summary",
         model="gpt-4o-mini-probe-clear-test",
         prompt_family="summary",
-        prompt_variant="default",
         system_prompt="Summarize.",
         user_prompt="A large diff.",
         tool_name="create_commit_summary",
-        tool_description="Create a commit summary",
-        schema=api_module.strict_json_schema({"summary": {"type": "string"}}, ["summary"]),
         progress_label="summary",
         cacheable=False,
     )
@@ -60,14 +57,6 @@ def test_strip_type_prefix_uppercase_type() -> None:
     assert api_module.strip_type_prefix("FIX(api): fixed bug", "fix", "api") == "fixed bug"
 
 
-def test_strict_json_schema_disallows_extra_properties() -> None:
-    schema = api_module.strict_json_schema({"summary": {"type": "string"}}, ["summary"])
-
-    assert schema["type"] == "object"
-    assert schema["required"] == ["summary"]
-    assert schema["additionalProperties"] is False
-
-
 def test_env_flag_value_enabled_uses_boolean_semantics() -> None:
     assert env_flag_value_enabled(None) is False
     assert env_flag_value_enabled("") is False
@@ -96,10 +85,9 @@ def test_retry_api_call_does_not_retry_context_length_errors(monkeypatch: pytest
         config: CommitConfig,
         spec: api_module.OneShotSpec,
         mode: Any,
-        markdown_mode: bool,
     ) -> tuple[dict[str, Any], str]:
         nonlocal attempts
-        del config, spec, mode, markdown_mode
+        del config, spec, mode
         attempts += 1
         raise ApiContextLengthExceeded(
             operation="analysis",
@@ -121,10 +109,8 @@ def test_run_oneshot_returns_context_length_error(monkeypatch: pytest.MonkeyPatc
     async def fake_run_oneshot_response(
         config: CommitConfig,
         spec: api_module.OneShotSpec,
-        *,
-        markdown_output: bool | None = None,
     ) -> api_module.OneShotResponse:
-        del config, spec, markdown_output
+        del config, spec
         raise ApiContextLengthExceeded(
             operation="summary",
             model="gpt-4o-mini-probe-clear-test",

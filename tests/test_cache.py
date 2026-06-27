@@ -12,12 +12,9 @@ def _material() -> CacheMaterial:
         operation="test",
         model="test-model",
         tool_name="tool",
-        tool_description="desc",
         system_prompt="system",
         user_prompt="user",
-        schema={"foo": "bar"},
         api_mode="ChatCompletions",
-        markdown_output=True,
     )
 
 

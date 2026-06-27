@@ -123,7 +123,6 @@ def test_fast_prompt_renders_from_packaged_resources(tmp_path, monkeypatch) -> N
 
     system, user = render_prompt(
         "fast",
-        "default",
         {
             "stat": "1 file changed, 2 insertions(+)",
             "diff": "diff --git a/lgit/config.py b/lgit/config.py",
@@ -134,7 +133,7 @@ def test_fast_prompt_renders_from_packaged_resources(tmp_path, monkeypatch) -> N
     )
 
     assert system.startswith("You are a senior engineer writing a conventional commit message.")
-    assert "create_fast_commit" in system
+    assert "type(scope): summary" in system
     assert "<file_changes>\n1 file changed, 2 insertions(+)\n</file_changes>" in user
     assert "<scope_candidates>\nconfig\n</scope_candidates>" in user
     assert "<commit_types>\n- config: App/runtime config\n</commit_types>" in user

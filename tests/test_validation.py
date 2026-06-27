@@ -120,19 +120,20 @@ def test_validate_no_type_verb_overlap() -> None:
     assert "type_word_repetition" not in _error_codes(test_report.errors)
 
 
-def test_validate_morphology_based_past_tense() -> None:
-    for verb in ("added", "configured", "exposed", "formatted", "clarified"):
-        report = validate_commit_message(_commit("feat", f"{verb} something"), CommitConfig())
-        assert report.ok, f"regular verb {verb!r} should be accepted"
+@pytest.mark.parametrize(
+    "verb",
+    ["added", "configured", "exposed", "formatted", "clarified", "made", "built", "ran", "wrote", "split"],
+)
+def test_validate_accepts_past_tense_verb(verb: str) -> None:
+    report = validate_commit_message(_commit("feat", f"{verb} something"), CommitConfig())
+    assert report.ok, f"verb {verb!r} should be accepted"
 
-    for verb in ("made", "built", "ran", "wrote", "split"):
-        report = validate_commit_message(_commit("feat", f"{verb} something"), CommitConfig())
-        assert report.ok, f"irregular verb {verb!r} should be accepted"
 
-    for word in ("hundred", "red", "bed"):
-        report = validate_commit_message(_commit("feat", f"{word} something"), CommitConfig())
-        assert not report.ok, f"non-verb {word!r} should be rejected"
-        assert _error_codes(report.errors) == {"present_tense_first_word"}
+@pytest.mark.parametrize("word", ["hundred", "red", "bed"])
+def test_validate_rejects_non_verb_first_word(word: str) -> None:
+    report = validate_commit_message(_commit("feat", f"{word} something"), CommitConfig())
+    assert not report.ok, f"non-verb {word!r} should be rejected"
+    assert _error_codes(report.errors) == {"present_tense_first_word"}
 
 
 def test_validate_scope_empty_string() -> None:

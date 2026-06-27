@@ -8,6 +8,7 @@ from lgit.api import _extract_json_from_content
 from lgit.changelog import (
     UnreleasedSection,
     _format_existing_entries,
+    _parse_jsonish,
     _staged_changelog_content,
     parse_unreleased_section,
     stage_changelog_blob,
@@ -75,6 +76,26 @@ def test_extract_json_from_content_generic_block() -> None:
 ```"""
 
     assert _extract_json_from_content(content) == '{"entries": {"Fixed": ["bug fix"]}}'
+
+
+def test_parse_jsonish_parses_markdown_changelog() -> None:
+    content = "# Added\n- Added websocket reconnects.\n\n# Fixed\n- Fixed retry loop."
+
+    assert _parse_jsonish(content) == {
+        "entries": {"Added": ["Added websocket reconnects."], "Fixed": ["Fixed retry loop."]}
+    }
+
+
+def test_parse_jsonish_falls_back_to_json_object() -> None:
+    content = '```json\n{"entries": {"Added": ["entry 1"]}}\n```'
+
+    assert _parse_jsonish(content) == {"entries": {"Added": ["entry 1"]}}
+
+
+def test_parse_jsonish_decodes_pretty_printed_json_over_markdown() -> None:
+    content = '{\n  "entries": {\n    "Added": ["Added websocket reconnects."]\n  }\n}'
+
+    assert _parse_jsonish(content) == {"entries": {"Added": ["Added websocket reconnects."]}}
 
 
 def test_parse_unreleased_section() -> None:
