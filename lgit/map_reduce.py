@@ -187,10 +187,10 @@ async def _map_phase(
         for idx, observation in batch_result:
             observations_by_index[idx] = observation
     observations: list[FileObservation] = []
-    for idx, observation in enumerate(observations_by_index):
-        if observation is None:
+    for idx, maybe_observation in enumerate(observations_by_index):
+        if maybe_observation is None:
             raise RuntimeError(f"Missing map observation for {files[idx].filename}")
-        observations.append(observation)
+        observations.append(maybe_observation)
     return observations
 
 

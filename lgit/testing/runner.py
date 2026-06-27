@@ -120,6 +120,7 @@ class TestRunner:
         def build_fallback_summary() -> str:
             return fallback_summary(stat=fixture.input.stat, details=details, limit=limit)
 
+        summary: str | None
         if analysis.summary:
             summary = analysis.summary
         else:
@@ -140,6 +141,8 @@ class TestRunner:
                         )
                     except Exception:
                         summary = build_fallback_summary()
+        if summary is None:
+            summary = build_fallback_summary()
         summary = summary[:limit].rstrip(" .")
         commit = ConventionalCommit.from_raw(
             commit_type=str(analysis.commit_type),

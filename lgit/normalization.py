@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 import unicodedata
-from dataclasses import FrozenInstanceError, is_dataclass, replace
+from dataclasses import replace
 from typing import Any
 
+from .models import ConventionalCommit
 from .validation import is_past_tense_verb, present_to_past, split_verb_token, verb_stem
 
 _DEFAULT_MAX_DETAIL_TOKENS = 200
@@ -275,14 +276,11 @@ def post_process_commit_message(msg: Any, config: Any | None = None) -> Any:
         cleaned_body.append(cleaned)
     cap_details(cleaned_body, int(getattr(config, "max_detail_tokens", _DEFAULT_MAX_DETAIL_TOKENS)))
 
-    try:
-        msg.summary = normalized_summary
-        msg.body = cleaned_body
-        msg.footers = footers
-    except AttributeError, FrozenInstanceError:
-        if is_dataclass(msg):
-            return replace(msg, summary=normalized_summary, body=tuple(cleaned_body), footers=tuple(footers))
-        raise
+    if isinstance(msg, ConventionalCommit):
+        return replace(msg, summary=normalized_summary, body=tuple(cleaned_body), footers=tuple(footers))
+    msg.summary = normalized_summary
+    msg.body = cleaned_body
+    msg.footers = footers
     return msg
 
 

@@ -35,6 +35,13 @@ from .validation import check_type_scope_consistency, validate_commit_message, v
 _COMPLETION_SHELLS = ("bash", "zsh", "fish", "powershell", "elvish")
 
 
+class _ScopeUnchanged:
+    pass
+
+
+_SCOPE_UNCHANGED = _ScopeUnchanged()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the public command-line parser."""
     parser = argparse.ArgumentParser(
@@ -350,7 +357,7 @@ async def _run_test_mode(args: argparse.Namespace, config: CommitConfig) -> int:
     except ImportError:
         from .testing.runner import run_test_mode as runner
     try:
-        result = runner(args, config)
+        result: Any = runner(args, config)
         if inspect.isawaitable(result):
             result = await result
     except RuntimeError as exc:
@@ -680,13 +687,16 @@ def _replace_commit(
     message: ConventionalCommit,
     *,
     summary: str | None = None,
-    scope: str | None | object = ...,
+    scope: str | None | _ScopeUnchanged = _SCOPE_UNCHANGED,
     config: CommitConfig,
     args: argparse.Namespace,
 ) -> ConventionalCommit:
+    scope_value = (
+        (None if message.scope is None else str(message.scope)) if isinstance(scope, _ScopeUnchanged) else scope
+    )
     updated = ConventionalCommit.from_raw(
         commit_type=str(message.commit_type),
-        scope=(None if message.scope is None else str(message.scope)) if scope is ... else scope,
+        scope=scope_value,
         summary=str(message.summary) if summary is None else summary,
         body=message.body,
         footers=message.footers,

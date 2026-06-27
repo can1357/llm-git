@@ -729,7 +729,7 @@ def _record_failure(
 
 
 def _anthropic_text(text: str, cache: bool) -> dict[str, Any]:
-    content = {"type": "text", "text": text}
+    content: dict[str, Any] = {"type": "text", "text": text}
     if cache:
         content["cache_control"] = {"type": "ephemeral"}
     return content

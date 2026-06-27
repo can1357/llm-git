@@ -152,7 +152,7 @@ def parse_unreleased_section(content: str, path: str | os.PathLike[str] = "CHANG
 def write_entries(
     content: str,
     unreleased: UnreleasedSection,
-    new_entries: Mapping[ChangelogCategory | str, Sequence[str]],
+    new_entries: Mapping[ChangelogCategory, Sequence[str]] | Mapping[str, Sequence[str]],
 ) -> str:
     """Insert new entries at the top of the Unreleased section."""
 
@@ -217,11 +217,11 @@ def detect_boundaries(
     for changelog in changelogs:
         path = Path(changelog)
         rel = _relative_to(path, repo_dir)
-        parent = str(Path(rel).parent).replace("\\", "/")
-        if parent in ("", "."):
+        parent_key = str(Path(rel).parent).replace("\\", "/")
+        if parent_key in ("", "."):
             root_changelog = path
         else:
-            dir_to_changelog[parent] = path
+            dir_to_changelog[parent_key] = path
 
     grouped: dict[Path, list[str]] = {}
     for file in files:
@@ -349,7 +349,9 @@ def _category_or_none(name: str) -> ChangelogCategory | None:
     return ChangelogCategory.from_name(name) if normalized in valid else None
 
 
-def _coerce_entries(entries: Mapping[ChangelogCategory | str, Sequence[str]]) -> dict[ChangelogCategory, list[str]]:
+def _coerce_entries(
+    entries: Mapping[ChangelogCategory, Sequence[str]] | Mapping[str, Sequence[str]],
+) -> dict[ChangelogCategory, list[str]]:
     coerced: dict[ChangelogCategory, list[str]] = {}
     for key, values in entries.items():
         category = key if isinstance(key, ChangelogCategory) else ChangelogCategory.from_name(str(key))

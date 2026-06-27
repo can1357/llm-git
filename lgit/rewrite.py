@@ -171,7 +171,7 @@ async def generate_for_commit(commit: Any, config: Any, dir: str | os.PathLike[s
     if len(diff) > max_diff_length:
         diff = smart_truncate_diff(diff, max_diff_length, config)
 
-    scope_candidates, _ = extract_scope_candidates("commit", commit_hash, dir, config)
+    scope_candidates, _ = extract_scope_candidates("commit", commit_hash, os.fspath(dir), config)
     analysis = await generate_conventional_analysis(
         config, stat, diff, scope_candidates, user_context=None, debug_output=None
     )

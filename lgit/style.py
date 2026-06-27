@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 from collections.abc import Awaitable
-from typing import TextIO
+from typing import Any, TextIO
 
 _COLOR_ENABLED: bool | None = None
 _PIPE_MODE: bool | None = None
@@ -259,7 +259,7 @@ def _wrap_line(line: str, max_width: int) -> list[str]:
     return wrapped or [""]
 
 
-async def _spin(message: str, task: asyncio.Future[object]) -> None:
+async def _spin(message: str, task: asyncio.Future[Any]) -> None:
     frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     index = 0
     while not task.done():

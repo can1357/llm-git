@@ -7,7 +7,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -21,7 +21,7 @@ class RepoMetadata:
     package_count: int | None = None
 
     @classmethod
-    def detect(cls, dir: str | Path) -> Self:
+    def detect(cls, dir: str | Path) -> RepoMetadata:
         """Detect repository metadata from ``dir``."""
 
         root = Path(dir)
