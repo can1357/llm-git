@@ -460,6 +460,70 @@ def test_stage_executable_group_materializes_new_gitlink_from_snapshot(empty_rep
     assert f"+Subproject commit {oid}" in staged
 
 
+def test_get_compose_diff_detects_unstaged_whole_file_move(empty_repo: Path, run_git: GitRunner) -> None:
+    _write(empty_repo, "src/old.rs", _fixture_file_original())
+    _commit_all(empty_repo, run_git, "initial")
+    (empty_repo / "src/old.rs").rename(empty_repo / "src/new.rs")
+
+    snapshot = _snapshot(empty_repo)
+
+    assert len(snapshot.files) == 1
+    moved = snapshot.file_by_path("src/new.rs")
+    assert moved is not None
+    assert moved.old_path == "src/old.rs"
+    assert snapshot.file_by_path("src/old.rs") is None
+    assert snapshot.touched_paths() == ["src/new.rs", "src/old.rs"]
+
+
+def test_stage_executable_group_renames_file_atomically(empty_repo: Path, run_git: GitRunner) -> None:
+    _write(empty_repo, "src/old.rs", _fixture_file_original())
+    _commit_all(empty_repo, run_git, "initial")
+    (empty_repo / "src/old.rs").rename(empty_repo / "src/new.rs")
+    snapshot = pin_snapshot_worktree_state(_snapshot(empty_repo), empty_repo)
+    moved = snapshot.file_by_path("src/new.rs")
+    assert moved is not None
+    group = _group(moved.file_id, moved.hunk_ids, rationale="move file")
+
+    with TempGitIndex(empty_repo) as index:
+        read_tree_into_index(index.path, "HEAD", empty_repo)
+        outcome = stage_executable_group_in_index(snapshot, group, empty_repo, index.path)
+        listed = lgit_run_git(
+            ["ls-files", "--", "src/old.rs", "src/new.rs"], cwd=empty_repo, index_file=index.path
+        ).stdout.split()
+        new_blob = _show_index_blob(empty_repo, index, "src/new.rs")
+
+    assert outcome.result == StageResult.STAGED
+    assert not outcome.skipped
+    # A whole-file move is one commit: the destination is added and the source is dropped together.
+    assert listed == ["src/new.rs"]
+    assert new_blob == _fixture_file_original()
+
+
+def test_stage_executable_group_renames_and_modifies_file(empty_repo: Path, run_git: GitRunner) -> None:
+    _write(empty_repo, "src/old.rs", _fixture_file_original())
+    _commit_all(empty_repo, run_git, "initial")
+    (empty_repo / "src/old.rs").unlink()
+    _write(empty_repo, "src/new.rs", _fixture_file_two_hunks())
+    snapshot = pin_snapshot_worktree_state(_snapshot(empty_repo), empty_repo)
+    moved = snapshot.file_by_path("src/new.rs")
+    assert moved is not None
+    assert moved.old_path == "src/old.rs"
+    group = _group(moved.file_id, moved.hunk_ids, rationale="move and edit")
+
+    with TempGitIndex(empty_repo) as index:
+        read_tree_into_index(index.path, "HEAD", empty_repo)
+        outcome = stage_executable_group_in_index(snapshot, group, empty_repo, index.path)
+        listed = lgit_run_git(
+            ["ls-files", "--", "src/old.rs", "src/new.rs"], cwd=empty_repo, index_file=index.path
+        ).stdout.split()
+        new_blob = _show_index_blob(empty_repo, index, "src/new.rs")
+
+    assert outcome.result == StageResult.STAGED
+    assert listed == ["src/new.rs"]
+    assert "alpha changed" in new_blob
+    assert "beta changed" in new_blob
+
+
 def test_stage_executable_group_skips_file_whose_patch_no_longer_applies(empty_repo: Path, run_git: GitRunner) -> None:
     _write(empty_repo, "src/a.rs", _fixture_file_original())
     _write(empty_repo, "src/b.rs", "fn b() {}\n")
