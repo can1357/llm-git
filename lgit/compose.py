@@ -332,12 +332,12 @@ async def run_compose_round(args: _ComposeArgs, config: _ComposeConfig, round_nu
     diff = git.get_compose_diff(repo_dir, config)
     stat = git.get_compose_stat(repo_dir)
     snapshot = build_compose_snapshot(diff, stat)
-    pin_snapshot_worktree_state(snapshot, repo_dir)
+    snapshot = pin_snapshot_worktree_state(snapshot, repo_dir)
     _save_debug_artifact(args, f"compose_round_{round_number}_snapshot.json", _snapshot_to_jsonable(snapshot))
 
     token_counter = _create_token_counter(config)
     observations = []
-    if _should_collect_compose_observations(snapshot, config, token_counter):
+    if not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(snapshot.diff, config, token_counter):
         observations = await map_reduce.observe_diff_files(snapshot.diff, config.summary_model, config, token_counter)
     if observations:
         _save_debug_artifact(
@@ -427,7 +427,7 @@ async def execute_compose(
     if current_index_tree == base_state.index_tree:
         git.reset_mixed_to(parent_hash, repo_dir)
     else:
-        paths = [file.path for file in snapshot.files]
+        paths = snapshot.touched_paths()
         git.reset_paths_to(parent_hash, paths, repo_dir)
     return commit_hashes
 
@@ -471,7 +471,7 @@ async def _analyze_compose_intent(
                 user_prompt=parts.user,
                 tool_name="create_compose_intent_plan",
                 progress_label="compose intent planner",
-                debug=api.OneShotDebug(debug_dir, None, "compose_intent") if debug_dir else None,
+                debug=api.OneShotDebug(Path(debug_dir), None, "compose_intent") if debug_dir else None,
                 cacheable=True,
             ),
         )
@@ -637,10 +637,6 @@ def _is_large_compose_snapshot(snapshot: ComposeSnapshot) -> bool:
     )
 
 
-def _should_collect_compose_observations(snapshot: ComposeSnapshot, config: _ComposeConfig, counter: Any) -> bool:
-    return not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(snapshot.diff, config, counter)
-
-
 def _snapshot_summary_budget(snapshot: ComposeSnapshot) -> SnapshotSummaryBudget:
     if _is_large_compose_snapshot(snapshot):
         return SnapshotSummaryBudget(1, 2)
@@ -756,7 +752,7 @@ def _collect_planning_buckets(
 ) -> list[tuple[str, tuple[str, ...]]]:
     files = [file for file_id in file_ids for file in [snapshot.file_by_id(file_id)] if file is not None]
     hunk_count = sum(len(file.hunk_ids) for file in files)
-    max_depth = max((_path_depth(file.path) for file in files), default=depth)
+    max_depth = max((len(file.path.split("/")) for file in files), default=depth)
     if (
         (len(files) <= COMPOSE_AREA_TARGET_MAX_FILES and hunk_count <= COMPOSE_AREA_TARGET_MAX_HUNKS)
         or depth >= COMPOSE_AREA_TARGET_MAX_DEPTH
@@ -774,12 +770,8 @@ def _collect_planning_buckets(
     return out
 
 
-def _path_depth(path: str) -> int:
-    return len(path.split("/"))
-
-
 def _prefix_at_depth(path: str, depth: int) -> str:
-    return "/".join(path.split("/")[: max(0, min(depth, _path_depth(path)))])
+    return "/".join(path.split("/")[: max(0, min(depth, len(path.split("/"))))])
 
 
 def _planning_bucket_label(snapshot: ComposeSnapshot, file_ids: Sequence[str]) -> str:
@@ -831,11 +823,11 @@ def _render_planning_snapshot_summary(
         out.append(
             f"- {target.target_id} {target.label} ({len(target.file_ids)} files, {target.hunk_count} hunks, +{target.additions}/-{target.deletions})"
         )
-        sample_files = [
-            snapshot.file_by_id(file_id).path
-            for file_id in _sample_file_ids_for_target(target)
-            if snapshot.file_by_id(file_id) is not None
-        ]
+        sample_files: list[str] = []
+        for file_id in _sample_file_ids_for_target(target):
+            file = snapshot.file_by_id(file_id)
+            if file is not None:
+                sample_files.append(file.path)
         if sample_files:
             out.append(f"  files: {', '.join(sample_files)}")
             omitted = len(target.file_ids) - len(sample_files)
@@ -1374,7 +1366,7 @@ async def _request_binding(
                 user_prompt=parts.user,
                 tool_name="bind_compose_hunks",
                 progress_label="compose hunk binder",
-                debug=api.OneShotDebug(debug_dir, None, debug_name) if debug_dir else None,
+                debug=api.OneShotDebug(Path(debug_dir), None, debug_name) if debug_dir else None,
                 cacheable=True,
             ),
         )
@@ -1419,9 +1411,9 @@ def _evaluate_binding(
                 assigned_hunk_to_group[hunk_id] = group_id
     assigned_by_group: dict[str, list[str]] = defaultdict(list)
     for hunk in snapshot.hunks:
-        group_id = assigned_hunk_to_group.get(hunk.hunk_id)
-        if group_id:
-            assigned_by_group[group_id].append(hunk.hunk_id)
+        assigned_group_id = assigned_hunk_to_group.get(hunk.hunk_id)
+        if assigned_group_id:
+            assigned_by_group[assigned_group_id].append(hunk.hunk_id)
     unresolved = [
         hunk.hunk_id
         for hunk in snapshot.hunks
@@ -1647,7 +1639,7 @@ def _group_from_mapping(item: Any, snapshot: ComposeSnapshot, idx: int) -> Compo
 def _object_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     return vars(value)
 
@@ -1751,9 +1743,11 @@ async def _message_parts_from_api(
 
 
 def _fallback_summary(group: ComposeExecutableGroup, snapshot: ComposeSnapshot) -> str:
-    files = [
-        snapshot.file_by_id(file_id).path for file_id in group.file_ids if snapshot.file_by_id(file_id) is not None
-    ]
+    files: list[str] = []
+    for file_id in group.file_ids:
+        file = snapshot.file_by_id(file_id)
+        if file is not None:
+            files.append(file.path)
     target = files[0] if len(files) == 1 else (str(group.scope) if group.scope else "compose changes")
     verb = "updated"
     if str(group.commit_type) == "docs":
@@ -1907,7 +1901,7 @@ def _snapshot_to_jsonable(snapshot: ComposeSnapshot) -> dict[str, Any]:
 
 
 def _observation_to_jsonable(observation: Any) -> dict[str, Any]:
-    if is_dataclass(observation):
+    if is_dataclass(observation) and not isinstance(observation, type):
         return asdict(observation)
     if isinstance(observation, Mapping):
         return dict(observation)
