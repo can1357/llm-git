@@ -206,9 +206,9 @@ def parse_file_observations_markdown(text: str) -> list[dict[str, Any]]:
 
     payload = _try_json(text)
     if isinstance(payload, Mapping):
-        files = payload.get("files", [])
-        if isinstance(files, list):
-            return [_coerce_file_observations(item) for item in files if isinstance(item, Mapping)]
+        payload_files = payload.get("files", [])
+        if isinstance(payload_files, list):
+            return [_coerce_file_observations(item) for item in payload_files if isinstance(item, Mapping)]
     if isinstance(payload, list):
         return [_coerce_file_observations(item) for item in payload if isinstance(item, Mapping)]
 
