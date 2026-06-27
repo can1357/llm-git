@@ -372,18 +372,20 @@ def get_git_numstat(
     raise ValidationFailure(f"unknown mode: {mode!r}")
 
 
-def get_compose_diff(dir: str | os.PathLike[str] = ".", config: object | None = None) -> str:
-    """Return the staged compose-mode diff (index vs HEAD), with rename detection.
+def get_compose_diff(
+    dir: str | os.PathLike[str] = ".", config: object | None = None, target_tree: str | None = None
+) -> str:
+    """Return the compose-mode diff with rename detection.
 
-    Compose splits only what the regular commit path would commit: the staged tree. Callers
-    auto-stage first (``git add -A`` when nothing is staged), so untracked files and unstaged
-    moves enter scope exactly when they would for a normal commit — never otherwise.
+    With ``target_tree`` (the staged tree captured at invocation), diff ``HEAD`` against that
+    fixed tree, so each loop round sees only the changes still needed to reach it — never
+    anything the user staged mid-run. Without it, diff the live index (``--cached``); this is
+    what a normal commit would commit, since callers auto-stage first.
     """
 
     max_len = int(getattr(config, "max_diff_length", 200_000))
     args = [
         "diff",
-        "--cached",
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
@@ -391,17 +393,21 @@ def get_compose_diff(dir: str | os.PathLike[str] = ".", config: object | None = 
         "--src-prefix=a/",
         "--dst-prefix=b/",
     ]
-    diff = _diff_with_retry(args, dir, max_len)
+    if target_tree is None:
+        diff = _diff_with_retry([*args, "--cached"], dir, max_len)
+    else:
+        diff = _diff_with_retry([*args, "HEAD", target_tree], dir, max_len, insert_u1_before="HEAD")
     if not diff.strip():
         raise NoChanges("compose")
     return diff
 
 
-def get_compose_stat(dir: str | os.PathLike[str] = ".") -> str:
-    """Return the staged compose-mode --stat output (index vs HEAD), with rename detection."""
+def get_compose_stat(dir: str | os.PathLike[str] = ".", target_tree: str | None = None) -> str:
+    """Return the compose-mode --stat output with rename detection (see :func:`get_compose_diff`)."""
 
-    args = ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--stat"]
-    stat = run_git(args, cwd=dir).stdout
+    args = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames"]
+    scope = ["--cached"] if target_tree is None else ["HEAD", target_tree]
+    stat = run_git([*args, *scope, "--stat"], cwd=dir).stdout
     if not stat.strip():
         raise NoChanges("compose")
     return stat

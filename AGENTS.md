@@ -103,7 +103,7 @@ uv run pytest -k truncate                    # Match by name
 8. Create commit (unless dry-run)
 
 **Compose Mode** (`lgit/compose.py:run_compose_mode`):
-1. Scope to the staged tree, exactly like the regular commit path: callers `git add -A` first only when nothing is staged (`_run_compose` → `_auto_stage_if_needed`); the snapshot is then `git diff --cached` (index vs HEAD, with rename detection). Unstaged worktree edits and untracked files are out of scope. The loop is unconstrained — each round commits what its plan covers and re-plans the remaining staged diff until empty — but errors out if a round produces no commits while staged changes remain (a no-op plan), instead of spinning forever.
+1. Scope to the staged tree, exactly like the regular commit path: callers `git add -A` first only when nothing is staged (`_run_compose` → `_auto_stage_if_needed`). `run_compose_mode` then captures that staged tree ONCE (`git write-tree`) as the fixed target; every round diffs `HEAD` against it (`git diff HEAD <target>`, with rename detection) and pins blobs from it — so anything staged or edited mid-run is excluded and stays staged, exactly as a normal commit would leave it. Unstaged worktree edits and untracked files are never in scope. The loop is unconstrained — each round commits what its plan covers and re-plans the rest until `HEAD` reaches the target — but errors out if a round produces no commits while changes remain (a no-op plan), instead of spinning forever.
 2. Intent analysis - AI identifies logical commit groups from markdown:
    - Returns group headings with file IDs/hunk IDs that are mapped to compose groups
    - **CRITICAL**: Each group specifies file paths + hunk headers (e.g., `@@ -10,5 +10,7 @@`) or `["ALL"]`
@@ -152,14 +152,14 @@ uv run pytest -k truncate                    # Match by name
 **Solution**: Everything staged during a compose round comes from the immutable staged-index snapshot captured at the start of that round — never from the live worktree.
 
 **Key steps:**
-- Build the compose snapshot - Parse the captured `git diff --cached` into `ComposeFile`/`ComposeHunk` records with stable ids
-- Pin staged-index state - Capture each changed path's staged blob (object `{mode, oid}`, or deleted) from the index at capture time via `git ls-files -s`; covers regular blobs, symlinks, and submodule gitlinks uniformly
+- Build the compose snapshot - Parse the round's `git diff HEAD <target>` into `ComposeFile`/`ComposeHunk` records with stable ids
+- Pin blobs from the target tree - Capture each changed path's blob (object `{mode, oid}`, or deleted) from the fixed target tree via `git ls-tree` (live index for the no-target test path); covers regular blobs, symlinks, and submodule gitlinks uniformly
 - Stage a group into an isolated temp index:
   - Partial file: `git apply --cached --3way` with the snapshot-derived patch; on conflict, re-splice from the base blob
   - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
 - Splice hunks into base - Reconstruct file content from base blob + selected hunks without `git apply`
 
-**Important**: The snapshot (diff + pins) is captured ONCE per round in `run_compose_round` before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). The real index is then left untouched — it is the round's staged tree, so committed paths match the new HEAD (clean) while staged changes the plan did not cover, plus any staging the user added mid-run, stay staged for the next round. `run_compose_mode` re-snapshots that remaining `git diff --cached` and loops until it is empty, erroring if a round commits nothing while changes remain.
+**Important**: The target staged tree is captured ONCE in `run_compose_mode`; each round's snapshot (diff + pins) is derived from it before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). The real index is then left untouched — so committed paths match the new HEAD (clean) while anything the user stages or edits mid-run stays exactly as they left it. `run_compose_mode` re-diffs `HEAD` against the fixed target and loops until they match, erroring if a round commits nothing while changes remain.
 
 **Snapshot isolation elsewhere:**
 - Standard/fast staged mode captures the index tree after auto-stage/changelog (`lgit/cli.py`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.

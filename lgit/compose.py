@@ -272,23 +272,27 @@ def capture_compose_base_state(repo_dir: str | os.PathLike[str] = ".") -> Compos
 
 
 async def run_compose_mode(args: _ComposeArgs, config: CommitConfig) -> list[str]:
-    """Split the staged tree into atomic commits, looping until the staged diff is empty.
+    """Split the staged tree into atomic commits, looping until that tree is fully committed.
 
-    Compose mirrors the regular commit path's scope: it only ever touches staged changes
-    (callers auto-stage when nothing is staged). One LLM plan may not cover every staged
-    change, so each round commits what it can and re-plans the remainder. The loop is
-    unconstrained, but fails fast if a round makes no progress — staged changes still remain
-    yet no commit was produced — instead of spinning forever or silently leaving them behind.
+    Compose mirrors the regular commit path exactly: it commits only the tree that was staged at
+    invocation (callers auto-stage when nothing is staged). That target tree is captured ONCE up
+    front, and every round diffs ``HEAD`` against it — so anything the user stages mid-run is
+    ignored and stays staged, just like a normal commit. One LLM plan may not cover the whole
+    tree, so each round commits what it can and re-plans the remainder. The loop is unconstrained
+    but fails fast if a round makes no progress (changes remain yet nothing was committed) instead
+    of spinning forever or silently leaving the target half-committed.
     """
+    repo_dir = args.dir
+    target_tree = git.write_real_index_tree(repo_dir)
     all_hashes: list[str] = []
     round_number = 1
     while True:
-        hashes = await run_compose_round(args, config, round_number)
+        hashes = await run_compose_round(args, config, target_tree, round_number)
         all_hashes.extend(hashes)
         if args.compose_preview:
             break
         try:
-            git.get_compose_diff(args.dir, config)
+            git.get_compose_diff(repo_dir, config, target_tree)
         except NoChanges:
             break
         if not hashes:
@@ -324,14 +328,16 @@ def _print_executable_plan(snapshot: ComposeSnapshot, plan: ComposeExecutablePla
             print(f"   Depends on: {', '.join(group.dependencies)}")
 
 
-async def run_compose_round(args: _ComposeArgs, config: CommitConfig, round_number: int = 1) -> list[str]:
-    """Plan one immutable compose snapshot and optionally execute it in isolation."""
+async def run_compose_round(
+    args: _ComposeArgs, config: CommitConfig, target_tree: str, round_number: int = 1
+) -> list[str]:
+    """Plan one immutable compose snapshot against the fixed target tree and execute it."""
     repo_dir = args.dir
     base_state = capture_compose_base_state(repo_dir)
-    diff = git.get_compose_diff(repo_dir, config)
-    stat = git.get_compose_stat(repo_dir)
+    diff = git.get_compose_diff(repo_dir, config, target_tree)
+    stat = git.get_compose_stat(repo_dir, target_tree)
     snapshot = build_compose_snapshot(diff, stat)
-    snapshot = pin_snapshot_staged_state(snapshot, repo_dir)
+    snapshot = pin_snapshot_staged_state(snapshot, repo_dir, target_tree)
     _save_debug_artifact(args, f"compose_round_{round_number}_snapshot.json", _snapshot_to_jsonable(snapshot))
 
     token_counter = _create_token_counter(config)

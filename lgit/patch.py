@@ -212,16 +212,22 @@ def build_compose_snapshot(diff: str, stat: str) -> ComposeSnapshot:
     return ComposeSnapshot(diff=diff, stat=stat, files=tuple(files), hunks=tuple(hunks), pins={})
 
 
-def pin_snapshot_staged_state(snapshot: ComposeSnapshot, dir: str | os.PathLike[str] = ".") -> ComposeSnapshot:
-    """Pin snapshot paths to their staged index blobs, captured once.
+def pin_snapshot_staged_state(
+    snapshot: ComposeSnapshot, dir: str | os.PathLike[str] = ".", target_tree: str | None = None
+) -> ComposeSnapshot:
+    """Pin snapshot paths to their staged blobs, captured once.
 
-    Compose commits the staged tree, so each path is pinned to its index entry (mode + oid),
-    or marked deleted when staged for removal. Reading the index — never the worktree — keeps
-    later unstaged edits to a staged file out of the generated commits, and covers regular
-    blobs, symlinks (``120000``), and submodule gitlinks (``160000``) uniformly.
+    Each path is pinned to its blob (mode + oid) — from ``target_tree`` (the staged tree captured
+    at compose invocation) when given, otherwise the live index — or marked deleted when staged
+    for removal. Pinning to the fixed tree, never the live worktree, keeps later staging or edits
+    out of the generated commits and covers regular blobs, symlinks (``120000``), and submodule
+    gitlinks (``160000``) uniformly.
     """
     pins = dict(snapshot.pins)
-    staged = _staged_index_entries([file.path for file in snapshot.files], dir)
+    paths = [file.path for file in snapshot.files]
+    staged = (
+        _tree_blob_entries(target_tree, paths, dir) if target_tree is not None else _staged_index_entries(paths, dir)
+    )
     for file in snapshot.files:
         entry = staged.get(file.path)
         if entry is None:
@@ -245,6 +251,21 @@ def _staged_index_entries(paths: Sequence[str], dir: str | os.PathLike[str]) -> 
             continue
         meta, _, path = record.partition("\t")
         mode, oid, _stage = meta.split()
+        entries[path] = (mode, oid)
+    return entries
+
+
+def _tree_blob_entries(tree: str, paths: Sequence[str], dir: str | os.PathLike[str]) -> dict[str, tuple[str, str]]:
+    """Map each path to its ``(mode, oid)`` in ``tree``; absent paths are omitted."""
+    if not paths:
+        return {}
+    records = run_git(["ls-tree", "-r", "-z", tree, "--", *paths], cwd=dir).stdout
+    entries: dict[str, tuple[str, str]] = {}
+    for record in records.split("\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition("\t")
+        mode, _type, oid = meta.split()
         entries[path] = (mode, oid)
     return entries
 

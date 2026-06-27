@@ -379,14 +379,78 @@ def test_execute_compose_partial_round_preserves_mid_run_staging(
     assert "b1 changed\n" not in staged_b
 
 
+def test_compose_target_tree_excludes_changes_staged_after_invocation(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The exact user scenario: stage A,B; run compose; stage C mid-run. Only A,B must be
+    # committed, C must stay staged, and the loop must terminate without consuming C.
+    (empty_repo / "a.py").write_text("a1\n", encoding="utf-8")
+    (empty_repo / "b.py").write_text("b1\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+    run_git(empty_repo, "commit", "-m", "initial")
+    (empty_repo / "a.py").write_text("a1 changed\n", encoding="utf-8")
+    (empty_repo / "b.py").write_text("b1 changed\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+
+    # Captured once at invocation — exactly what run_compose_mode pins the loop to.
+    target_tree = git.write_real_index_tree(empty_repo)
+    snapshot = pin_snapshot_staged_state(
+        build_compose_snapshot(
+            git.get_compose_diff(empty_repo, None, target_tree),
+            git.get_compose_stat(empty_repo, target_tree),
+        ),
+        empty_repo,
+        target_tree,
+    )
+    a_file = snapshot.file_by_path("a.py")
+    b_file = snapshot.file_by_path("b.py")
+    assert a_file is not None and b_file is not None
+    plan = ComposeExecutablePlan(
+        groups=(
+            ComposeExecutableGroup(
+                group_id="G1",
+                commit_type="refactor",
+                scope=None,
+                file_ids=(a_file.file_id, b_file.file_id),
+                rationale="change a and b",
+                dependencies=(),
+                hunk_ids=a_file.hunk_ids + b_file.hunk_ids,
+            ),
+        ),
+        dependency_order=(0,),
+    )
+
+    async def prepared_messages(*args: object) -> list[str]:
+        # User stages a brand-new C mid-run, after the target tree was captured.
+        (empty_repo / "c.py").write_text("c staged later\n", encoding="utf-8")
+        run_git(empty_repo, "add", "c.py")
+        return ["refactor: changed a and b"]
+
+    monkeypatch.setattr(compose, "_prepare_group_messages", prepared_messages)
+    args = Namespace(dir=str(empty_repo), compose_preview=False, sign=False, compose_test_after_each=False)
+    base_state = compose.capture_compose_base_state(empty_repo)
+
+    hashes = asyncio.run(compose.execute_compose(snapshot, plan, CommitConfig(), args, base_state))
+
+    assert len(hashes) == 1
+    # The loop's termination check is against the fixed target tree: A,B are committed, so it
+    # reports "no changes" and stops — even though C is now staged.
+    with pytest.raises(NoChanges):
+        git.get_compose_diff(empty_repo, None, target_tree)
+    # C is left staged for the user; A,B are committed (no longer staged).
+    assert run_git(empty_repo, "diff", "--cached", "--name-only").stdout.split() == ["c.py"]
+
+
 def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     rounds: list[int] = []
 
-    async def fake_round(args: object, config: object, round_number: int) -> list[str]:
+    async def fake_round(args: object, config: object, target_tree: str, round_number: int) -> list[str]:
         rounds.append(round_number)
         return [f"hash{round_number}"]
 
-    # First post-round check still sees staged changes; the second is clean.
+    # First post-round check still sees changes toward the target tree; the second is clean.
     remaining = iter(["staged diff remains"])
 
     def fake_diff(*args: object, **kwargs: object) -> str:
@@ -395,6 +459,7 @@ def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.Monk
         except StopIteration:
             raise NoChanges("compose") from None
 
+    monkeypatch.setattr(compose.git, "write_real_index_tree", lambda *a, **k: "T0")
     monkeypatch.setattr(compose, "run_compose_round", fake_round)
     monkeypatch.setattr(compose.git, "get_compose_diff", fake_diff)
     args = Namespace(dir=".", compose_preview=False)
@@ -406,9 +471,10 @@ def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.Monk
 
 
 def test_run_compose_mode_errors_when_a_round_makes_no_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_round(args: object, config: object, round_number: int) -> list[str]:
+    async def fake_round(args: object, config: object, target_tree: str, round_number: int) -> list[str]:
         return []
 
+    monkeypatch.setattr(compose.git, "write_real_index_tree", lambda *a, **k: "T0")
     monkeypatch.setattr(compose, "run_compose_round", fake_round)
     monkeypatch.setattr(compose.git, "get_compose_diff", lambda *a, **k: "staged diff remains")
     args = Namespace(dir=".", compose_preview=False)
