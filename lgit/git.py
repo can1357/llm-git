@@ -134,8 +134,7 @@ def _run_git_process(
         argv,
         cwd=os.fspath(cwd),
         input=stdin_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env=git_command_env(
             env,
             index_file=index_file,
