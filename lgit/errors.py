@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,11 @@ class GitIndexLocked(GitError):
         self.lock_path = lock_path
 
     def __str__(self) -> str:
-        return f"{self.message}: {self.lock_path}"
+        quoted = shlex.quote(str(self.lock_path))
+        return (
+            f"{self.message}: {self.lock_path} — another git process may be running; "
+            f"if not, remove the stale lock with: rm {quoted}"
+        )
 
 
 @dataclass(slots=True)

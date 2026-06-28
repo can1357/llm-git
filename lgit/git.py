@@ -22,6 +22,12 @@ _GIT_BACKGROUND_CONFIG = (
 
 _DISABLE_GIT_BACKGROUND_FEATURES = True
 
+# A concurrent git process (editor integration, fsmonitor, a parallel `git` call) often
+# holds `index.lock` for a fraction of a second. Retrying briefly clears that transient
+# contention without ever deleting a lock a live process may still own.
+_INDEX_LOCK_RETRY_ATTEMPTS = 5
+_INDEX_LOCK_RETRY_DELAY_S = 0.25
+
 
 def init_git_command_settings(config: object) -> None:
     """Initialize process-wide git subprocess settings from config."""
@@ -100,6 +106,11 @@ def git_command_env(
     if disable_background_features is None:
         disable_background_features = _DISABLE_GIT_BACKGROUND_FEATURES
     if disable_background_features:
+        # Read-only ops (status/diff/ls-files/...) opportunistically take `index.lock` to
+        # write back refreshed stat info. Suppress that so lgit never contends with the
+        # user's concurrent git while it sits in long LLM calls; mandatory locks for
+        # add/commit are unaffected.
+        env["GIT_OPTIONAL_LOCKS"] = "0"
         try:
             offset = int(env.get("GIT_CONFIG_COUNT", "0"))
         except ValueError:
@@ -164,6 +175,20 @@ def _raise_git_error(
     raise GitError(f"git {' '.join(os.fspath(arg) for arg in args)} failed: {detail}")
 
 
+def _retry_index_lock(stderr: str, attempt: int) -> bool:
+    """Sleep and report whether a locked-index failure should be retried.
+
+    Returns ``True`` after a short backoff when ``stderr`` reports an `index.lock`
+    contention and retries remain; ``False`` otherwise (not a lock error, or the
+    bounded attempts are exhausted). Never removes the lock — a live git process may
+    still own it.
+    """
+    if "index.lock" not in stderr or attempt + 1 >= _INDEX_LOCK_RETRY_ATTEMPTS:
+        return False
+    time.sleep(_INDEX_LOCK_RETRY_DELAY_S)
+    return True
+
+
 def run_git(
     args: Sequence[str | os.PathLike[str]],
     *,
@@ -177,20 +202,23 @@ def run_git(
 ) -> GitResult:
     """Run git with explicit argv and return captured UTF-8 text output."""
 
-    argv, completed = _run_git_process(
-        args,
-        cwd=cwd,
-        input_data=input_text,
-        text=True,
-        env=env,
-        index_file=index_file,
-        disable_background_features=disable_background_features,
-    )
-    result = GitResult(argv, completed.returncode, completed.stdout, completed.stderr)
     allowed = set(allow_exit_codes)
-    if check and completed.returncode != 0 and completed.returncode not in allowed:
-        _raise_git_error(args, cwd, completed.stdout, completed.stderr)
-    return result
+    for attempt in range(_INDEX_LOCK_RETRY_ATTEMPTS):
+        argv, completed = _run_git_process(
+            args,
+            cwd=cwd,
+            input_data=input_text,
+            text=True,
+            env=env,
+            index_file=index_file,
+            disable_background_features=disable_background_features,
+        )
+        if check and completed.returncode != 0 and completed.returncode not in allowed:
+            if _retry_index_lock(completed.stderr, attempt):
+                continue
+            _raise_git_error(args, cwd, completed.stdout, completed.stderr)
+        return GitResult(argv, completed.returncode, completed.stdout, completed.stderr)
+    raise AssertionError("unreachable: run_git retry loop exited without returning")
 
 
 def run_git_bytes(
@@ -206,22 +234,25 @@ def run_git_bytes(
 ) -> GitBytesResult:
     """Run git and preserve stdout as raw bytes."""
 
-    argv, completed = _run_git_process(
-        args,
-        cwd=cwd,
-        input_data=input_bytes,
-        text=False,
-        env=env,
-        index_file=index_file,
-        disable_background_features=disable_background_features,
-    )
-    result = GitBytesResult(argv, completed.returncode, completed.stdout, completed.stderr)
     allowed = set(allow_exit_codes)
-    if check and completed.returncode != 0 and completed.returncode not in allowed:
-        stderr = completed.stderr.decode("utf-8", errors="replace")
-        stdout = completed.stdout.decode("utf-8", errors="replace")
-        _raise_git_error(args, cwd, stdout, stderr)
-    return result
+    for attempt in range(_INDEX_LOCK_RETRY_ATTEMPTS):
+        argv, completed = _run_git_process(
+            args,
+            cwd=cwd,
+            input_data=input_bytes,
+            text=False,
+            env=env,
+            index_file=index_file,
+            disable_background_features=disable_background_features,
+        )
+        if check and completed.returncode != 0 and completed.returncode not in allowed:
+            stderr = completed.stderr.decode("utf-8", errors="replace")
+            if _retry_index_lock(stderr, attempt):
+                continue
+            stdout = completed.stdout.decode("utf-8", errors="replace")
+            _raise_git_error(args, cwd, stdout, stderr)
+        return GitBytesResult(argv, completed.returncode, completed.stdout, completed.stderr)
+    raise AssertionError("unreachable: run_git_bytes retry loop exited without returning")
 
 
 class TempGitIndex:
