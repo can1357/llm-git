@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -90,6 +92,41 @@ def test_completions_generate_for_all_shells(shell: str) -> None:
 
     assert script
     assert "lgit" in script
+
+
+def test_zsh_completion_brace_expansion_is_unquoted() -> None:
+    """Multi-flag options must brace-expand; only the description body is quoted.
+
+    Regression for ``_arguments:comparguments: invalid argument: {-h,--help}[...]``: when the
+    whole spec was single-quoted, zsh passed the literal ``{-h,--help}[...]`` as one argument.
+    """
+    script = cli._completion_script("zsh")
+
+    # Brace group bare, body quoted separately.
+    assert "{-h,--help}'[" in script
+    # The buggy whole-token quoting must never reappear.
+    assert "'{-h,--help}" not in script
+    # Choice values stay inside the quoted body (the bare `(...)` is not shell syntax).
+    assert ":mode:(staged commit unstaged compose)'" in script
+    # Sourced installs register the completer instead of calling it at source time.
+    assert "compdef _lgit lgit" in script
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh not installed")
+def test_zsh_completion_sources_without_error() -> None:
+    """The generated script loads cleanly under a real zsh completion system."""
+    script = cli._completion_script("zsh")
+    result = subprocess.run(
+        ["zsh", "-fc", 'autoload -Uz compinit && compinit -u 2>/dev/null; eval "$ZSCRIPT"; echo OK'],
+        env={**os.environ, "ZSCRIPT": script},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+    assert "can only be called" not in result.stderr
+    assert "invalid argument" not in result.stderr
 
 
 def test_summary_from_holistic_analysis_ignores_blank_summary() -> None:
