@@ -1029,24 +1029,37 @@ def _bash_completion(specs: list[dict[str, Any]]) -> str:
 def _zsh_completion(specs: list[dict[str, Any]]) -> str:
     lines = ["#compdef lgit", "", "_lgit() {", "  _arguments -s -S \\"]
     for spec in specs:
-        lines.append(f"    {_sh_single_quote(_zsh_option_spec(spec))} \\")
+        lines.append(f"    {_zsh_option_spec(spec)} \\")
     lines.append("    '*:context:_files'")
     lines.append("}")
     lines.append("")
-    lines.append('_lgit "$@"')
+    # Work whether the file is autoloaded from $fpath (compsys calls `_lgit`) or
+    # sourced directly from a startup file (register the completer via compdef).
+    lines.append('if [ "$funcstack[1]" = "_lgit" ]; then')
+    lines.append('    _lgit "$@"')
+    lines.append("else")
+    lines.append("    compdef _lgit lgit")
+    lines.append("fi")
     return "\n".join(lines) + "\n"
 
 
 def _zsh_option_spec(spec: dict[str, Any]) -> str:
+    # A brace alternation must stay unquoted so zsh expands `{-h,--help}` into one
+    # `_arguments` spec per flag; quoting the whole token makes zsh treat the literal
+    # `{-h,--help}[...]` as a single (invalid) argument. The body is quoted separately.
     options = spec["options"]
-    opt_expr = "{" + ",".join(options) + "}" if len(options) > 1 else options[0]
+    opt_expr = "{" + ",".join(options) + "}" if len(options) > 1 else _sh_single_quote(options[0])
+    return opt_expr + _sh_single_quote(_zsh_option_body(spec))
+
+
+def _zsh_option_body(spec: dict[str, Any]) -> str:
     desc = _zsh_escape(spec["help"])
     if spec["choices"]:
         values = " ".join(_zsh_escape(choice) for choice in spec["choices"])
-        return f"{opt_expr}[{desc}]:{spec['metavar']}:({values})"
+        return f"[{desc}]:{spec['metavar']}:({values})"
     if spec["takes_value"]:
-        return f"{opt_expr}[{desc}]:{spec['metavar']}:_files"
-    return f"{opt_expr}[{desc}]"
+        return f"[{desc}]:{spec['metavar']}:_files"
+    return f"[{desc}]"
 
 
 def _fish_completion(specs: list[dict[str, Any]]) -> str:
