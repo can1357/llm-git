@@ -17,6 +17,7 @@ def test_git_command_env_applies_background_feature_overrides_when_enabled(monke
     monkeypatch.delenv("GIT_CONFIG_VALUE_0", raising=False)
     monkeypatch.delenv("GIT_CONFIG_KEY_1", raising=False)
     monkeypatch.delenv("GIT_CONFIG_VALUE_1", raising=False)
+    monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
 
     env = git.git_command_env(disable_background_features=True)
 
@@ -25,18 +26,21 @@ def test_git_command_env_applies_background_feature_overrides_when_enabled(monke
     assert env["GIT_CONFIG_VALUE_0"] == "false"
     assert env["GIT_CONFIG_KEY_1"] == "core.untrackedCache"
     assert env["GIT_CONFIG_VALUE_1"] == "false"
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 def test_git_command_env_skips_background_feature_overrides_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
     monkeypatch.delenv("GIT_CONFIG_KEY_0", raising=False)
     monkeypatch.delenv("GIT_CONFIG_VALUE_0", raising=False)
+    monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
 
     env = git.git_command_env(disable_background_features=False)
 
     assert "GIT_CONFIG_COUNT" not in env
     assert "GIT_CONFIG_KEY_0" not in env
     assert "GIT_CONFIG_VALUE_0" not in env
+    assert "GIT_OPTIONAL_LOCKS" not in env
 
 
 def test_commit_snapshot_tree_commits_snapshot_and_keeps_drifted_staging(repo: Path, run_git: RunGit) -> None:
