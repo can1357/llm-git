@@ -172,6 +172,29 @@ def test_write_entries_trims_and_skips_empty_bullets() -> None:
     assert "* Fixed" not in updated
 
 
+def test_write_entries_keeps_category_bullets_contiguous() -> None:
+    content = """# Changelog
+
+## [Unreleased]
+
+### Changed
+
+- Standardized reasoning effort levels.
+- Updated costs and context windows.
+
+## [1.0.0] - 2024-01-01
+"""
+    unreleased = parse_unreleased_section(content, Path("CHANGELOG.md"))
+    new_entries = {ChangelogCategory.CHANGED: ["Enabled reasoning effort controls."]}
+
+    updated = write_entries(content, unreleased, new_entries)
+
+    assert (
+        "- Enabled reasoning effort controls.\n- Standardized reasoning effort levels.\n- Updated costs and context windows.\n"
+        in updated
+    )
+
+
 def test_parse_unreleased_section_skips_empty_bullets() -> None:
     content = """# Changelog
 

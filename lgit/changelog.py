@@ -177,8 +177,6 @@ def write_entries(
         result.append(f"### {category.value}")
         result.append("")
         result.extend(fresh)
-        if fresh and old:
-            result.append("")
         result.extend(old)
         result.append("")
 
