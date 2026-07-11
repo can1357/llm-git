@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import style
 from .diffing import smart_truncate_diff
 from .errors import GitError, ValidationFailure
 from .git import run_git
@@ -19,6 +20,9 @@ from .models import ChangelogCategory, resolve_model_name
 
 if TYPE_CHECKING:
     from .config import CommitConfig
+
+_REVISE_BLOCK_RE = re.compile(r"<revise\b[^>]*>(.*?)(?:</revise>|$)", re.IGNORECASE | re.DOTALL)
+_REVISION_LINE_RE = re.compile(r"^\s*(OLD|NEW)\s*:(.*)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,13 @@ class UnreleasedSection:
     end_line: int
     entries: dict[ChangelogCategory, list[str]]
 
+
+@dataclass(frozen=True, slots=True)
+class ChangelogRevision:
+    """One reconcile operation that replaces or drops an existing Unreleased entry."""
+
+    old: str
+    new: str | None
 
 @dataclass(frozen=True, slots=True)
 class ChangelogBoundary:
@@ -93,23 +104,45 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             existing_entries = _format_entry_map(head_unreleased.entries)
             authored_entries = _format_entry_map(_entries_added_since(head_unreleased, unreleased, worktree_unreleased))
 
-        entries = await generate_changelog_entries(
+        can_revise = bool(config.changelog_revise) and head_unreleased is not None and bool(existing_entries)
+
+        entries, revisions = await generate_changelog_entries(
             boundary.changelog_path,
             _is_package_changelog(boundary.changelog_path, repo_dir),
             stat,
             diff,
             existing_entries,
             authored_entries,
+            can_revise,
             config,
         )
-        entries = _drop_duplicate_entries(entries, unreleased, worktree_unreleased)
-        if not entries:
+        staged_entries = unreleased.entries
+        worktree_entries = worktree_unreleased.entries if worktree_unreleased is not None else None
+        applied: list[ChangelogRevision] = []
+        if can_revise:
+            assert head_unreleased is not None
+            revisable = {
+                entry.casefold() for values in head_unreleased.entries.values() for entry in values
+            }
+            staged_entries, applied = apply_revisions(staged_entries, revisions, revisable)
+            if worktree_entries is not None:
+                worktree_entries, _ = apply_revisions(worktree_entries, revisions, revisable)
+        entries = _drop_duplicate_entries(entries, staged_entries, worktree_entries)
+        if not entries and not applied:
             continue
 
-        updated_staged = write_entries(changelog_content, unreleased, entries)
+        updated_staged = write_entries(
+            changelog_content,
+            replace(unreleased, entries=staged_entries),
+            entries,
+        )
         updated_worktree = (
-            write_entries(worktree_content, worktree_unreleased, entries)
-            if worktree_unreleased is not None
+            write_entries(
+                worktree_content,
+                replace(worktree_unreleased, entries=worktree_entries),
+                entries,
+            )
+            if worktree_unreleased is not None and worktree_entries is not None
             else updated_staged
         )
         boundary.changelog_path.write_text(updated_worktree, encoding="utf-8")
@@ -118,6 +151,14 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             stage_changelog_blob(rel_path, updated_staged, repo_dir)
         else:
             untracked_to_stage.append(rel_path)
+        for revision in applied:
+            if revision.new is None:
+                style.status(f"{style.info('›')} {style.dim('changelog: dropped:')} {style.dim(revision.old)}")
+            else:
+                style.status(
+                    f"{style.info('›')} {style.dim('changelog: revised:')} "
+                    f"{style.dim(revision.old)} {style.dim('→')} {revision.new}"
+                )
         updated.append(ChangelogBoundary(boundary.changelog_path, boundary.files, diff, stat))
 
     if untracked_to_stage:
@@ -168,11 +209,9 @@ def write_entries(
     unreleased: UnreleasedSection,
     new_entries: Mapping[ChangelogCategory, Sequence[str]] | Mapping[str, Sequence[str]],
 ) -> str:
-    """Insert new entries at the top of the Unreleased section."""
+    """Rebuild the Unreleased section with new entries before existing entries."""
 
     normalized_new = _coerce_entries(new_entries)
-    if not normalized_new:
-        return content
 
     lines = content.split("\n")
     result: list[str] = list(lines[: unreleased.header_line + 1])
@@ -267,9 +306,10 @@ async def generate_changelog_entries(
     diff: str,
     existing_entries: str | None,
     authored_entries: str | None,
+    can_revise: bool,
     config: CommitConfig,
-) -> dict[ChangelogCategory, list[str]]:
-    """Ask the configured model for Keep a Changelog entries."""
+) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
+    """Ask the configured model for Keep a Changelog entries and revision operations."""
 
     system_prompt, user_prompt = _render_prompt(
         "changelog",
@@ -280,6 +320,7 @@ async def generate_changelog_entries(
             "diff": diff,
             "existing_entries": existing_entries or "",
             "authored_entries": authored_entries or "",
+            "can_revise": can_revise,
         },
     )
     from .api import OneShotSpec, run_oneshot
@@ -300,7 +341,8 @@ async def generate_changelog_entries(
     output = response.output if hasattr(response, "output") else response
     payload = _parse_jsonish(output)
     entries = payload.get("entries", payload) if isinstance(payload, dict) else {}
-    return _coerce_entries(entries if isinstance(entries, Mapping) else {})
+    revisions = parse_changelog_revisions(response.text_content or "") if can_revise else []
+    return _coerce_entries(entries if isinstance(entries, Mapping) else {}), revisions
 
 
 def normalize_changelog_entry(entry: str) -> str | None:
@@ -310,6 +352,28 @@ def normalize_changelog_entry(entry: str) -> str | None:
     if stripped.startswith(("- ", "* ")):
         stripped = stripped[2:].strip()
     return f"- {stripped}" if stripped else None
+
+
+def parse_changelog_revisions(text: str) -> list[ChangelogRevision]:
+    """Parse revision pairs from the first ``<revise>`` block."""
+
+    block = _REVISE_BLOCK_RE.search(text)
+    if block is None:
+        return []
+
+    revisions: list[ChangelogRevision] = []
+    pending_old: str | None = None
+    for line in block.group(1).splitlines():
+        match = _REVISION_LINE_RE.fullmatch(line)
+        if match is None:
+            continue
+        prefix, entry = match.groups()
+        if prefix.casefold() == "old":
+            pending_old = normalize_changelog_entry(entry)
+        elif pending_old is not None:
+            revisions.append(ChangelogRevision(pending_old, normalize_changelog_entry(entry)))
+            pending_old = None
+    return revisions
 
 
 def _staged_files(dir: Path) -> list[str]:
@@ -375,9 +439,39 @@ def _entries_added_since(
     return {category: values for category, values in added.items() if values}
 
 
+def apply_revisions(
+    entries: Mapping[ChangelogCategory, Sequence[str]],
+    revisions: Sequence[ChangelogRevision],
+    revisable: Collection[str],
+) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
+    """Apply safe reconciliation operations and return the operations that matched."""
+
+    revised = {category: list(values) for category, values in entries.items()}
+    applied: list[ChangelogRevision] = []
+    for revision in revisions:
+        target = revision.old.casefold()
+        if target not in revisable:
+            continue
+        matched = False
+        for values in revised.values():
+            for index, entry in enumerate(values):
+                if entry.casefold() != target:
+                    continue
+                if revision.new is None:
+                    values.pop(index)
+                else:
+                    values[index] = revision.new
+                applied.append(revision)
+                matched = True
+                break
+            if matched:
+                break
+    return revised, applied
+
+
 def _drop_duplicate_entries(
-    entries: dict[ChangelogCategory, list[str]],
-    *sections: UnreleasedSection | None,
+    entries: Mapping[ChangelogCategory, Sequence[str]],
+    *existing: Mapping[ChangelogCategory, Sequence[str]] | None,
 ) -> dict[ChangelogCategory, list[str]]:
     """Drop generated entries that restate ones already in the Unreleased section.
 
@@ -385,11 +479,11 @@ def _drop_duplicate_entries(
     words already appear in a single existing entry, e.g. a reworded or
     recategorized copy of a hand-written line).
     """
-    existing = [
+    existing_words = [
         _entry_words(entry)
-        for section in sections
-        if section is not None
-        for values in section.entries.values()
+        for entry_map in existing
+        if entry_map is not None
+        for values in entry_map.values()
         for entry in values
     ]
 
@@ -397,7 +491,7 @@ def _drop_duplicate_entries(
         words = _entry_words(entry)
         if not words:
             return True
-        return any(len(words & seen) / len(words) >= 0.7 for seen in existing)
+        return any(len(words & seen) / len(words) >= 0.7 for seen in existing_words)
 
     deduped: dict[ChangelogCategory, list[str]] = {}
     for category, values in entries.items():
@@ -534,10 +628,13 @@ def _parse_jsonish(value: Any) -> Any:
 
 __all__ = [
     "ChangelogBoundary",
+    "ChangelogRevision",
     "UnreleasedSection",
+    "apply_revisions",
     "detect_boundaries",
     "generate_changelog_entries",
     "normalize_changelog_entry",
+    "parse_changelog_revisions",
     "parse_unreleased_section",
     "run_changelog_flow",
     "stage_changelog_blob",

@@ -22,6 +22,7 @@ _PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _SUMMARY_TAG_RE = re.compile(r"<summary\b[^>]*>\s*(.*?)(?:\s*</[^>]+>|$)", re.IGNORECASE | re.DOTALL)
+_REVISE_RE = re.compile(r"<revise\b.*?(?:</revise>|$)", re.IGNORECASE | re.DOTALL)
 _ISSUE_RE = re.compile(r"#\d+(?:\s*-\s*#?\d+)?")
 _CATEGORY_RE = re.compile(
     r"^\s*(?:\[(?P<bracket>[^\]]+)\]|(?P<prefix>Added|Changed|Fixed|Deprecated|Removed|Security|Breaking Changes)\s*:)\s*(?P<text>.*)$",
@@ -573,6 +574,7 @@ def parse_changelog_response(text: str) -> dict[str, dict[str, list[str]]]:
     """Parse markdown changelog output into an ``entries`` mapping."""
 
     cleaned = _clean_markdown_text(text)
+    cleaned, revise_blocks = _REVISE_RE.subn("", cleaned)
     if _has_exception_tag(cleaned):
         return {"entries": {}}
     known = {"Added", "Changed", "Fixed", "Deprecated", "Removed", "Security", "Breaking Changes"}
@@ -608,6 +610,8 @@ def parse_changelog_response(text: str) -> dict[str, dict[str, list[str]]]:
         elif current is not None:
             entries.setdefault(current, []).append(line)
     if not any(values for values in entries.values()):
+        if revise_blocks:
+            return {"entries": {}}
         raise ValueError("No changelog entries found in response")
     return {"entries": entries}
 
