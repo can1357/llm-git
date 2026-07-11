@@ -7,7 +7,6 @@ import os
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +16,7 @@ from .errors import GitError, ValidationFailure
 from .git import run_git
 from .markdown_output import parse_changelog_response
 from .models import ChangelogCategory, resolve_model_name
+from .templates import render_changelog_prompt
 
 if TYPE_CHECKING:
     from .config import CommitConfig
@@ -563,17 +563,14 @@ async def generate_changelog_entries(
 ) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
     """Ask the configured model for Keep a Changelog entries and revision operations."""
 
-    system_prompt, user_prompt = _render_prompt(
-        "changelog",
-        {
-            "changelog_path": os.fspath(changelog_path),
-            "is_package_changelog": is_package_changelog,
-            "stat": stat,
-            "diff": diff,
-            "existing_entries": existing_entries or "",
-            "authored_entries": authored_entries or "",
-            "can_revise": can_revise,
-        },
+    prompt = render_changelog_prompt(
+        os.fspath(changelog_path),
+        is_package_changelog,
+        stat,
+        diff,
+        existing_entries=existing_entries,
+        authored_entries=authored_entries,
+        can_revise=can_revise,
     )
     from .api import OneShotSpec, run_oneshot
 
@@ -583,8 +580,8 @@ async def generate_changelog_entries(
             operation="changelog",
             model=resolve_model_name(config.analysis_model),
             prompt_family="changelog",
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            system_prompt=prompt.system,
+            user_prompt=prompt.user,
             tool_name="create_changelog_entries",
             progress_label="changelog",
             cacheable=True,
@@ -863,24 +860,6 @@ def _is_package_changelog(path: Path, dir: Path) -> bool:
         return parent.resolve() != dir.resolve()
     except OSError:
         return parent != dir
-
-
-def _render_prompt(family: str, values: Mapping[str, Any]) -> tuple[str, str]:
-    text = (resources.files("lgit.resources") / "prompts" / f"{family}.md").read_text(encoding="utf-8")
-    try:
-        from jinja2 import Template
-
-        text = Template(text).render(**values)
-    except Exception:
-        for key, value in values.items():
-            text = text.replace("{{ " + key + " }}", str(value))
-            text = text.replace("{{" + key + "}}", str(value))
-    marker = "<!-- USER -->"
-    if marker in text:
-        system, user = text.split(marker, 1)
-    else:
-        system, user = text, ""
-    return system.strip(), user.strip()
 
 
 def _parse_jsonish(value: Any) -> Any:

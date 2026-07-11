@@ -28,9 +28,13 @@ def lgit_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     pythonpath = str(PROJECT_ROOT)
     if existing := env.get("PYTHONPATH"):
         pythonpath = os.pathsep.join((pythonpath, existing))
+    home = repo.parent / "lgit-home"
+    home.mkdir(parents=True, exist_ok=True)
     env.update(
         {
             "PYTHONPATH": pythonpath,
+            "HOME": str(home),
+            "USERPROFILE": str(home),
             "LLM_GIT_CONFIG": str(repo / "missing-config.toml"),
             "LLM_GIT_CACHE_DISABLED": "1",
         }
@@ -44,6 +48,16 @@ def lgit_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect HOME so tests never read or write real ``~/.llm-git`` prompts or git config."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
 
 
 def init_repo(repo: Path) -> Path:
