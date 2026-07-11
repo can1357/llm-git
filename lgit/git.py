@@ -404,14 +404,18 @@ def get_git_numstat(
 
 
 def get_compose_diff(
-    dir: str | os.PathLike[str] = ".", config: object | None = None, target_tree: str | None = None
+    dir: str | os.PathLike[str] = ".",
+    config: object | None = None,
+    target_tree: str | None = None,
+    exclude: Sequence[str] = (),
 ) -> str:
     """Return the compose-mode diff with rename detection.
 
     With ``target_tree`` (the staged tree captured at invocation), diff ``HEAD`` against that
     fixed tree, so each loop round sees only the changes still needed to reach it — never
     anything the user staged mid-run. Without it, diff the live index (``--cached``); this is
-    what a normal commit would commit, since callers auto-stage first.
+    what a normal commit would commit, since callers auto-stage first. ``exclude`` contains
+    pathspecs omitted from compose planning and convergence.
     """
 
     max_len = int(getattr(config, "max_diff_length", 200_000))
@@ -424,21 +428,31 @@ def get_compose_diff(
         "--src-prefix=a/",
         "--dst-prefix=b/",
     ]
-    if target_tree is None:
-        diff = _diff_with_retry([*args, "--cached"], dir, max_len)
-    else:
-        diff = _diff_with_retry([*args, "HEAD", target_tree], dir, max_len, insert_u1_before="HEAD")
+    scope = ["--cached"] if target_tree is None else ["HEAD", target_tree]
+    pathspecs = ["--", *exclude] if exclude else []
+    retry_anchor = "HEAD" if target_tree is not None else "--" if exclude else None
+    diff = _diff_with_retry(
+        [*args, *scope, *pathspecs],
+        dir,
+        max_len,
+        insert_u1_before=retry_anchor,
+    )
     if not diff.strip():
         raise NoChanges("compose")
     return diff
 
 
-def get_compose_stat(dir: str | os.PathLike[str] = ".", target_tree: str | None = None) -> str:
+def get_compose_stat(
+    dir: str | os.PathLike[str] = ".",
+    target_tree: str | None = None,
+    exclude: Sequence[str] = (),
+) -> str:
     """Return the compose-mode --stat output with rename detection (see :func:`get_compose_diff`)."""
 
     args = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames"]
     scope = ["--cached"] if target_tree is None else ["HEAD", target_tree]
-    stat = run_git([*args, *scope, "--stat"], cwd=dir).stdout
+    pathspecs = ["--", *exclude] if exclude else []
+    stat = run_git([*args, *scope, "--stat", *pathspecs], cwd=dir).stdout
     if not stat.strip():
         raise NoChanges("compose")
     return stat

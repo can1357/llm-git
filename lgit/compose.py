@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from . import api, diffing, git, map_reduce, style, templates, tokens
+from .changelog import ChangelogWeaver
 from .errors import GitError, NoChanges, ValidationFailure
 from .models import (
     CommitSummary,
@@ -284,15 +285,17 @@ async def run_compose_mode(args: _ComposeArgs, config: CommitConfig) -> list[str
     """
     repo_dir = args.dir
     target_tree = git.write_real_index_tree(repo_dir)
+    weaver = ChangelogWeaver.create(repo_dir, config, target_tree)
+    exclude = weaver.exclude_pathspecs() if weaver else ()
     all_hashes: list[str] = []
     round_number = 1
     while True:
-        hashes = await run_compose_round(args, config, target_tree, round_number)
+        hashes = await run_compose_round(args, config, target_tree, round_number, weaver)
         all_hashes.extend(hashes)
         if args.compose_preview:
             break
         try:
-            git.get_compose_diff(repo_dir, config, target_tree)
+            git.get_compose_diff(repo_dir, config, target_tree, exclude=exclude)
         except NoChanges:
             break
         if not hashes:
@@ -329,13 +332,18 @@ def _print_executable_plan(snapshot: ComposeSnapshot, plan: ComposeExecutablePla
 
 
 async def run_compose_round(
-    args: _ComposeArgs, config: CommitConfig, target_tree: str, round_number: int = 1
+    args: _ComposeArgs,
+    config: CommitConfig,
+    target_tree: str,
+    round_number: int = 1,
+    weaver: ChangelogWeaver | None = None,
 ) -> list[str]:
     """Plan one immutable compose snapshot against the fixed target tree and execute it."""
     repo_dir = args.dir
     base_state = capture_compose_base_state(repo_dir)
-    diff = git.get_compose_diff(repo_dir, config, target_tree)
-    stat = git.get_compose_stat(repo_dir, target_tree)
+    exclude = weaver.exclude_pathspecs() if weaver else ()
+    diff = git.get_compose_diff(repo_dir, config, target_tree, exclude=exclude)
+    stat = git.get_compose_stat(repo_dir, target_tree, exclude=exclude)
     snapshot = build_compose_snapshot(diff, stat)
     snapshot = pin_snapshot_staged_state(snapshot, repo_dir, target_tree)
     _save_debug_artifact(args, f"compose_round_{round_number}_snapshot.json", _snapshot_to_jsonable(snapshot))
@@ -365,7 +373,7 @@ async def run_compose_round(
         preview_message = f"{style.icons.SUCCESS} Preview complete (use --compose without --compose-preview to execute)"
         print(f"\n{style.success(preview_message)}")
         return []
-    return await execute_compose(snapshot, plan, config, args, base_state)
+    return await execute_compose(snapshot, plan, config, args, base_state, weaver)
 
 
 async def plan_compose_snapshot(
@@ -389,6 +397,7 @@ async def execute_compose(
     config: CommitConfig,
     args: _ComposeArgs,
     base_state: ComposeBaseState,
+    weaver: ChangelogWeaver | None = None,
 ) -> list[str]:
     """Create compose commits from a temp index, then checked-update the real ref."""
     if args.compose_preview:
@@ -401,6 +410,8 @@ async def execute_compose(
 
     with git.TempGitIndex(repo_dir) as index:
         git.read_tree_into_index(index.path, base_state.head_hash, repo_dir)
+        if weaver:
+            weaver.seed_temp_index(repo_dir, index.path)
         parent_hash = base_state.head_hash
         commit_hashes: list[str] = []
         for position, group in enumerate(ordered_groups):
@@ -415,6 +426,15 @@ async def execute_compose(
                 staged_anything = True
             if not staged_anything:
                 continue
+            if weaver:
+                patch = group_patches[position]
+                group_paths = [
+                    file.path
+                    for file_id in group.file_ids
+                    for file in [snapshot.file_by_id(file_id)]
+                    if file is not None
+                ]
+                await weaver.weave_group(group_paths, patch.diff, patch.stat, repo_dir, index.path)
             message = prepared_messages[position]
             tree = git.write_index_tree(index.path, repo_dir)
             sign = bool(args.sign or config.gpg_sign)
@@ -428,9 +448,11 @@ async def execute_compose(
         return []
 
     git.update_ref_checked(base_state.head_ref, parent_hash, base_state.head_hash, repo_dir)
-    # Leave the real index untouched. It is this round's staged tree, so committed paths now match
-    # the new HEAD (clean) while staged changes the plan did not cover — plus any staging the user
-    # added mid-run, on any path — stay staged for the next round. The worktree is never touched.
+    if weaver:
+        weaver.flush(repo_dir)
+    # Source paths stay untouched in the real index: committed paths now match HEAD while
+    # uncovered or mid-run staging remains staged for the next round. The weaver separately
+    # synchronizes claimed changelogs under compare-before-write guards.
     return commit_hashes
 
 

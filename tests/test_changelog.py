@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from lgit.api import _extract_json_from_content
 from lgit.changelog import (
+    ChangelogRevision,
     UnreleasedSection,
     _drop_duplicate_entries,
     _entries_added_since,
@@ -15,17 +16,31 @@ from lgit.changelog import (
     _head_unreleased,
     _parse_jsonish,
     _staged_changelog_content,
+    apply_revisions,
+    parse_changelog_revisions,
     parse_unreleased_section,
     run_changelog_flow,
     stage_changelog_blob,
     write_entries,
 )
 from lgit.config import CommitConfig
+from lgit.markdown_output import parse_changelog_response
 from lgit.models import ChangelogCategory
 
 type RunGit = Callable[..., CompletedProcess[str]]
 
 BASE_CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2020-01-01\n\n### Added\n\n- Old entry.\n"
+
+BATCH_ENTRY = "- Added widget frobnication."
+BATCH_CHANGELOG = f"# Changelog\n\n## [Unreleased]\n\n### Added\n\n{BATCH_ENTRY}\n\n## [1.0.0] - 2020-01-01\n"
+
+
+def _commit_batch_changelog(repo: Path, run_git: RunGit) -> Path:
+    changelog_path = repo / "CHANGELOG.md"
+    changelog_path.write_text(BATCH_CHANGELOG, encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: added batch changelog")
+    return changelog_path
 
 
 def test_changelog_staging_keeps_unrelated_unstaged_edits_out(repo: Path, run_git: RunGit) -> None:
@@ -103,6 +118,60 @@ def test_parse_jsonish_decodes_pretty_printed_json_over_markdown() -> None:
     content = '{\n  "entries": {\n    "Added": ["Added websocket reconnects."]\n  }\n}'
 
     assert _parse_jsonish(content) == {"entries": {"Added": ["Added websocket reconnects."]}}
+
+
+def test_parse_changelog_revisions_normalizes_replacements_and_drops() -> None:
+    text = """<revise>
+OLD: Added task labels
+NEW: * Added task labels with automatic retries
+OLD: - Added experimental command
+NEW:
+</revise>"""
+
+    assert parse_changelog_revisions(text) == [
+        ChangelogRevision("- Added task labels", "- Added task labels with automatic retries"),
+        ChangelogRevision("- Added experimental command", None),
+    ]
+
+
+def test_parse_changelog_revisions_without_block_returns_empty() -> None:
+    assert parse_changelog_revisions("OLD: - Outside the block\nNEW: - Ignored") == []
+
+
+def test_parse_changelog_revisions_ignores_unpaired_lines_case_insensitively() -> None:
+    text = """<ReViSe>
+nEw: orphan
+oLd: first unpaired entry
+OLD: * second entry
+ignored prose
+new: replacement entry
+OLD:
+NEW: ignored empty old
+</rEvIsE>"""
+
+    assert parse_changelog_revisions(text) == [ChangelogRevision("- second entry", "- replacement entry")]
+
+
+def test_parse_changelog_response_strips_revision_block_from_sections() -> None:
+    text = """<revise>
+OLD: - Added task labels
+NEW: - Added task labels with retries
+</revise>
+
+# Fixed
+- Fixed a released retry bug
+"""
+
+    assert parse_changelog_response(text) == {"entries": {"Fixed": ["Fixed a released retry bug"]}}
+
+
+def test_parse_changelog_response_accepts_revisions_only_without_exception() -> None:
+    text = """<revise>
+OLD: - Added canceled command
+NEW:
+</revise>"""
+
+    assert parse_changelog_response(text) == {"entries": {}}
 
 
 def test_parse_unreleased_section() -> None:
@@ -250,6 +319,30 @@ def test_entries_added_since_empty_when_unchanged() -> None:
     assert _entries_added_since(head, head, None) == {}
 
 
+def test_apply_revisions_replaces_drops_and_skips_unsafe_ops() -> None:
+    entries = {
+        ChangelogCategory.ADDED: ["- Before", "- Target entry", "- After", "- Authored entry"],
+        ChangelogCategory.FIXED: ["- Drop entry"],
+    }
+    replace_op = ChangelogRevision("- TARGET ENTRY", "- Replacement entry")
+    drop_op = ChangelogRevision("- Drop entry", None)
+    authored_op = ChangelogRevision("- Authored entry", None)
+    unmatched_op = ChangelogRevision("- Missing entry", None)
+
+    revised, applied = apply_revisions(
+        entries,
+        [replace_op, drop_op, authored_op, unmatched_op],
+        {"- target entry", "- drop entry", "- missing entry"},
+    )
+
+    assert revised == {
+        ChangelogCategory.ADDED: ["- Before", "- Replacement entry", "- After", "- Authored entry"],
+        ChangelogCategory.FIXED: [],
+    }
+    assert applied == [replace_op, drop_op]
+    assert entries[ChangelogCategory.ADDED][1] == "- Target entry"
+
+
 def test_drop_duplicate_entries_filters_case_insensitively() -> None:
     section = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Added retry logic.\n")
     entries = {
@@ -257,7 +350,7 @@ def test_drop_duplicate_entries_filters_case_insensitively() -> None:
         ChangelogCategory.FIXED: ["- Added retry logic."],
     }
 
-    assert _drop_duplicate_entries(entries, section, None) == {ChangelogCategory.ADDED: ["- Added new thing."]}
+    assert _drop_duplicate_entries(entries, section.entries, None) == {ChangelogCategory.ADDED: ["- Added new thing."]}
 
 
 def test_drop_duplicate_entries_catches_reworded_recategorized_copies() -> None:
@@ -272,7 +365,7 @@ def test_drop_duplicate_entries_catches_reworded_recategorized_copies() -> None:
         ],
     }
 
-    assert _drop_duplicate_entries(entries, section, None) == {
+    assert _drop_duplicate_entries(entries, section.entries, None) == {
         ChangelogCategory.FIXED: ["- Fixed crash when parsing empty diffs"]
     }
 
@@ -329,3 +422,109 @@ def test_flow_passes_authored_entries_and_drops_duplicates(repo: Path, run_git: 
     assert staged is not None
     assert staged.count("Changed value to return 2.") == 1
     assert "- Added extra helper." in staged
+
+
+def test_flow_revises_head_entry_without_adding_sections(
+    repo: Path,
+    run_git: RunGit,
+    monkeypatch: object,
+) -> None:
+    import lgit.api as api
+
+    changelog_path = _commit_batch_changelog(repo, run_git)
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+    replacement = "- Added reliable widget frobnication with automatic retries."
+    captured: list[object] = []
+
+    async def fake_run_oneshot(config: CommitConfig, spec: object) -> object:
+        captured.append(spec)
+        return SimpleNamespace(
+            output={"entries": {}},
+            text_content=(
+                f"<revise>\nOLD: {BATCH_ENTRY}\nNEW: {replacement}\n</revise>\n"
+                "<exception>consolidated into the existing entry</exception>"
+            ),
+        )
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)  # type: ignore[attr-defined]
+
+    updated = asyncio.run(run_changelog_flow(SimpleNamespace(dir=str(repo)), CommitConfig()))
+
+    assert len(updated) == 1
+    (spec,) = captured
+    assert "<revise>" in spec.system_prompt  # type: ignore[attr-defined]
+    staged = _staged_changelog_content("CHANGELOG.md", repo)
+    assert staged is not None
+    assert BATCH_ENTRY not in staged
+    assert staged.count(replacement) == 1
+    assert staged.count("### Added") == 1
+    assert "### Fixed" not in staged
+    assert changelog_path.read_text(encoding="utf-8") == staged
+
+
+def test_flow_protects_authored_entry_from_revision(
+    repo: Path,
+    run_git: RunGit,
+    monkeypatch: object,
+) -> None:
+    import lgit.api as api
+
+    changelog_path = _commit_batch_changelog(repo, run_git)
+    authored_entry = "- Added author-approved widget telemetry."
+    edited = BATCH_CHANGELOG.replace(BATCH_ENTRY, f"{authored_entry}\n{BATCH_ENTRY}")
+    changelog_path.write_text(edited, encoding="utf-8")
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    async def fake_run_oneshot(config: CommitConfig, spec: object) -> object:
+        return SimpleNamespace(
+            output={"entries": {}},
+            text_content=(
+                f"<revise>\nOLD: {authored_entry}\nNEW:\n</revise>\n"
+                "<exception>entry already covered the change</exception>"
+            ),
+        )
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)  # type: ignore[attr-defined]
+
+    updated = asyncio.run(run_changelog_flow(SimpleNamespace(dir=str(repo)), CommitConfig()))
+
+    assert updated == []
+    assert _staged_changelog_content("CHANGELOG.md", repo) == edited
+    assert changelog_path.read_text(encoding="utf-8") == edited
+
+
+def test_flow_revision_switch_disables_reconciliation(
+    repo: Path,
+    run_git: RunGit,
+    monkeypatch: object,
+) -> None:
+    import lgit.api as api
+
+    changelog_path = _commit_batch_changelog(repo, run_git)
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+    captured: list[object] = []
+
+    async def fake_run_oneshot(config: CommitConfig, spec: object) -> object:
+        captured.append(spec)
+        return SimpleNamespace(
+            output={"entries": {}},
+            text_content=f"<revise>\nOLD: {BATCH_ENTRY}\nNEW: - Replaced entry.\n</revise>",
+        )
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)  # type: ignore[attr-defined]
+
+    updated = asyncio.run(
+        run_changelog_flow(
+            SimpleNamespace(dir=str(repo)),
+            CommitConfig(changelog_revise=False),
+        )
+    )
+
+    assert updated == []
+    (spec,) = captured
+    assert "<revise>" not in spec.system_prompt  # type: ignore[attr-defined]
+    assert _staged_changelog_content("CHANGELOG.md", repo) == BATCH_CHANGELOG
+    assert changelog_path.read_text(encoding="utf-8") == BATCH_CHANGELOG

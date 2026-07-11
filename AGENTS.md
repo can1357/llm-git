@@ -115,6 +115,7 @@ uv run pytest -k truncate                    # Match by name
      - If all hunks = `["ALL"]`: stage whole files
      - Otherwise: extract specific hunks, `git apply --cached <patch>`
    - Generate commit message via standard flow
+   - Generate and reconcile changelog entries for the group before writing its commit tree. Claimed changelog files stay out of compose planning, and the user's staged changelog edit rides the first commit; `--no-changelog` or `changelog_enabled = false` disables the weave.
    - Create commit + capture new HEAD hash
    - Optionally run tests
 
@@ -159,12 +160,13 @@ uv run pytest -k truncate                    # Match by name
   - Whole-file / binary: `git update-index --cacheinfo` with the pinned blob (deletions via `--force-remove`); falls back to `git add` only for unpinned snapshots (tests)
 - Splice hunks into base - Reconstruct file content from base blob + selected hunks without `git apply`
 
-**Important**: The target staged tree is captured ONCE in `run_compose_mode`; each round's snapshot (diff + pins) is derived from it before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). The real index is then left untouched — so committed paths match the new HEAD (clean) while anything the user stages or edits mid-run stays exactly as they left it. `run_compose_mode` re-diffs `HEAD` against the fixed target and loops until they match, erroring if a round commits nothing while changes remain.
+**Important**: The target staged tree is captured ONCE in `run_compose_mode`; each round's snapshot (diff + pins) is derived from it before any LLM call. Commits are built as `commit-tree` objects against a temp index; the branch ref update at the end is guarded against HEAD movement (`update_ref_checked`). The real index is left untouched for planned source paths, so committed paths match the new HEAD (clean) while anything the user stages or edits mid-run stays exactly as they left it; claimed changelogs are synchronized separately under compare-before-write guards. `run_compose_mode` re-diffs `HEAD` against the fixed target and loops until they match, erroring if a round commits nothing while changes remain.
 
 **Snapshot isolation elsewhere:**
 - Standard/fast staged mode captures the index tree after auto-stage/changelog (`lgit/cli.py`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
 - Changelog maintenance (`lgit/changelog.py`) generates entries against the *staged* copy of `CHANGELOG.md` and stages the result as an exact blob, so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately. Reconciliation may replace or drop only entries from `HEAD`'s `[Unreleased]`; entries authored in the pending change are structurally protected, and unmatched operations are skipped.
 - Hand-written changelog edits are respected: `[Unreleased]` entries the author added in this change (staged/worktree vs `HEAD:`, `_entries_added_since`) are passed to the model as `authored_entries` — it documents only changes they don't cover, returning nothing when they cover everything. As a backstop, generated entries that restate an existing bullet (verbatim or ≥70% content-word overlap, `_drop_duplicate_entries`) are dropped before insertion.
+- Compose changelog weaving updates the real index and worktree only while each copy still matches what the run last staged or wrote; mid-run user changes win and remain untouched.
 
 ## Prompt Engineering
 

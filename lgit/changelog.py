@@ -42,6 +42,7 @@ class ChangelogRevision:
     old: str
     new: str | None
 
+
 @dataclass(frozen=True, slots=True)
 class ChangelogBoundary:
     """A changelog and the staged files governed by it."""
@@ -121,9 +122,7 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
         applied: list[ChangelogRevision] = []
         if can_revise:
             assert head_unreleased is not None
-            revisable = {
-                entry.casefold() for values in head_unreleased.entries.values() for entry in values
-            }
+            revisable = {entry.casefold() for values in head_unreleased.entries.values() for entry in values}
             staged_entries, applied = apply_revisions(staged_entries, revisions, revisable)
             if worktree_entries is not None:
                 worktree_entries, _ = apply_revisions(worktree_entries, revisions, revisable)
@@ -151,19 +150,262 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             stage_changelog_blob(rel_path, updated_staged, repo_dir)
         else:
             untracked_to_stage.append(rel_path)
-        for revision in applied:
-            if revision.new is None:
-                style.status(f"{style.info('›')} {style.dim('changelog: dropped:')} {style.dim(revision.old)}")
-            else:
-                style.status(
-                    f"{style.info('›')} {style.dim('changelog: revised:')} "
-                    f"{style.dim(revision.old)} {style.dim('→')} {revision.new}"
-                )
+        _report_applied_revisions(applied)
         updated.append(ChangelogBoundary(boundary.changelog_path, boundary.files, diff, stat))
 
     if untracked_to_stage:
         run_git(["add", "--", *untracked_to_stage], cwd=repo_dir)
     return updated
+
+
+@dataclass(slots=True)
+class _ComposeBoundaryState:
+    rel_path: str
+    changelog_path: Path
+    is_package: bool
+    original_head_oid: str | None
+    target_mode: str
+    target_oid: str
+    target_content: str
+    head_unreleased: UnreleasedSection
+    authored: dict[ChangelogCategory, list[str]]
+    chain_content: str
+    worktree_content: str
+    last_written_worktree: str
+    staged_index_oid: str
+
+
+@dataclass(slots=True)
+class ChangelogWeaver:
+    """Weave generated changelog entries into each commit of one compose run."""
+
+    boundaries: list[_ComposeBoundaryState]
+    config: CommitConfig
+
+    @classmethod
+    def create(
+        cls,
+        repo_dir: str | os.PathLike[str],
+        config: CommitConfig,
+        target_tree: str,
+    ) -> ChangelogWeaver | None:
+        """Claim parseable changelogs from the compose target tree."""
+
+        if not config.changelog_enabled:
+            return None
+
+        repo_path = Path(repo_dir)
+        boundaries: list[_ComposeBoundaryState] = []
+        for path in _find_changelogs(repo_path):
+            rel_path = _relative_to(path, repo_path)
+            target_entry = run_git(["ls-tree", target_tree, "--", rel_path], cwd=repo_path).stdout
+            target_fields = target_entry.split(maxsplit=3)
+            if len(target_fields) < 3:
+                continue
+            target_mode, target_oid = target_fields[0], target_fields[2]
+            target_content = run_git(["show", f"{target_tree}:{rel_path}"], cwd=repo_path).stdout
+
+            head_result = run_git(["rev-parse", f"HEAD:{rel_path}"], cwd=repo_path, check=False)
+            original_head_oid = head_result.stdout.strip() if head_result.returncode == 0 else None
+            head_unreleased = _head_unreleased(rel_path, path, repo_path)
+            if head_unreleased is None:
+                continue
+
+            try:
+                target_unreleased = parse_unreleased_section(target_content, path)
+                worktree_content = path.read_text(encoding="utf-8")
+                worktree_unreleased = parse_unreleased_section(worktree_content, path)
+            except OSError, UnicodeError, ValidationFailure:
+                continue
+
+            authored = _entries_added_since(
+                head_unreleased,
+                target_unreleased,
+                worktree_unreleased if worktree_content != target_content else None,
+            )
+            boundaries.append(
+                _ComposeBoundaryState(
+                    rel_path=rel_path,
+                    changelog_path=path,
+                    is_package=_is_package_changelog(path, repo_path),
+                    original_head_oid=original_head_oid,
+                    target_mode=target_mode,
+                    target_oid=target_oid,
+                    target_content=target_content,
+                    head_unreleased=head_unreleased,
+                    authored=authored,
+                    chain_content=target_content,
+                    worktree_content=worktree_content,
+                    last_written_worktree=worktree_content,
+                    staged_index_oid=target_oid,
+                )
+            )
+
+        return cls(boundaries, config) if boundaries else None
+
+    def exclude_pathspecs(self) -> list[str]:
+        """Return root-anchored pathspecs for changelogs owned by this run."""
+
+        return [f":(exclude,top){boundary.rel_path}" for boundary in self.boundaries]
+
+    def seed_temp_index(
+        self,
+        repo_dir: str | os.PathLike[str],
+        index_file: str | os.PathLike[str],
+    ) -> None:
+        """Seed authored target changelog blobs unless an earlier round already wove them."""
+
+        for state in self.boundaries:
+            current_result = run_git(
+                ["rev-parse", f"HEAD:{state.rel_path}"],
+                cwd=repo_dir,
+                check=False,
+            )
+            current_oid = current_result.stdout.strip() if current_result.returncode == 0 else None
+            if current_oid == state.original_head_oid:
+                run_git(
+                    [
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        f"{state.target_mode},{state.target_oid},{state.rel_path}",
+                    ],
+                    cwd=repo_dir,
+                    index_file=index_file,
+                )
+                state.chain_content = state.target_content
+            else:
+                state.chain_content = run_git(
+                    ["show", f"HEAD:{state.rel_path}"],
+                    cwd=repo_dir,
+                ).stdout
+
+    async def weave_group(
+        self,
+        files: Sequence[str],
+        diff: str,
+        stat: str,
+        repo_dir: str | os.PathLike[str],
+        index_file: str | os.PathLike[str],
+    ) -> None:
+        """Generate, reconcile, and stage changelog entries for one compose group."""
+
+        matched = detect_boundaries(
+            files,
+            [state.changelog_path for state in self.boundaries],
+            repo_dir,
+        )
+        states = {state.changelog_path: state for state in self.boundaries}
+        group_diff = (
+            smart_truncate_diff(diff, self.config.max_diff_length, self.config)
+            if len(diff) > self.config.max_diff_length
+            else diff
+        )
+        for boundary in matched:
+            state = states[boundary.changelog_path]
+            try:
+                parent_unreleased = parse_unreleased_section(state.chain_content, state.changelog_path)
+            except ValidationFailure:
+                continue
+
+            authored_casefolds = {entry.casefold() for values in state.authored.values() for entry in values}
+            existing_map: dict[ChangelogCategory, list[str]] = {}
+            for category, values in parent_unreleased.entries.items():
+                existing = [entry for entry in values if entry.casefold() not in authored_casefolds]
+                if existing:
+                    existing_map[category] = existing
+            existing_entries = _format_entry_map(existing_map)
+            authored_entries = _format_entry_map(state.authored)
+            can_revise = bool(self.config.changelog_revise) and bool(existing_entries)
+
+            entries, revisions = await generate_changelog_entries(
+                state.changelog_path,
+                state.is_package,
+                stat,
+                group_diff,
+                existing_entries,
+                authored_entries,
+                can_revise,
+                self.config,
+            )
+            revisable = {entry.casefold() for values in existing_map.values() for entry in values}
+            if can_revise:
+                revised_map, applied = apply_revisions(
+                    parent_unreleased.entries,
+                    revisions,
+                    revisable,
+                )
+            else:
+                revised_map = {category: list(values) for category, values in parent_unreleased.entries.items()}
+                applied = []
+
+            shadow_unreleased = parse_unreleased_section(
+                state.worktree_content,
+                state.changelog_path,
+            )
+            if can_revise:
+                shadow_revised_map, _ = apply_revisions(
+                    shadow_unreleased.entries,
+                    revisions,
+                    revisable,
+                )
+            else:
+                shadow_revised_map = {category: list(values) for category, values in shadow_unreleased.entries.items()}
+
+            entries = _drop_duplicate_entries(entries, revised_map, shadow_revised_map)
+            if not entries and not applied:
+                continue
+
+            state.chain_content = write_entries(
+                state.chain_content,
+                replace(parent_unreleased, entries=revised_map),
+                entries,
+            )
+            state.worktree_content = write_entries(
+                state.worktree_content,
+                replace(shadow_unreleased, entries=shadow_revised_map),
+                entries,
+            )
+            stage_changelog_blob(
+                state.rel_path,
+                state.chain_content,
+                repo_dir,
+                index_file=index_file,
+            )
+            _report_applied_revisions(applied)
+
+    def flush(self, repo_dir: str | os.PathLike[str]) -> None:
+        """Publish woven content unless the user changed the worktree or index mid-run."""
+
+        for state in self.boundaries:
+            try:
+                current_worktree = state.changelog_path.read_text(encoding="utf-8")
+            except OSError, UnicodeError:
+                current_worktree = None
+            if current_worktree == state.last_written_worktree:
+                if current_worktree != state.worktree_content:
+                    state.changelog_path.write_text(state.worktree_content, encoding="utf-8")
+                state.last_written_worktree = state.worktree_content
+            else:
+                style.status(
+                    f"{style.info('›')} "
+                    f"{style.dim('changelog: worktree edited mid-run; left untouched:')} "
+                    f"{state.rel_path}"
+                )
+
+            current_index_oid = _staged_changelog_oid(state.rel_path, repo_dir)
+            if current_index_oid == state.staged_index_oid:
+                state.staged_index_oid = stage_changelog_blob(
+                    state.rel_path,
+                    state.chain_content,
+                    repo_dir,
+                )
+            else:
+                style.status(
+                    f"{style.info('›')} "
+                    f"{style.dim('changelog: index staged mid-run; left untouched:')} "
+                    f"{state.rel_path}"
+                )
 
 
 def parse_unreleased_section(content: str, path: str | os.PathLike[str] = "CHANGELOG.md") -> UnreleasedSection:
@@ -243,15 +485,25 @@ def stage_changelog_blob(
     rel_path: str | os.PathLike[str],
     content: str,
     dir: str | os.PathLike[str] = ".",
+    index_file: str | os.PathLike[str] | None = None,
 ) -> str:
     """Stage exact changelog content as an index blob without git-adding the worktree copy."""
 
     path_text = os.fspath(rel_path)
-    oid = run_git(["hash-object", "-w", "--stdin"], cwd=dir, input_text=content).stdout.strip()
+    oid = run_git(
+        ["hash-object", "-w", "--stdin"],
+        cwd=dir,
+        input_text=content,
+        index_file=index_file,
+    ).stdout.strip()
     if not oid:
         raise GitError(f"git hash-object returned no oid for {path_text}")
-    mode = _staged_changelog_mode(path_text, dir)
-    run_git(["update-index", "--add", "--cacheinfo", f"{mode},{oid},{path_text}"], cwd=dir)
+    mode = _staged_changelog_mode(path_text, dir, index_file=index_file)
+    run_git(
+        ["update-index", "--add", "--cacheinfo", f"{mode},{oid},{path_text}"],
+        cwd=dir,
+        index_file=index_file,
+    )
     return oid
 
 
@@ -385,10 +637,16 @@ def _find_changelogs(dir: Path) -> list[Path]:
     paths = {
         dir / path
         for path in run_git(["ls-files", "--", "CHANGELOG.md", "**/CHANGELOG.md"], cwd=dir).stdout.splitlines()
+        if Path(path).name == "CHANGELOG.md"
     }
     for path in dir.rglob("CHANGELOG.md"):
-        if ".git" not in path.parts:
-            paths.add(path)
+        if ".git" in path.parts:
+            continue
+        try:
+            exact_path = next(child for child in path.parent.iterdir() if child.name == "CHANGELOG.md")
+        except OSError, StopIteration:
+            continue
+        paths.add(exact_path)
     return sorted(paths, key=lambda path: _relative_to(path, dir))
 
 
@@ -397,9 +655,23 @@ def _staged_changelog_content(rel_path: str, dir: str | os.PathLike[str]) -> str
     return result.stdout if result.returncode == 0 else None
 
 
-def _staged_changelog_mode(rel_path: str, dir: str | os.PathLike[str]) -> str:
-    result = run_git(["ls-files", "-s", "--", rel_path], cwd=dir).stdout.strip()
+def _staged_changelog_mode(
+    rel_path: str,
+    dir: str | os.PathLike[str],
+    index_file: str | os.PathLike[str] | None = None,
+) -> str:
+    result = run_git(
+        ["ls-files", "-s", "--", rel_path],
+        cwd=dir,
+        index_file=index_file,
+    ).stdout.strip()
     return result.split(maxsplit=1)[0] if result else "100644"
+
+
+def _staged_changelog_oid(rel_path: str, dir: str | os.PathLike[str]) -> str | None:
+    result = run_git(["ls-files", "-s", "--", rel_path], cwd=dir).stdout.strip()
+    fields = result.split(maxsplit=3)
+    return fields[1] if len(fields) >= 2 else None
 
 
 def _head_unreleased(
@@ -467,6 +739,17 @@ def apply_revisions(
             if matched:
                 break
     return revised, applied
+
+
+def _report_applied_revisions(applied: Sequence[ChangelogRevision]) -> None:
+    for revision in applied:
+        if revision.new is None:
+            style.status(f"{style.info('›')} {style.dim('changelog: dropped:')} {style.dim(revision.old)}")
+        else:
+            style.status(
+                f"{style.info('›')} {style.dim('changelog: revised:')} "
+                f"{style.dim(revision.old)} {style.dim('→')} {revision.new}"
+            )
 
 
 def _drop_duplicate_entries(
@@ -628,6 +911,7 @@ def _parse_jsonish(value: Any) -> Any:
 
 __all__ = [
     "ChangelogBoundary",
+    "ChangelogWeaver",
     "ChangelogRevision",
     "UnreleasedSection",
     "apply_revisions",

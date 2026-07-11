@@ -188,8 +188,11 @@ def render_changelog_prompt(
     stat: str,
     diff: str,
     existing_entries: str | None = None,
+    authored_entries: str | None = None,
+    can_revise: bool = False,
 ) -> PromptParts:
-    """Render the changelog prompt."""
+    """Render the changelog prompt, selecting its bounded reconciliation variant."""
+
     template_content = load_template_file("changelog")
     context = {
         "changelog_path": changelog_path,
@@ -197,8 +200,23 @@ def render_changelog_prompt(
         "stat": stat,
         "diff": diff,
         "existing_entries": existing_entries,
+        "authored_entries": authored_entries,
+        "can_revise": can_revise,
     }
-    return render_prompt_parts("changelog.md", template_content, context)
+    system_template, user_template = split_prompt_template(template_content)
+    if system_template is None:
+        return render_prompt_parts("changelog.md", template_content, context)
+
+    static_system = system_template
+    for tag in ("{% if can_revise %}", "{% else %}", "{% endif %}"):
+        static_system = static_system.replace(tag, "")
+    _ensure_static_system_prompt(static_system, "changelog.md")
+    try:
+        system = _ENV.from_string(system_template).render(can_revise=can_revise)
+        user = _ENV.from_string(user_template).render(**context)
+    except Exception as exc:  # jinja2 has several template-specific subclasses.
+        raise ConfigError(f"Failed to render changelog.md prompt template: {exc}") from exc
+    return PromptParts(system=system.strip(), user=user.strip())
 
 
 def render_map_prompt(

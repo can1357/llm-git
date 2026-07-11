@@ -5,14 +5,124 @@ from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from lgit import compose, git
+from lgit import api, compose, git
+from lgit.changelog import ChangelogWeaver, stage_changelog_blob
 from lgit.compose import ComposeExecutableGroup, ComposeExecutablePlan, ComposeIntentGroup
 from lgit.config import CommitConfig
 from lgit.errors import GitError, NoChanges, ValidationFailure
 from lgit.models import Scope
 from lgit.patch import build_compose_snapshot, pin_snapshot_staged_state
+
+_EMPTY_CHANGELOG = "# Changelog\n\n## [Unreleased]\n"
+
+
+def _changelog(*entries: str) -> str:
+    if not entries:
+        return _EMPTY_CHANGELOG
+    bullets = "\n".join(f"- {entry}" for entry in entries)
+    return f"{_EMPTY_CHANGELOG}\n### Added\n\n{bullets}\n"
+
+
+def _compose_args(repo: Path) -> Namespace:
+    return Namespace(
+        dir=str(repo),
+        compose_preview=False,
+        compose_max_commits=None,
+        compose_test_after_each=False,
+        sign=False,
+        signoff=False,
+        debug_output=None,
+    )
+
+
+async def _prepared_two_group_messages(*args: object) -> list[str]:
+    return ["feat: added alpha support", "fix: fixed beta parsing"]
+
+
+def _prepare_two_group_weave(
+    repo: Path,
+    run_git: Callable[..., object],
+    *,
+    authored_entry: str | None = None,
+):
+    (repo / "CHANGELOG.md").write_text(_EMPTY_CHANGELOG, encoding="utf-8")
+    (repo / "a.py").write_text("alpha = 1\n", encoding="utf-8")
+    (repo / "b.py").write_text("beta = 1\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "initial")
+
+    (repo / "a.py").write_text("alpha = 2\n", encoding="utf-8")
+    (repo / "b.py").write_text("beta = 2\n", encoding="utf-8")
+    if authored_entry is not None:
+        (repo / "CHANGELOG.md").write_text(_changelog(authored_entry), encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    config = CommitConfig()
+    target_tree = git.write_real_index_tree(repo)
+    weaver = ChangelogWeaver.create(repo, config, target_tree)
+    assert weaver is not None
+    exclude = weaver.exclude_pathspecs()
+    snapshot = pin_snapshot_staged_state(
+        build_compose_snapshot(
+            git.get_compose_diff(repo, config, target_tree, exclude=exclude),
+            git.get_compose_stat(repo, target_tree, exclude=exclude),
+        ),
+        repo,
+        target_tree,
+    )
+    a_file = snapshot.file_by_path("a.py")
+    b_file = snapshot.file_by_path("b.py")
+    assert a_file is not None and b_file is not None
+    plan = ComposeExecutablePlan(
+        groups=(
+            ComposeExecutableGroup(
+                group_id="G1",
+                commit_type="feat",
+                scope=None,
+                file_ids=(a_file.file_id,),
+                rationale="add alpha support",
+                dependencies=(),
+                hunk_ids=a_file.hunk_ids,
+            ),
+            ComposeExecutableGroup(
+                group_id="G2",
+                commit_type="fix",
+                scope=None,
+                file_ids=(b_file.file_id,),
+                rationale="fix beta parsing",
+                dependencies=("G1",),
+                hunk_ids=b_file.hunk_ids,
+            ),
+        ),
+        dependency_order=(0, 1),
+    )
+    return snapshot, plan, config, _compose_args(repo), compose.capture_compose_base_state(repo), weaver
+
+
+def _prepare_flush_guard(
+    repo: Path,
+    run_git: Callable[..., object],
+):
+    (repo / "CHANGELOG.md").write_text(_EMPTY_CHANGELOG, encoding="utf-8")
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "initial")
+
+    target_content = _changelog("Added target capability")
+    (repo / "CHANGELOG.md").write_text(target_content, encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    target_tree = git.write_real_index_tree(repo)
+    weaver = ChangelogWeaver.create(repo, CommitConfig(), target_tree)
+    assert weaver is not None
+
+    desired_content = _changelog("Added target capability", "Added woven capability")
+    state = weaver.boundaries[0]
+    state.chain_content = desired_content
+    state.worktree_content = desired_content
+    return weaver, target_content, desired_content
 
 
 def _shared_file_diff() -> tuple[str, str]:
@@ -446,7 +556,13 @@ def test_compose_target_tree_excludes_changes_staged_after_invocation(
 def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     rounds: list[int] = []
 
-    async def fake_round(args: object, config: object, target_tree: str, round_number: int) -> list[str]:
+    async def fake_round(
+        args: object,
+        config: object,
+        target_tree: str,
+        round_number: int,
+        weaver: object | None = None,
+    ) -> list[str]:
         rounds.append(round_number)
         return [f"hash{round_number}"]
 
@@ -471,7 +587,13 @@ def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.Monk
 
 
 def test_run_compose_mode_errors_when_a_round_makes_no_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_round(args: object, config: object, target_tree: str, round_number: int) -> list[str]:
+    async def fake_round(
+        args: object,
+        config: object,
+        target_tree: str,
+        round_number: int,
+        weaver: object | None = None,
+    ) -> list[str]:
         return []
 
     monkeypatch.setattr(compose.git, "write_real_index_tree", lambda *a, **k: "T0")
@@ -803,3 +925,210 @@ def test_chunk_ambiguous_files_splits_large_binding_request() -> None:
         and sum(len(file["hunk_ids"]) for file in batch) <= compose.MAX_BIND_HUNKS_PER_REQUEST
         for batch in batches
     )
+
+
+def test_compose_diff_and_stat_exclude_claimed_changelog(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    (empty_repo / "CHANGELOG.md").write_text(_EMPTY_CHANGELOG, encoding="utf-8")
+    (empty_repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+    run_git(empty_repo, "commit", "-m", "initial")
+
+    (empty_repo / "CHANGELOG.md").write_text(
+        _changelog("Added hand-authored capability"),
+        encoding="utf-8",
+    )
+    (empty_repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    run_git(empty_repo, "add", ".")
+
+    exclude = (":(exclude,top)CHANGELOG.md",)
+    diff = git.get_compose_diff(empty_repo, exclude=exclude)
+    stat = git.get_compose_stat(empty_repo, exclude=exclude)
+
+    assert "diff --git a/CHANGELOG.md b/CHANGELOG.md" not in diff
+    assert "diff --git a/app.py b/app.py" in diff
+    assert "CHANGELOG.md" not in stat
+    assert "app.py" in stat
+
+
+def test_changelog_weaver_disabled_does_not_claim_boundary(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    (empty_repo / "CHANGELOG.md").write_text(_EMPTY_CHANGELOG, encoding="utf-8")
+    run_git(empty_repo, "add", "CHANGELOG.md")
+    run_git(empty_repo, "commit", "-m", "initial")
+    target_tree = git.write_real_index_tree(empty_repo)
+
+    assert ChangelogWeaver.create(empty_repo, CommitConfig(changelog_enabled=False), target_tree) is None
+
+
+def test_changelog_weaver_skips_changelog_absent_from_target(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    (empty_repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    run_git(empty_repo, "add", "app.py")
+    run_git(empty_repo, "commit", "-m", "initial")
+    (empty_repo / "CHANGELOG.md").write_text(_EMPTY_CHANGELOG, encoding="utf-8")
+    target_tree = git.write_real_index_tree(empty_repo)
+
+    weaver = ChangelogWeaver.create(empty_repo, CommitConfig(), target_tree)
+    exclude = weaver.exclude_pathspecs() if weaver else []
+
+    assert weaver is None
+    assert exclude == []
+
+
+def test_execute_compose_weaves_and_revises_changelog_per_group(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, plan, config, args, base_state, weaver = _prepare_two_group_weave(empty_repo, run_git)
+    responses = iter(
+        (
+            SimpleNamespace(
+                output={"entries": {"Added": ["Added alpha support"]}},
+                text_content="# Added\n- Added alpha support",
+            ),
+            SimpleNamespace(
+                output={"entries": {}},
+                text_content=(
+                    "<revise>\n"
+                    "OLD: - Added alpha support\n"
+                    "NEW: - Added alpha support with automatic retry\n"
+                    "</revise>\n"
+                    "<exception>consolidated earlier entry</exception>"
+                ),
+            ),
+        )
+    )
+
+    async def fake_run_oneshot(*args: object, **kwargs: object) -> SimpleNamespace:
+        return next(responses)
+
+    monkeypatch.setattr(compose, "_prepare_group_messages", _prepared_two_group_messages)
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)
+
+    hashes = asyncio.run(compose.execute_compose(snapshot, plan, config, args, base_state, weaver))
+
+    assert len(hashes) == 2
+    first = run_git(empty_repo, "show", f"{hashes[0]}:CHANGELOG.md").stdout
+    final = run_git(empty_repo, "show", f"{hashes[1]}:CHANGELOG.md").stdout
+    assert "- Added alpha support\n" in first
+    assert "- Added alpha support\n" not in final
+    assert final.count("- Added alpha support with automatic retry") == 1
+    assert (empty_repo / "CHANGELOG.md").read_text(encoding="utf-8") == final
+    assert run_git(empty_repo, "diff", "--cached", "--", "CHANGELOG.md").stdout == ""
+
+
+def test_execute_compose_seeds_and_protects_authored_changelog_entry(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authored = "Added hand-written capability"
+    snapshot, plan, config, args, base_state, weaver = _prepare_two_group_weave(
+        empty_repo,
+        run_git,
+        authored_entry=authored,
+    )
+    calls = 0
+
+    async def fake_run_oneshot(*args: object, **kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            output={"entries": {}},
+            text_content=(
+                f"<revise>\nOLD: - {authored}\nNEW:\n</revise>\n<exception>attempted authored drop</exception>"
+            ),
+        )
+
+    monkeypatch.setattr(compose, "_prepare_group_messages", _prepared_two_group_messages)
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)
+
+    hashes = asyncio.run(compose.execute_compose(snapshot, plan, config, args, base_state, weaver))
+
+    assert len(hashes) == 2
+    first = run_git(empty_repo, "show", f"{hashes[0]}:CHANGELOG.md").stdout
+    final = run_git(empty_repo, "show", f"{hashes[1]}:CHANGELOG.md").stdout
+    assert first.count(f"- {authored}") == 1
+    assert final.count(f"- {authored}") == 1
+    assert (empty_repo / "CHANGELOG.md").read_text(encoding="utf-8") == final
+    assert run_git(empty_repo, "diff", "--cached", "--", "CHANGELOG.md").stdout == ""
+    assert calls == 2
+
+
+def test_changelog_weaver_seed_keeps_prior_round_head_content(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    weaver, _, _ = _prepare_flush_guard(empty_repo, run_git)
+    prior_content = _changelog("Added target capability", "Added prior-round capability")
+    (empty_repo / "CHANGELOG.md").write_text(prior_content, encoding="utf-8")
+    run_git(empty_repo, "add", "CHANGELOG.md")
+    run_git(empty_repo, "commit", "-m", "prior round", "--", "CHANGELOG.md")
+
+    with git.TempGitIndex(empty_repo) as index:
+        git.read_tree_into_index(index.path, git.get_head_hash(empty_repo), empty_repo)
+        weaver.seed_temp_index(empty_repo, index.path)
+        seeded = git.run_git(
+            ["show", ":CHANGELOG.md"],
+            cwd=empty_repo,
+            index_file=index.path,
+        ).stdout
+
+    assert seeded == prior_content
+    assert weaver.boundaries[0].chain_content == prior_content
+
+
+def test_changelog_weaver_flush_preserves_mid_run_index_staging(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    weaver, _, _ = _prepare_flush_guard(empty_repo, run_git)
+    user_staged = _changelog("Added user-staged capability")
+    stage_changelog_blob("CHANGELOG.md", user_staged, empty_repo)
+
+    weaver.flush(empty_repo)
+
+    assert git.run_git(["show", ":CHANGELOG.md"], cwd=empty_repo).stdout == user_staged
+
+
+def test_changelog_weaver_flush_preserves_mid_run_worktree_edit(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    weaver, _, desired_content = _prepare_flush_guard(empty_repo, run_git)
+    user_worktree = _changelog("Added user worktree capability")
+    (empty_repo / "CHANGELOG.md").write_text(user_worktree, encoding="utf-8")
+
+    weaver.flush(empty_repo)
+
+    assert (empty_repo / "CHANGELOG.md").read_text(encoding="utf-8") == user_worktree
+    assert git.run_git(["show", ":CHANGELOG.md"], cwd=empty_repo).stdout == desired_content
+
+
+def test_run_compose_mode_rejects_changelog_only_changeset(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+) -> None:
+    (empty_repo / "CHANGELOG.md").write_text(_EMPTY_CHANGELOG, encoding="utf-8")
+    run_git(empty_repo, "add", "CHANGELOG.md")
+    run_git(empty_repo, "commit", "-m", "initial")
+    original_head = git.get_head_hash(empty_repo)
+    (empty_repo / "CHANGELOG.md").write_text(
+        _changelog("Added hand-authored capability"),
+        encoding="utf-8",
+    )
+    run_git(empty_repo, "add", "CHANGELOG.md")
+
+    with pytest.raises(NoChanges):
+        asyncio.run(compose.run_compose_mode(_compose_args(empty_repo), CommitConfig()))
+
+    assert git.get_head_hash(empty_repo) == original_head
+    assert run_git(empty_repo, "diff", "--cached", "--name-only").stdout.split() == ["CHANGELOG.md"]
