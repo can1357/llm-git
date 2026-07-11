@@ -1,19 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 
 from lgit.api import _extract_json_from_content
 from lgit.changelog import (
     UnreleasedSection,
+    _drop_duplicate_entries,
+    _entries_added_since,
     _format_existing_entries,
+    _head_unreleased,
     _parse_jsonish,
     _staged_changelog_content,
     parse_unreleased_section,
+    run_changelog_flow,
     stage_changelog_blob,
     write_entries,
 )
+from lgit.config import CommitConfig
 from lgit.models import ChangelogCategory
 
 type RunGit = Callable[..., CompletedProcess[str]]
@@ -218,3 +225,107 @@ def test_format_existing_entries_empty() -> None:
     unreleased = UnreleasedSection(Path("CHANGELOG.md"), header_line=0, end_line=10, entries={})
 
     assert _format_existing_entries(unreleased) is None
+
+
+def test_entries_added_since_isolates_hand_written_entries() -> None:
+    head = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Old entry.\n")
+    staged = parse_unreleased_section(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- New staged entry.\n- Old entry.\n\n### Fixed\n\n- New fix.\n"
+    )
+    worktree = parse_unreleased_section(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- New staged entry.\n- Worktree only entry.\n- Old entry.\n"
+    )
+
+    added = _entries_added_since(head, staged, worktree)
+
+    assert added == {
+        ChangelogCategory.ADDED: ["- New staged entry.", "- Worktree only entry."],
+        ChangelogCategory.FIXED: ["- New fix."],
+    }
+
+
+def test_entries_added_since_empty_when_unchanged() -> None:
+    head = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Old entry.\n")
+
+    assert _entries_added_since(head, head, None) == {}
+
+
+def test_drop_duplicate_entries_filters_case_insensitively() -> None:
+    section = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Added retry logic.\n")
+    entries = {
+        ChangelogCategory.ADDED: ["- added retry logic.", "- Added new thing."],
+        ChangelogCategory.FIXED: ["- Added retry logic."],
+    }
+
+    assert _drop_duplicate_entries(entries, section, None) == {ChangelogCategory.ADDED: ["- Added new thing."]}
+
+
+def test_drop_duplicate_entries_catches_reworded_recategorized_copies() -> None:
+    section = parse_unreleased_section(
+        "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n"
+        "- Task rendering now keeps the agent type badge on live progress and finished result rows.\n"
+    )
+    entries = {
+        ChangelogCategory.FIXED: [
+            "- Fixed task rendering to keep the agent type badge visible on progress and result rows",
+            "- Fixed crash when parsing empty diffs",
+        ],
+    }
+
+    assert _drop_duplicate_entries(entries, section, None) == {
+        ChangelogCategory.FIXED: ["- Fixed crash when parsing empty diffs"]
+    }
+
+
+def test_head_unreleased_missing_file_marks_all_entries_authored(repo: Path) -> None:
+    section = _head_unreleased("CHANGELOG.md", repo / "CHANGELOG.md", repo)
+
+    assert section is not None
+    assert section.entries == {}
+
+
+def test_head_unreleased_unparseable_returns_none(repo: Path, run_git: RunGit) -> None:
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\nNo unreleased section here.\n", encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: changelog without unreleased")
+
+    assert _head_unreleased("CHANGELOG.md", repo / "CHANGELOG.md", repo) is None
+
+
+def test_flow_passes_authored_entries_and_drops_duplicates(repo: Path, run_git: RunGit, monkeypatch: object) -> None:
+    import lgit.api as api
+
+    changelog_path = repo / "CHANGELOG.md"
+    changelog_path.write_text(BASE_CHANGELOG, encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+
+    (repo / "app.py").write_text("def value():\n    return 2\n\n\ndef extra():\n    return 3\n", encoding="utf-8")
+    edited = BASE_CHANGELOG.replace(
+        "## [Unreleased]\n",
+        "## [Unreleased]\n\n### Changed\n\n- Changed value to return 2.\n",
+    )
+    changelog_path.write_text(edited, encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    captured: list[object] = []
+
+    async def fake_run_oneshot(config: CommitConfig, spec: object) -> object:
+        captured.append(spec)
+        return SimpleNamespace(output="# Changed\n- changed value to return 2.\n\n# Added\n- Added extra helper.")
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)  # type: ignore[attr-defined]
+
+    args = SimpleNamespace(dir=str(repo))
+    updated = asyncio.run(run_changelog_flow(args, CommitConfig()))
+
+    assert len(updated) == 1
+    (spec,) = captured
+    prompt = spec.user_prompt  # type: ignore[attr-defined]
+    assert "<authored_entries>" in prompt
+    assert "- Changed value to return 2." in prompt
+
+    staged = _staged_changelog_content("CHANGELOG.md", repo)
+    assert staged is not None
+    assert staged.count("Changed value to return 2.") == 1
+    assert "- Added extra helper." in staged

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -84,14 +85,24 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             except ValidationFailure:
                 continue
 
+        head_unreleased = _head_unreleased(rel_path, boundary.changelog_path, repo_dir)
+        if head_unreleased is None:
+            existing_entries = _format_existing_entries(unreleased)
+            authored_entries = None
+        else:
+            existing_entries = _format_entry_map(head_unreleased.entries)
+            authored_entries = _format_entry_map(_entries_added_since(head_unreleased, unreleased, worktree_unreleased))
+
         entries = await generate_changelog_entries(
             boundary.changelog_path,
             _is_package_changelog(boundary.changelog_path, repo_dir),
             stat,
             diff,
-            _format_existing_entries(unreleased),
+            existing_entries,
+            authored_entries,
             config,
         )
+        entries = _drop_duplicate_entries(entries, unreleased, worktree_unreleased)
         if not entries:
             continue
 
@@ -255,6 +266,7 @@ async def generate_changelog_entries(
     stat: str,
     diff: str,
     existing_entries: str | None,
+    authored_entries: str | None,
     config: CommitConfig,
 ) -> dict[ChangelogCategory, list[str]]:
     """Ask the configured model for Keep a Changelog entries."""
@@ -267,6 +279,7 @@ async def generate_changelog_entries(
             "stat": stat,
             "diff": diff,
             "existing_entries": existing_entries or "",
+            "authored_entries": authored_entries or "",
         },
     )
     from .api import OneShotSpec, run_oneshot
@@ -325,6 +338,86 @@ def _staged_changelog_mode(rel_path: str, dir: str | os.PathLike[str]) -> str:
     return result.split(maxsplit=1)[0] if result else "100644"
 
 
+def _head_unreleased(
+    rel_path: str,
+    path: str | os.PathLike[str],
+    dir: str | os.PathLike[str],
+) -> UnreleasedSection | None:
+    """Parse HEAD's copy of the changelog.
+
+    Returns an empty section when the file is absent from HEAD (every current
+    entry was authored in this change), or None when HEAD's copy is unparseable.
+    """
+    result = run_git(["show", f"HEAD:{rel_path}"], cwd=dir, check=False, allow_exit_codes=(128,))
+    if result.returncode != 0:
+        return UnreleasedSection(Path(path), 0, 0, {})
+    try:
+        return parse_unreleased_section(result.stdout, path)
+    except ValidationFailure:
+        return None
+
+
+def _entries_added_since(
+    head: UnreleasedSection,
+    *sections: UnreleasedSection | None,
+) -> dict[ChangelogCategory, list[str]]:
+    """Unreleased entries present now but absent from HEAD — hand-written for this change."""
+    baseline = {entry.casefold() for values in head.entries.values() for entry in values}
+    added: dict[ChangelogCategory, list[str]] = {}
+    for section in sections:
+        if section is None:
+            continue
+        for category, values in section.entries.items():
+            bucket = added.setdefault(category, [])
+            for entry in values:
+                if entry.casefold() not in baseline and entry not in bucket:
+                    bucket.append(entry)
+    return {category: values for category, values in added.items() if values}
+
+
+def _drop_duplicate_entries(
+    entries: dict[ChangelogCategory, list[str]],
+    *sections: UnreleasedSection | None,
+) -> dict[ChangelogCategory, list[str]]:
+    """Drop generated entries that restate ones already in the Unreleased section.
+
+    Catches verbatim repeats and near-duplicates (most of the entry's content
+    words already appear in a single existing entry, e.g. a reworded or
+    recategorized copy of a hand-written line).
+    """
+    existing = [
+        _entry_words(entry)
+        for section in sections
+        if section is not None
+        for values in section.entries.values()
+        for entry in values
+    ]
+
+    def is_duplicate(entry: str) -> bool:
+        words = _entry_words(entry)
+        if not words:
+            return True
+        return any(len(words & seen) / len(words) >= 0.7 for seen in existing)
+
+    deduped: dict[ChangelogCategory, list[str]] = {}
+    for category, values in entries.items():
+        fresh = [value for value in values if not is_duplicate(value)]
+        if fresh:
+            deduped[category] = fresh
+    return deduped
+
+
+_ENTRY_STOPWORDS = frozenset(
+    "the and for was were now not that this with from are has had have been its when then than into also".split()
+)
+
+
+def _entry_words(entry: str) -> set[str]:
+    """Significant, lightly-stemmed content words of a changelog bullet."""
+    words = re.findall(r"[a-z0-9]+", entry.casefold())
+    return {word.removesuffix("s") for word in words if len(word) > 2 and word not in _ENTRY_STOPWORDS}
+
+
 def _diff_for_files(files: Sequence[str], dir: Path, max_len: int) -> str:
     if not files:
         return ""
@@ -363,16 +456,20 @@ def _coerce_entries(
     return coerced
 
 
-def _format_existing_entries(unreleased: UnreleasedSection) -> str | None:
+def _format_entry_map(entries: Mapping[ChangelogCategory, Sequence[str]]) -> str | None:
     lines: list[str] = []
     for category in ChangelogCategory.render_order():
-        entries = unreleased.entries.get(category, [])
-        if not entries:
+        values = entries.get(category, [])
+        if not values:
             continue
         lines.append(f"### {category.value}")
-        lines.extend(entries)
+        lines.extend(values)
         lines.append("")
     return "\n".join(lines).strip() or None
+
+
+def _format_existing_entries(unreleased: UnreleasedSection) -> str | None:
+    return _format_entry_map(unreleased.entries)
 
 
 def _relative_to(path: Path, dir: Path | str | os.PathLike[str]) -> str:
