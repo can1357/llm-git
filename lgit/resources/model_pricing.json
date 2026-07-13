@@ -1,0 +1,16 @@
+{
+  "comment": "USD per million tokens. Entries are substring-matched against the lowercased model name; first match wins, so keep more specific names first. Optional cache_read/cache_write default to 0.1x and 1.25x of input.",
+  "rates": [
+    { "match": "claude-opus", "input": 5.0, "output": 25.0 },
+    { "match": "claude-sonnet", "input": 3.0, "output": 15.0 },
+    { "match": "claude-haiku", "input": 1.0, "output": 5.0 },
+    { "match": "gpt-5.4-mini", "input": 0.75, "output": 4.5 },
+    { "match": "gpt-5.5", "input": 5.0, "output": 30.0 },
+    { "match": "gemini-3.5-flash", "input": 1.5, "output": 9.0 },
+    { "match": "gemini-3.1-flash-lite", "input": 0.25, "output": 1.5 },
+    { "match": "glm-4.7-flash", "input": 0.07, "output": 0.4 },
+    { "match": "glm-4.7", "input": 0.6, "output": 2.2 },
+    { "match": "glm-4.6", "input": 0.6, "output": 2.2 },
+    { "match": "glm-4.5-air", "input": 0.2, "output": 1.1 }
+  ]
+}

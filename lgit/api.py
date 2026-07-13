@@ -18,7 +18,7 @@ import httpx
 from jinja2 import Template
 
 from . import cache as llm_cache
-from . import profile
+from . import pricing, profile
 from .errors import ApiContextLengthExceeded, ApiError, LgitError
 from .markdown_output import (
     analysis_from_mapping,
@@ -426,11 +426,12 @@ async def _run_oneshot_response(config: CommitConfig, spec: OneShotSpec) -> OneS
     cache_entry = _build_cache_entry(config, spec)
     if cache_entry is not None:
         cache_obj, key = cache_entry
-        stored = cache_obj.get(key)
-        if stored is not None:
-            decoded = decode_cache_payload(spec.tool_name, spec.operation, stored)
+        entry = cache_obj.get_entry(key)
+        if entry is not None:
+            decoded = decode_cache_payload(spec.tool_name, spec.operation, entry.response)
             if decoded is not None:
                 output, text = decoded
+                pricing.record_saved(entry.cost_usd)
                 profile.print_llm_progress(lambda: f"cache hit {spec.operation} ({spec.model})")
                 return OneShotResponse(output=output, source=OneShotSource.CACHE, text_content=text)
 
@@ -441,7 +442,7 @@ async def _run_oneshot_response(config: CommitConfig, spec: OneShotSpec) -> OneS
     last_retry_from_error = False
     for attempt in range(1, attempts + 1):
         try:
-            request, response_text = await _send_oneshot(config, spec, mode)
+            request, response_text, cost = await _send_oneshot(config, spec, mode)
             request_json = json.dumps(request, ensure_ascii=False, default=_json_default)
             if not response_text.strip():
                 raise _RetryableResponse("empty response body")
@@ -449,7 +450,7 @@ async def _run_oneshot_response(config: CommitConfig, spec: OneShotSpec) -> OneS
             if cache_entry is not None:
                 payload = encode_cache_payload(response.source, response.output, response.text_content)
                 if payload is not None:
-                    cache_entry[0].put(cache_entry[1], spec.model or "", spec.operation, request_json, payload)
+                    cache_entry[0].put(cache_entry[1], spec.model or "", spec.operation, request_json, payload, cost)
             return response
         except ApiContextLengthExceeded:
             raise
@@ -474,7 +475,9 @@ async def _run_oneshot_response(config: CommitConfig, spec: OneShotSpec) -> OneS
     raise LgitError(f"Max retries exceeded for {spec.operation}: {last_error}")
 
 
-async def _send_oneshot(config: CommitConfig, spec: OneShotSpec, mode: ResolvedApiMode) -> tuple[dict[str, Any], str]:
+async def _send_oneshot(
+    config: CommitConfig, spec: OneShotSpec, mode: ResolvedApiMode
+) -> tuple[dict[str, Any], str, float | None]:
     timeout = httpx.Timeout(float(config.request_timeout_secs), connect=float(config.connect_timeout_secs))
     headers = {"content-type": "application/json"}
     api_key = config.api_key
@@ -498,6 +501,7 @@ async def _send_oneshot(config: CommitConfig, spec: OneShotSpec, mode: ResolvedA
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url, headers=headers, json=request)
     text = response.text
+    cost = _record_spend(spec, response, text)
     profile.print_llm_progress(
         lambda: (
             f"response {spec.operation} status={response.status_code} elapsed={time.monotonic() - start:.2f}s size={len(text)}B"
@@ -512,7 +516,36 @@ async def _send_oneshot(config: CommitConfig, spec: OneShotSpec, mode: ResolvedA
         raise _RetryableResponse(f"server error {response.status_code}: {text}")
     if not response.is_success:
         raise ApiError(status=response.status_code, body=text)
-    return request, text
+    return request, text, cost
+
+
+def _record_spend(spec: OneShotSpec, response: httpx.Response, text: str) -> float | None:
+    """Record token usage and cost for one real API response; returns the cost when known."""
+    reported = _header_cost(response.headers.get("x-litellm-response-cost"))
+    usage = None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError, ValueError:
+        payload = None
+    if isinstance(payload, Mapping):
+        usage = pricing.parse_usage(payload)
+    if usage is None and reported is None:
+        return None
+    usage = usage or pricing.TokenUsage()
+    cost = pricing.record_usage(spec.model or "", usage, reported)
+    sink = llm_cache.LlmCache.instance()
+    if sink is not None:
+        sink.record_usage(spec.model or "", spec.operation, usage, cost)
+    return cost
+
+
+def _header_cost(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def _openai_request(config: CommitConfig, spec: OneShotSpec) -> dict[str, Any]:

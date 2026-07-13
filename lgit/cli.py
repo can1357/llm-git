@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from . import cache, git, profile, repo, style
+from . import cache, git, pricing, profile, repo, style
 from .analysis import ScopeAnalyzer, extract_scope_candidates
 from .api import generate_analysis_with_map_reduce, generate_fast_commit, generate_summary_from_analysis
 from .changelog import run_changelog_flow
@@ -318,6 +318,7 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
             with profile.section("git_push", collector):
                 _push_changes(args.dir)
 
+    _print_llm_spend()
     return 0
 
 
@@ -330,15 +331,43 @@ async def _run_compose(args: argparse.Namespace, config: CommitConfig) -> int:
         _auto_stage_if_needed(args, config)
     hashes = await run_compose_mode(args, config)
     if hashes:
-        for commit_hash in hashes:
-            print(commit_hash)
+        noun = "commit" if len(hashes) == 1 else "commits"
+        print(style.success(f"{style.icons.SUCCESS} Created {len(hashes)} compose {noun}"))
     elif args.compose_preview:
         print("Compose preview written; no commits created.")
     else:
         print("No compose commits created.")
+    _print_llm_spend()
     if hashes and args.push:
         git.run_git(["push"], cwd=args.dir)
     return 0
+
+
+def _print_llm_spend() -> None:
+    """Print the run's LLM token usage and estimated cost, if any was recorded."""
+    spend = pricing.session_spend()
+    if spend.usage.total_tokens == 0 and spend.cost_usd == 0 and spend.saved_usd == 0:
+        return
+    usage = spend.usage
+    total_in = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    tokens = f"{_compact_count(total_in)} in / {_compact_count(usage.output_tokens)} out"
+    if spend.cost_usd == 0 and spend.saved_usd == 0:
+        line = f"LLM usage: {tokens}"
+    else:
+        line = f"LLM cost: ${spend.cost_usd:.4f} ({tokens})"
+        if spend.saved_usd > 0:
+            line += f", saved ${spend.saved_usd:.4f} via cache"
+    print(style.dim(line))
+
+
+def _compact_count(count: int) -> str:
+    """Format a token count compactly: 812, 18.9k, 2.3M."""
+    if count < 1_000:
+        return str(count)
+    value, suffix = count / 1_000, "k"
+    if round(value, 1) >= 1_000:
+        value, suffix = count / 1_000_000, "M"
+    return f"{value:.1f}".removesuffix(".0") + suffix
 
 
 async def _run_rewrite(args: argparse.Namespace, config: CommitConfig) -> int:
@@ -351,6 +380,7 @@ async def _run_rewrite(args: argparse.Namespace, config: CommitConfig) -> int:
         print(f"{conversion.index}. {old} -> {new}")
     if result.backup_branch:
         print(f"Backup branch: {result.backup_branch}")
+    _print_llm_spend()
     return 0
 
 

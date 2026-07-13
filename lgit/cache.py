@@ -15,6 +15,7 @@ from blake3 import blake3
 
 if TYPE_CHECKING:
     from .config import CommitConfig
+    from .pricing import TokenUsage
 
 SCHEMA_VERSION = 3
 PRUNE_DIVISOR = 64
@@ -28,6 +29,7 @@ class CachedLlmResponse:
     request: str
     response: str
     created_at: int
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +101,7 @@ class LlmCache:
             with self._lock:
                 row = self._conn.execute(
                     """
-                    SELECT request, response, created_at
+                    SELECT request, response, created_at, cost_usd
                     FROM responses
                     WHERE key = ? AND schema_version = ?
                     """,
@@ -108,13 +110,14 @@ class LlmCache:
                 if row is None:
                     return None
                 request, response, created_at = str(row[0]), str(row[1]), int(row[2])
+                cost_usd = float(row[3]) if row[3] is not None else None
                 if self.ttl_secs > 0 and created_at < _now_unix() - self.ttl_secs:
                     self._conn.execute("DELETE FROM responses WHERE key = ?", (key,))
                     self._conn.commit()
                     return None
                 self._conn.execute("UPDATE responses SET accessed_at = ? WHERE key = ?", (_now_unix(), key))
                 self._conn.commit()
-                return CachedLlmResponse(request=request, response=response, created_at=created_at)
+                return CachedLlmResponse(request=request, response=response, created_at=created_at, cost_usd=cost_usd)
         except Exception:
             return None
 
@@ -124,8 +127,10 @@ class LlmCache:
         entry = self.get_entry(key)
         return entry.response if entry is not None else None
 
-    def put(self, key: str, model: str, operation: str, request: str, response: str) -> None:
-        """Insert or replace a successful response, swallowing cache failures."""
+    def put(
+        self, key: str, model: str, operation: str, request: str, response: str, cost_usd: float | None = None
+    ) -> None:
+        """Insert or replace a successful response and its original cost, swallowing cache failures."""
 
         try:
             now = _now_unix()
@@ -133,10 +138,10 @@ class LlmCache:
                 self._conn.execute(
                     """
                     INSERT OR REPLACE INTO responses
-                    (key, schema_version, model, operation, request, response, created_at, accessed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (key, schema_version, model, operation, request, response, cost_usd, created_at, accessed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (key, SCHEMA_VERSION, model, operation, request, response, now, now),
+                    (key, SCHEMA_VERSION, model, operation, request, response, cost_usd, now, now),
                 )
                 if self.ttl_secs > 0 and now % PRUNE_DIVISOR == 0:
                     self._conn.execute("DELETE FROM responses WHERE created_at < ?", (now - self.ttl_secs,))
@@ -197,6 +202,33 @@ class LlmCache:
         except Exception:
             return []
 
+    def record_usage(self, model: str, operation: str, usage: TokenUsage, cost_usd: float | None) -> None:
+        """Append one LLM response's token usage and estimated cost, swallowing failures."""
+
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    INSERT INTO usage
+                    (model, operation, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                     cost_usd, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        model,
+                        operation,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_write_tokens,
+                        cost_usd,
+                        _now_unix(),
+                    ),
+                )
+                self._conn.commit()
+        except Exception:
+            return
+
     def close(self) -> None:
         """Close the underlying SQLite connection."""
 
@@ -214,6 +246,7 @@ class LlmCache:
                     operation TEXT NOT NULL,
                     request TEXT NOT NULL,
                     response TEXT NOT NULL,
+                    cost_usd REAL,
                     created_at INTEGER NOT NULL,
                     accessed_at INTEGER NOT NULL
                 );
@@ -230,13 +263,29 @@ class LlmCache:
                     created_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_failures_created_at ON failures(created_at);
+                CREATE TABLE IF NOT EXISTS usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    cache_read_tokens INTEGER NOT NULL,
+                    cache_write_tokens INTEGER NOT NULL,
+                    cost_usd REAL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage(created_at);
                 """
             )
-            try:
-                self._conn.execute("ALTER TABLE responses ADD COLUMN request TEXT NOT NULL DEFAULT ''")
-            except sqlite3.OperationalError as error:
-                if "duplicate column name" not in str(error).lower():
-                    raise
+            for migration in (
+                "ALTER TABLE responses ADD COLUMN request TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE responses ADD COLUMN cost_usd REAL",
+            ):
+                try:
+                    self._conn.execute(migration)
+                except sqlite3.OperationalError as error:
+                    if "duplicate column name" not in str(error).lower():
+                        raise
             self._conn.commit()
 
 

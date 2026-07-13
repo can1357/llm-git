@@ -70,6 +70,7 @@ uv run pytest -k truncate                    # Match by name
 - `models` - Type-safe commit types, scopes, summaries; model-name resolution; compose data types
 - `normalization` - Unicode normalization, commit message formatting
 - `patch` - Hunk-level staging for compose mode
+- `pricing` - Token-usage parsing, per-model cost estimation, session spend accounting
 - `profile` - Lightweight timing / JSONL profiling
 - `repo` - Repository metadata detection
 - `style` - Terminal styling helpers
@@ -219,6 +220,8 @@ uv run pytest -k truncate                    # Match by name
 - Configurable: `max_retries`, `initial_backoff_ms` in config
 
 **Caching**: Responses are cached on disk keyed by a BLAKE3 hash of `(operation, model, api_mode, tool_name, system_prompt, user_prompt)` (`lgit/cache.py`); set `LLM_GIT_CACHE_DISABLED=1` to bypass.
+
+**Cost tracking**: Every real API response is recorded (`lgit/pricing.py`): the LiteLLM `x-litellm-response-cost` header is used when present, otherwise cost is estimated from response `usage` tokens against the bundled rate table (`lgit/resources/model_pricing.json`, substring-matched on model name). The cost is stored on the cached response row (`responses.cost_usd`) and in a per-request `usage` table in the cache db; cache hits credit the stored cost as savings. Session totals (spend + savings) print after compose completes.
 
 **Fallback**: If AI calls fail, `fallback_summary()` (`lgit/markdown_output.py`) generates a heuristic summary from stat.
 
