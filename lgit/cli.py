@@ -495,10 +495,13 @@ async def _generate_standard_workflow(
         )
     with profile.section("create_token_counter", collector):
         token_counter = create_token_counter(config)
-    style.status(
-        f"{style.dim('›')} {style.dim('models:')} {style.dim('analysis')} "
-        f"{style.model(config.analysis_model)} {style.dim('summary')} {style.model(config.summary_model)}"
-    )
+    if config.analysis_model == config.summary_model:
+        style.status(f"{style.dim('›')} {style.dim('model:')} {style.model(config.analysis_model)}")
+    else:
+        style.status(
+            f"{style.dim('›')} {style.dim('models:')} {style.dim('analysis')} "
+            f"{style.model(config.analysis_model)} {style.dim('summary')} {style.model(config.summary_model)}"
+        )
     with profile.section("prepare_diff", collector):
         if should_use_map_reduce(diff, config, token_counter):
             analysis_diff = diff
