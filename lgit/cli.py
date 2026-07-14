@@ -794,6 +794,12 @@ def _commit_staged_message(
         else:
             style.status(f"{style.info('›')} {style.dim('Snapshot already committed; nothing to do')}")
         return commit_hash
+    if snapshot_tree is not None and not args.amend and git.head_tree_is(snapshot_tree, args.dir):
+        style.status(
+            f"{style.info('›')} "
+            f"{style.dim('Staged changes were already committed while generating (HEAD moved); nothing to do')}"
+        )
+        return None
 
     git_args = ["commit", "-F", "-"]
     if sign:

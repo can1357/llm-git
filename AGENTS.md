@@ -242,6 +242,7 @@ max_diff_length = 100000
 
 wide_change_threshold = 0.50  # Omit scope if >50% of files changed
 changelog_revise = true      # Reconcile earlier Unreleased entries
+changelog_reasoning_effort = "low"  # Reasoning effort for changelog calls (chat-completions mode); "" = provider default
 
 
 exclude_old_message = false   # When true, git show omits original message

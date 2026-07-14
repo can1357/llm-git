@@ -57,6 +57,25 @@ def test_commit_staged_commits_snapshot_on_index_drift(
     assert (repo / "b.txt").read_text(encoding="utf-8") == "drift\n"
 
 
+def test_commit_staged_skips_when_snapshot_already_committed_externally(
+    repo: Path,
+    run_git: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+    snapshot_tree = git.write_real_index_tree(repo)
+
+    # Another process commits the staged changes while lgit is generating.
+    run_git(repo, "commit", "-m", "external: committed mid-run")
+    external_head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    args = _args("--dir", str(repo))
+    commit_hash = cli._commit_staged_message("feat: snapshot commit", snapshot_tree, args, CommitConfig())
+
+    assert commit_hash is None
+    assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == external_head
+
+
 def test_emit_commit_hash_only_prints_to_stdout_when_piped(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

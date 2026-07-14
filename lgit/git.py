@@ -470,6 +470,19 @@ def index_matches_tree(tree: str, dir: str | os.PathLike[str] = ".") -> bool:
     return write_real_index_tree(dir) == tree
 
 
+def head_tree_is(tree: str, dir: str | os.PathLike[str] = ".") -> bool:
+    """Return true when HEAD exists and already points at `tree`.
+
+    Detects an external commit landing mid-run: the staged tree lgit analyzed
+    is already at HEAD, so a plain ``git commit`` would fail with "nothing to commit".
+    """
+
+    try:
+        return _rev_parse_tree_of("HEAD", dir) == tree
+    except GitError:
+        return False
+
+
 def read_tree_into_index(index_file: str | os.PathLike[str], treeish: str, dir: str | os.PathLike[str] = ".") -> None:
     """Populate a temporary index with `treeish`."""
 

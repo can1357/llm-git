@@ -53,6 +53,7 @@ class CacheMaterial:
     system_prompt: str
     user_prompt: str
     api_mode: str
+    reasoning_effort: str | None = None
 
 
 class LlmCache:
@@ -300,6 +301,8 @@ def compute_key(material: CacheMaterial) -> str:
     _write_field(hasher, "tool_name", material.tool_name)
     _write_field(hasher, "system", material.system_prompt)
     _write_field(hasher, "user", material.user_prompt)
+    if material.reasoning_effort:
+        _write_field(hasher, "reasoning_effort", material.reasoning_effort)
     hasher.update(b"\n")
     return hasher.hexdigest()
 

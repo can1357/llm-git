@@ -29,6 +29,13 @@ def test_key_is_stable_and_collision_resistant() -> None:
     assert first != compute_key(other)
 
 
+def test_key_includes_reasoning_effort_only_when_set() -> None:
+    base = compute_key(_material())
+
+    assert compute_key(replace(_material(), reasoning_effort=None)) == base
+    assert compute_key(replace(_material(), reasoning_effort="low")) != base
+
+
 def test_roundtrip_get_put(tmp_path: Path) -> None:
     cache = LlmCache.open(tmp_path / "c.sqlite", 60)
 

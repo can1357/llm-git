@@ -585,6 +585,7 @@ async def generate_changelog_entries(
             tool_name="create_changelog_entries",
             progress_label="changelog",
             cacheable=True,
+            reasoning_effort=config.changelog_reasoning_effort,
         ),
     )
     output = response.output if hasattr(response, "output") else response

@@ -57,6 +57,17 @@ def test_strip_type_prefix_uppercase_type() -> None:
     assert api_module.strip_type_prefix("FIX(api): fixed bug", "fix", "api") == "fixed bug"
 
 
+def test_openai_request_reasoning_effort() -> None:
+    config = CommitConfig()
+    spec = _summary_spec()
+
+    assert "reasoning_effort" not in api_module._openai_request(config, spec)
+
+    low = api_module.OneShotSpec(operation="changelog", model="m", user_prompt="diff", reasoning_effort="low")
+    assert api_module._openai_request(config, low)["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in api_module._anthropic_request(config, low)
+
+
 def test_env_flag_value_enabled_uses_boolean_semantics() -> None:
     assert env_flag_value_enabled(None) is False
     assert env_flag_value_enabled("") is False

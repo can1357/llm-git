@@ -106,6 +106,7 @@ class CommitConfig:
     categories: list[CategoryConfig] = field(default_factory=default_categories)
     changelog_enabled: bool = True
     changelog_revise: bool = True
+    changelog_reasoning_effort: str | None = "low"
     map_reduce_enabled: bool = True
     map_reduce_threshold: int = 5000
     map_batch_token_budget: int = 16000
@@ -412,6 +413,7 @@ _FIELD_COERCERS = {
     "classifier_hint": _to_str,
     "changelog_enabled": _to_bool,
     "changelog_revise": _to_bool,
+    "changelog_reasoning_effort": _to_optional_str,
     "map_reduce_enabled": _to_bool,
     "map_reduce_threshold": _to_int,
     "map_batch_token_budget": _to_int,

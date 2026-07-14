@@ -83,6 +83,7 @@ class OneShotSpec:
     progress_label: str | None = None
     debug: OneShotDebug | Mapping[str, Any] | str | Path | None = None
     cacheable: bool = True
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +555,8 @@ def _openai_request(config: CommitConfig, spec: OneShotSpec) -> dict[str, Any]:
         messages.append({"role": "system", "content": spec.system_prompt})
     messages.append({"role": "user", "content": spec.user_prompt})
     request: dict[str, Any] = {"model": spec.model, "messages": messages}
+    if spec.reasoning_effort:
+        request["reasoning_effort"] = spec.reasoning_effort
     prompt_cache_key = _openai_prompt_cache_key(config, spec)
     if prompt_cache_key:
         request["prompt_cache_key"] = prompt_cache_key
@@ -733,6 +736,7 @@ def _build_cache_entry(config: CommitConfig, spec: OneShotSpec) -> tuple[Any, st
             system_prompt=spec.system_prompt,
             user_prompt=spec.user_prompt,
             api_mode=mode,
+            reasoning_effort=spec.reasoning_effort,
         )
     )
     return cache_obj, key
