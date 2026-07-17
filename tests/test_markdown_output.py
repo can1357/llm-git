@@ -215,3 +215,37 @@ def test_changelog_inline_does_not_eat_multiword_item() -> None:
 
     assert entries["Changed"] == ["Updated behavior: now retries on 5xx"]
     assert "Added" not in entries
+
+
+def test_normalize_escaped_whitespace_direct() -> None:
+    from lgit.markdown_output import _normalize_escaped_whitespace
+
+    # 1. Normalizes escaped newlines and tabs
+    assert _normalize_escaped_whitespace("hello \\n world") == "hello \n world"
+    assert _normalize_escaped_whitespace("hello \\r\\n world") == "hello \n world"
+    assert _normalize_escaped_whitespace("hello \\t world") == "hello \t world"
+
+    # 2. Preserves literal escapes inside inline backticks
+    assert _normalize_escaped_whitespace("use `\\n` as separator") == "use `\\n` as separator"
+    assert _normalize_escaped_whitespace("hello \\n world `\\n` test \\n") == "hello \n world `\\n` test \n"
+
+    # 3. Preserves literal escapes inside triple backticks (blocks)
+    code_block = "```\nprint(\"\\n\")\n```"
+    assert _normalize_escaped_whitespace(code_block) == code_block
+
+
+def test_normalize_escaped_whitespace_indirect() -> None:
+    # Test that parsing an analysis with literal \n as line separators converts them correctly
+    md = (
+        "# feat(catalog): increased maxTokens to 65,536 for Kimi\\n\\n"
+        "- Updated models.json\\n"
+        "- Adjusted compat logic\\n"
+    )
+    analysis = parse_conventional_analysis_markdown(md)
+    assert str(analysis.commit_type) == "feat"
+    assert str(analysis.scope) == "catalog"
+    assert analysis.summary == "increased maxTokens to 65,536 for Kimi"
+    assert [detail.text for detail in analysis.details] == [
+        "Updated models.json.",
+        "Adjusted compat logic.",
+    ]

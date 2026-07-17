@@ -490,11 +490,18 @@ def _strip_wrapping_quotes(text: str) -> str:
 
 
 def _normalize_escaped_whitespace(text: str) -> str:
-    real = text.count("\n")
-    literal = text.count("\\n")
-    if literal == 0 or literal < real:
+    if "\\" not in text:
         return text
-    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n").replace("\\t", "\t")
+    parts = text.split("`")
+    for i in range(0, len(parts), 2):
+        parts[i] = (
+            parts[i]
+            .replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\r", "\n")
+            .replace("\\t", "\t")
+        )
+    return "`".join(parts)
 
 
 def _extract_tag_lenient(text: str, tag: str) -> str | None:
