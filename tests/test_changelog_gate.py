@@ -254,8 +254,9 @@ def _config_path() -> Path:
 def _run_driver(tree: Path, jobs: list[dict[str, Any]], tmp_path: Path, tag: str) -> dict[str, Any]:
     jobs_file = tmp_path / f"jobs-{tag}.json"
     jobs_file.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
-    # Isolated HOME: user prompt overrides in ~/.llm-git/prompts/ would silently
-    # pin BOTH sides to the same template and make the comparison vacuous.
+    # Isolated HOME: the BASELINE tree still reads ~/.llm-git/prompts/ overrides
+    # implicitly (removed in the new tree); shared overrides would pin both sides
+    # to one template and make the comparison vacuous.
     fake_home = tmp_path / f"home-{tag}"
     fake_home.mkdir(exist_ok=True)
     env = {

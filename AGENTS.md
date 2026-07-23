@@ -174,7 +174,7 @@ uv run pytest -k truncate                    # Match by name
 
 **Prompt files**:
 - One markdown prompt per family under `lgit/resources/prompts/<family>.md` (families: `analysis`, `summary`, `changelog`, `map`, `reduce`, `compose-intent`, `compose-bind`, `fast`).
-- Rendered at runtime via Jinja2 (`lgit/templates.py`). User overrides may live in `~/.llm-git/prompts/<family>.md`.
+- Rendered at runtime via Jinja2 (`lgit/templates.py`). Overrides are opt-in: set `prompts_dir` in config to a directory containing `<family>.md` files; nothing is ever auto-written to disk.
 
 **Validation retry**: Summary generation retries once on validation failure with constraint injection
 - Validates: past-tense verb, no type repetition, type-file consistency heuristics
@@ -247,6 +247,7 @@ changelog_reasoning_effort = "low"  # Reasoning effort for changelog calls (chat
 
 
 exclude_old_message = false   # When true, git show omits original message
+prompts_dir = ""              # Optional dir of <family>.md prompt overrides; empty = packaged prompts
 ```
 
 # Implementation Notes
@@ -300,4 +301,4 @@ uv run mypy                 # optional local type check
 
 **API timeouts**: Increase the httpx client `timeout` (currently 120s) if large diffs take longer to process.
 
-**Prompt changes not applied**: Prompts load at runtime from `lgit/resources/prompts/` via `importlib.resources` — no rebuild step. For an installed wheel, reinstall (`uv sync`) to pick up edits, or drop overrides in `~/.llm-git/prompts/`.
+**Prompt changes not applied**: Prompts load at runtime from `lgit/resources/prompts/` via `importlib.resources` — no rebuild step. For an installed wheel, reinstall (`uv sync`) to pick up edits. If `prompts_dir` is set in config, files there shadow the packaged prompts — clear it (or delete the stale file) when packaged prompt updates seem ignored.

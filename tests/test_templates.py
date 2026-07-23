@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import lgit.templates as templates_module
 import pytest
 from lgit.templates import (
     AnalysisParams,
     ComposeBindPromptParams,
     ComposeIntentPromptParams,
     FastPromptParams,
-    ensure_prompts_dir,
     render_analysis_prompt,
     render_changelog_prompt,
     render_compose_bind_prompt,
@@ -18,11 +18,6 @@ from lgit.templates import (
     render_summary_prompt,
     split_prompt_template,
 )
-
-
-def _prepare_prompts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    ensure_prompts_dir()
 
 
 def test_split_prompt_template_lf() -> None:
@@ -52,8 +47,7 @@ def test_split_prompt_template_no_separator() -> None:
     assert user == content
 
 
-def test_render_analysis_prompt_requests_holistic_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_analysis_prompt_requests_holistic_summary() -> None:
 
     parts = render_analysis_prompt(
         AnalysisParams(
@@ -69,8 +63,7 @@ def test_render_analysis_prompt_requests_holistic_summary(tmp_path: Path, monkey
     assert "Does not copy detail #1" in parts.system
 
 
-def test_render_changelog_prompt_renders_markdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_changelog_prompt_renders_markdown() -> None:
 
     parts = render_changelog_prompt(
         "CHANGELOG.md",
@@ -100,8 +93,7 @@ def test_render_changelog_prompt_renders_markdown(tmp_path: Path, monkeypatch: p
     assert "Added authored entry" in revisable.user
 
 
-def test_render_changelog_prompt_observations_replace_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_changelog_prompt_observations_replace_diff() -> None:
 
     parts = render_changelog_prompt(
         "CHANGELOG.md",
@@ -118,8 +110,7 @@ def test_render_changelog_prompt_observations_replace_diff(tmp_path: Path, monke
     assert "src/api.rs | 4 ++--" in parts.user
 
 
-def test_render_fast_prompt_surfaces_type_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_fast_prompt_surfaces_type_guidance() -> None:
 
     parts = render_fast_prompt(
         FastPromptParams(
@@ -135,8 +126,7 @@ def test_render_fast_prompt_surfaces_type_guidance(tmp_path: Path, monkeypatch: 
     assert "not `docs`" in parts.system
 
 
-def test_render_fast_prompt_omits_commit_types_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_fast_prompt_omits_commit_types_when_absent() -> None:
 
     parts = render_fast_prompt(
         FastPromptParams(
@@ -149,8 +139,7 @@ def test_render_fast_prompt_omits_commit_types_when_absent(tmp_path: Path, monke
     assert "<commit_types>" not in parts.user
 
 
-def test_render_reduce_prompt_guides_grouped_synthesis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_reduce_prompt_guides_grouped_synthesis() -> None:
 
     parts = render_reduce_prompt(
         '[{"file":"src/a.rs","observations":["Added retry handling."]}]',
@@ -163,8 +152,7 @@ def test_render_reduce_prompt_guides_grouped_synthesis(tmp_path: Path, monkeypat
     assert "over enumerating files" in parts.system
 
 
-def test_render_compose_intent_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_compose_intent_prompt() -> None:
 
     parts = render_compose_intent_prompt(
         ComposeIntentPromptParams(
@@ -185,8 +173,7 @@ def test_render_compose_intent_prompt(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "new capability" in parts.user
 
 
-def test_render_summary_prompt_guides_umbrella_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_summary_prompt_guides_umbrella_title() -> None:
 
     parts = render_summary_prompt(
         "feat",
@@ -204,8 +191,7 @@ def test_render_summary_prompt_guides_umbrella_title(tmp_path: Path, monkeypatch
     assert "Updated client retry tests." in parts.user
 
 
-def test_render_compose_bind_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _prepare_prompts(tmp_path, monkeypatch)
+def test_render_compose_bind_prompt() -> None:
 
     parts = render_compose_bind_prompt(
         ComposeBindPromptParams(
@@ -217,3 +203,18 @@ def test_render_compose_bind_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "Assign hunks to existing commit groups" in parts.system
     assert "G1" in parts.user
     assert "src/api.rs" in parts.user
+
+
+def test_prompts_dir_override_wins_and_resets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    override = tmp_path / "prompts"
+    override.mkdir()
+    (override / "fast.md").write_text("custom fast system\n<!-- USER -->\n{{ diff }}", encoding="utf-8")
+    monkeypatch.setattr(templates_module, "_PROMPTS_DIR", override)
+
+    parts = render_fast_prompt(FastPromptParams(stat="s", diff="custom-diff-body", scope_candidates=""))
+    assert parts.system == "custom fast system"
+    assert "custom-diff-body" in parts.user
+
+    # Families without an override file still come from packaged resources.
+    reduce_parts = render_reduce_prompt("obs", "stat", "scopes", None)
+    assert "senior engineer" in reduce_parts.system

@@ -113,8 +113,8 @@ class CommitConfig:
     cache_enabled: bool = True
     cache_ttl_days: int = 14
     cache_dir: str | None = None
-    analysis_prompt: str = ""
-    summary_prompt: str = ""
+    # Optional directory of <family>.md prompt overrides; empty = packaged prompts only.
+    prompts_dir: str = ""
 
     @classmethod
     def load(cls, path: str | os.PathLike[str] | None = None) -> Self:
@@ -174,7 +174,7 @@ class CommitConfig:
         self._normalize_models()
         if self.api_key is not None:
             self.api_key = _resolve_config_value(self.api_key)
-        self._load_prompts()
+        self._apply_prompts_dir()
 
     def _normalize_models(self) -> None:
         if self.legacy_model:
@@ -183,12 +183,10 @@ class CommitConfig:
             if self.summary_model == DEFAULT_SUMMARY_MODEL:
                 self.summary_model = model
 
-    def _load_prompts(self) -> None:
-        from .templates import ensure_prompts_dir
+    def _apply_prompts_dir(self) -> None:
+        from .templates import set_prompts_dir
 
-        ensure_prompts_dir()
-        self.analysis_prompt = ""
-        self.summary_prompt = ""
+        set_prompts_dir(Path(self.prompts_dir).expanduser() if self.prompts_dir else None)
 
 
 def default_config_path() -> Path:
@@ -420,6 +418,7 @@ _FIELD_COERCERS = {
     "cache_enabled": _to_bool,
     "cache_ttl_days": _to_int,
     "cache_dir": _to_optional_str,
+    "prompts_dir": _to_str,
 }
 
 __all__ = [

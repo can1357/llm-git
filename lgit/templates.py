@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib import resources
@@ -89,33 +88,13 @@ class FastPromptParams:
     types_description: str | None = None
 
 
-def get_user_prompts_dir() -> Path | None:
-    """Return the user prompt override directory, if a home directory is known."""
-    home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
-    if not home:
-        return None
-    return Path(home).joinpath(".llm-git", "prompts")
+_PROMPTS_DIR: Path | None = None
 
 
-def ensure_prompts_dir() -> Path | None:
-    """Create the user prompt directory and unpack package prompt files."""
-    user_prompts_dir = get_user_prompts_dir()
-    if user_prompts_dir is None:
-        return None
-    try:
-        user_prompts_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ConfigError(f"Failed to create prompts directory {user_prompts_dir}: {exc}") from exc
-
-    for relative_path, content in _iter_package_prompt_files():
-        destination = user_prompts_dir.joinpath(relative_path)
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if not destination.exists():
-                destination.write_text(content, encoding="utf-8")
-        except OSError as exc:
-            raise ConfigError(f"Failed to write prompt file {destination}: {exc}") from exc
-    return user_prompts_dir
+def set_prompts_dir(path: Path | None) -> None:
+    """Set the explicit prompt-override directory (config ``prompts_dir``); ``None`` uses packaged prompts only."""
+    global _PROMPTS_DIR
+    _PROMPTS_DIR = path
 
 
 def split_prompt_template(template_content: str) -> tuple[str | None, str]:
@@ -300,11 +279,11 @@ def render_compose_bind_prompt(
 
 
 def load_template_file(category: str) -> str:
-    """Load a user override prompt first, then the packaged prompt resource."""
+    """Load a prompt from the configured ``prompts_dir`` override, else the packaged resource."""
     if category not in PROMPT_CATEGORIES:
         raise ConfigError(f"Unknown prompt category {category!r}")
-    if prompts_dir := get_user_prompts_dir():
-        user_template = prompts_dir.joinpath(f"{category}.md")
+    if _PROMPTS_DIR is not None:
+        user_template = _PROMPTS_DIR.joinpath(f"{category}.md")
         if user_template.exists():
             try:
                 return user_template.read_text(encoding="utf-8")
@@ -354,20 +333,6 @@ def _mapping_for_file(file: MapFile | Mapping[str, str]) -> Mapping[str, str]:
     return file
 
 
-def _iter_package_prompt_files() -> Iterable[tuple[Path, str]]:
-    prompts_root = resources.files("lgit.resources").joinpath("prompts")
-    yield from _walk_prompt_resources(prompts_root, Path())
-
-
-def _walk_prompt_resources(root: Any, prefix: Path) -> Iterable[tuple[Path, str]]:
-    for child in sorted(root.iterdir(), key=lambda item: item.name):
-        child_prefix = prefix / child.name
-        if child.is_dir():
-            yield from _walk_prompt_resources(child, child_prefix)
-        elif child.name.endswith(".md"):
-            yield child_prefix, child.read_text(encoding="utf-8")
-
-
 __all__ = [
     "USER_SEPARATOR_MARKER",
     "PROMPT_CATEGORIES",
@@ -377,8 +342,7 @@ __all__ = [
     "ComposeIntentPromptParams",
     "ComposeBindPromptParams",
     "FastPromptParams",
-    "get_user_prompts_dir",
-    "ensure_prompts_dir",
+    "set_prompts_dir",
     "split_prompt_template",
     "render_prompt_parts",
     "load_template_file",
