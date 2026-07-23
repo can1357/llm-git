@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -133,13 +133,21 @@ async def run_map_reduce(
     *,
     model_name: str | None = None,
     counter: Any | None = None,
+    on_observations: Callable[[Sequence[FileObservation]], None] | None = None,
 ) -> ConventionalAnalysis:
-    """Run the map and reduce phases for a large diff."""
+    """Run the map and reduce phases for a large diff.
+
+    ``on_observations`` fires once with the map-phase observations before the
+    reduce call, letting callers (changelog generation) consume them in
+    parallel with the reduce phase.
+    """
 
     counter = counter or create_token_counter(config)
     reduce_model = resolve_model_name(model_name or config.analysis_model)
     map_model = resolve_model_name(config.summary_model)
     observations = await observe_diff_files(diff, map_model, config, counter)
+    if on_observations is not None:
+        on_observations(observations)
     return await reduce_phase(observations, stat, scope_candidates, reduce_model, config)
 
 

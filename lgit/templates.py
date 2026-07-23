@@ -190,8 +190,13 @@ def render_changelog_prompt(
     existing_entries: str | None = None,
     authored_entries: str | None = None,
     can_revise: bool = False,
+    observations: str | None = None,
 ) -> PromptParts:
-    """Render the changelog prompt, selecting its bounded reconciliation variant."""
+    """Render the changelog prompt, selecting its bounded reconciliation variant.
+
+    ``observations`` (per-file change summaries markdown) replaces the raw diff
+    in the rendered user prompt when provided.
+    """
 
     template_content = load_template_file("changelog")
     context = {
@@ -202,6 +207,7 @@ def render_changelog_prompt(
         "existing_entries": existing_entries,
         "authored_entries": authored_entries,
         "can_revise": can_revise,
+        "observations": observations,
     }
     system_template, user_template = split_prompt_template(template_content)
     if system_template is None:

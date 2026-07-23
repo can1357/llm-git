@@ -230,7 +230,7 @@ def test_normalize_escaped_whitespace_direct() -> None:
     assert _normalize_escaped_whitespace("hello \\n world `\\n` test \\n") == "hello \n world `\\n` test \n"
 
     # 3. Preserves literal escapes inside triple backticks (blocks)
-    code_block = "```\nprint(\"\\n\")\n```"
+    code_block = '```\nprint("\\n")\n```'
     assert _normalize_escaped_whitespace(code_block) == code_block
 
 

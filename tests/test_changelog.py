@@ -24,6 +24,7 @@ from lgit.changelog import (
     write_entries,
 )
 from lgit.config import CommitConfig
+from lgit.map_reduce import FileObservation
 from lgit.markdown_output import parse_changelog_response
 from lgit.models import ChangelogCategory
 
@@ -422,6 +423,73 @@ def test_flow_passes_authored_entries_and_drops_duplicates(repo: Path, run_git: 
     assert staged is not None
     assert staged.count("Changed value to return 2.") == 1
     assert "- Added extra helper." in staged
+
+
+def test_flow_prompts_with_observations_instead_of_diff(repo: Path, run_git: RunGit, monkeypatch: object) -> None:
+    import lgit.api as api
+
+    changelog_path = repo / "CHANGELOG.md"
+    changelog_path.write_text(BASE_CHANGELOG, encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    captured: list[object] = []
+
+    async def fake_run_oneshot(config: CommitConfig, spec: object) -> object:
+        captured.append(spec)
+        return SimpleNamespace(output="# Changed\n- Changed value to return 2")
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)  # type: ignore[attr-defined]
+
+    observations = [
+        FileObservation("app.py", ("changed value() to return 2",)),
+        FileObservation("unrelated.py", ("touched an unstaged file",)),
+    ]
+    updated = asyncio.run(run_changelog_flow(SimpleNamespace(dir=str(repo)), CommitConfig(), observations))
+
+    assert len(updated) == 1
+    (spec,) = captured
+    prompt = spec.user_prompt  # type: ignore[attr-defined]
+    assert "<file_change_summaries>" in prompt
+    assert "- changed value() to return 2" in prompt
+    # The raw diff is replaced, and observations for files outside the boundary are filtered out.
+    assert "diff --git" not in prompt
+    assert "unstaged file" not in prompt
+
+
+def test_flow_falls_back_to_diff_when_observations_miss_boundary(
+    repo: Path,
+    run_git: RunGit,
+    monkeypatch: object,
+) -> None:
+    import lgit.api as api
+
+    changelog_path = repo / "CHANGELOG.md"
+    changelog_path.write_text(BASE_CHANGELOG, encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    captured: list[object] = []
+
+    async def fake_run_oneshot(config: CommitConfig, spec: object) -> object:
+        captured.append(spec)
+        return SimpleNamespace(output="<exception>internal only</exception>")
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)  # type: ignore[attr-defined]
+
+    observations = [FileObservation("elsewhere.py", ("changed something else",))]
+    asyncio.run(run_changelog_flow(SimpleNamespace(dir=str(repo)), CommitConfig(), observations))
+
+    (spec,) = captured
+    prompt = spec.user_prompt  # type: ignore[attr-defined]
+    assert "<file_change_summaries>" not in prompt
+    assert "diff --git" in prompt
 
 
 def test_flow_revises_head_entry_without_adding_sections(

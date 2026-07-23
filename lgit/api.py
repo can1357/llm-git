@@ -270,19 +270,30 @@ async def generate_summary_from_analysis(
 async def generate_analysis_with_map_reduce(
     config: CommitConfig, stat: str, diff: str, scope_candidates: str = "", **kwargs: Any
 ) -> ConventionalAnalysis:
-    """Generate analysis directly or through map-reduce for large diffs."""
+    """Generate analysis directly or through map-reduce for large diffs.
+
+    ``on_observations`` (keyword) is forwarded to :func:`lgit.map_reduce.run_map_reduce`
+    and fires only when the map-reduce path is taken.
+    """
 
     from . import style
     from .map_reduce import run_map_reduce, should_use_map_reduce
     from .tokens import create_token_counter
 
     counter = kwargs.pop("counter", None) or create_token_counter(config)
+    on_observations = kwargs.pop("on_observations", None)
     if should_use_map_reduce(diff, config, counter):
         count_sync = getattr(counter, "count_sync", None)
         token_count = int(count_sync(diff)) if callable(count_sync) else max(1, len(diff) // 4)
         style.print_info(f"Large diff detected ({token_count} tokens), using map-reduce...")
         return await run_map_reduce(
-            config, stat, diff, scope_candidates, model_name=kwargs.get("model_name"), counter=counter
+            config,
+            stat,
+            diff,
+            scope_candidates,
+            model_name=kwargs.get("model_name"),
+            counter=counter,
+            on_observations=on_observations,
         )
     return await generate_conventional_analysis(config, stat, diff, scope_candidates, **kwargs)
 

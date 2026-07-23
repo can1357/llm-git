@@ -11,7 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,11 +21,17 @@ import httpx
 from . import cache, git, pricing, profile, repo, style
 from .analysis import ScopeAnalyzer, extract_scope_candidates
 from .api import generate_analysis_with_map_reduce, generate_fast_commit, generate_summary_from_analysis
-from .changelog import run_changelog_flow
+from .changelog import (
+    PreparedChangelogFlow,
+    apply_changelog_updates,
+    generate_changelog_updates,
+    prepare_changelog_flow,
+    run_changelog_flow,
+)
 from .config import CommitConfig
 from .diffing import classify_diff_whitespace, smart_truncate_diff, strip_whitespace_only_files, truncate_diff_by_lines
 from .errors import LgitError, NoChanges, ValidationFailure
-from .map_reduce import should_use_map_reduce
+from .map_reduce import FileObservation, should_use_map_reduce
 from .markdown_output import fallback_summary
 from .models import ConventionalAnalysis, ConventionalCommit, Mode, resolve_model_name
 from .normalization import post_process_commit_message
@@ -215,6 +221,11 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
     user_context = " ".join(args.context).strip() or None
     with profile.section("read_change_inputs", collector):
         diff, stat, numstat = _read_change_inputs(mode, args, config)
+    changelog_runner = (
+        _ChangelogRunner(args, config)
+        if mode is Mode.STAGED and not args.dry_run and _should_update_changelog(args, config, mode)
+        else None
+    )
 
     with profile.section("detect_reformat_shortcut", collector):
         reformat_commit = _detect_reformat_shortcut(diff, config, args)
@@ -223,7 +234,9 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
         message = reformat_commit
     else:
         if args.fast:
-            message = await _generate_fast_workflow(mode, config, args, user_context, diff, stat, numstat, collector)
+            message = await _generate_fast_workflow(
+                mode, config, args, user_context, diff, stat, numstat, collector, changelog_runner
+            )
         else:
             if int(config.auto_fast_threshold_lines) > 0:
                 with profile.section("auto_fast_changed_lines", collector):
@@ -234,7 +247,7 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
                         f"{style.dim(f'Auto-switching to fast mode ({changed_lines} changed lines <= {config.auto_fast_threshold_lines})')}"
                     )
                     message = await _generate_fast_workflow(
-                        mode, config, args, user_context, diff, stat, numstat, collector
+                        mode, config, args, user_context, diff, stat, numstat, collector, changelog_runner
                     )
                 else:
                     message = await _generate_standard_workflow(
@@ -246,6 +259,7 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
                         stat,
                         numstat,
                         collector,
+                        changelog_runner,
                     )
             else:
                 message = await _generate_standard_workflow(
@@ -257,6 +271,7 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
                     stat,
                     numstat,
                     collector,
+                    changelog_runner,
                 )
 
     async with profile.section("validate_and_process", collector):
@@ -290,6 +305,8 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
 
     if mode in (Mode.STAGED, Mode.UNSTAGED):
         if validation_failed:
+            if changelog_runner is not None:
+                changelog_runner.cancel()
             print(
                 f"\n{style.warning('Skipping commit due to validation failure. Use --dry-run to test or manually commit.')}",
                 file=sys.stderr,
@@ -303,7 +320,10 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
 
         if _should_update_changelog(args, config, mode) and not args.dry_run:
             async with profile.section("run_changelog_flow", collector):
-                await run_changelog_flow(args, config)
+                if changelog_runner is not None:
+                    await changelog_runner.finish()
+                else:
+                    await run_changelog_flow(args, config)
             with profile.section("write_real_index_tree_after_changelog", collector):
                 snapshot_tree = git.write_real_index_tree(args.dir)
         elif mode is Mode.UNSTAGED and not args.dry_run:
@@ -453,6 +473,52 @@ def _stage_all(dir: str | os.PathLike[str]) -> None:
     git.run_git(["add", "-A"], cwd=dir)
 
 
+class _ChangelogRunner:
+    """Overlap changelog generation with commit-message generation for staged commits.
+
+    ``start_with_diff``/``start_with_observations`` kick off boundary generation at
+    the earliest safe moment (idempotent; the first call wins). ``finish`` awaits
+    generation and applies the updates at the same point the sequential flow used
+    to run, so index/worktree side effects still happen only on the commit path.
+    """
+
+    __slots__ = ("args", "config", "_prepared", "_task")
+
+    def __init__(self, args: argparse.Namespace, config: CommitConfig) -> None:
+        self.args = args
+        self.config = config
+        self._prepared: PreparedChangelogFlow | None = None
+        self._task: asyncio.Task[Any] | None = None
+
+    def start_with_diff(self) -> None:
+        """Start generation using each boundary's staged diff."""
+        self._start(None)
+
+    def start_with_observations(self, observations: Sequence[FileObservation]) -> None:
+        """Start generation from map-phase observations instead of raw diffs."""
+        self._start(observations)
+
+    def _start(self, observations: Sequence[FileObservation] | None) -> None:
+        if self._task is not None:
+            return
+        self._prepared = prepare_changelog_flow(self.args, self.config)
+        self._task = asyncio.create_task(generate_changelog_updates(self._prepared, self.config, observations))
+        # Mark exceptions retrieved in case the run aborts before finish().
+        self._task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+
+    async def finish(self) -> None:
+        """Await generation (starting it diff-based if never started) and apply updates."""
+        if self._task is None:
+            self._start(None)
+        assert self._task is not None and self._prepared is not None
+        apply_changelog_updates(self._prepared, await self._task)
+
+    def cancel(self) -> None:
+        """Drop any in-flight generation without applying it."""
+        if self._task is not None:
+            self._task.cancel()
+
+
 async def _generate_fast_workflow(
     mode: Mode,
     config: CommitConfig,
@@ -462,6 +528,7 @@ async def _generate_fast_workflow(
     stat: str,
     numstat: str,
     collector: profile.TimingCollector | None = None,
+    changelog_runner: _ChangelogRunner | None = None,
 ) -> ConventionalCommit:
     with profile.section("strip_whitespace_only", collector):
         diff = strip_whitespace_only_files(diff) or diff
@@ -473,6 +540,8 @@ async def _generate_fast_workflow(
         )
     style.status(f"{style.dim('›')} {style.dim('fast mode:')} {style.model(_resolve_fast_mode_model(args, config))}")
     style.status(f"{style.info('›')} Analyzing {style.bold(mode.value)} changes...")
+    if changelog_runner is not None:
+        changelog_runner.start_with_diff()
     return await _generate_fast_message(config, stat, diff, scope_candidates, user_context, args, collector)
 
 
@@ -485,6 +554,7 @@ async def _generate_standard_workflow(
     stat: str,
     numstat: str,
     collector: profile.TimingCollector | None = None,
+    changelog_runner: _ChangelogRunner | None = None,
 ) -> ConventionalCommit:
     style.status(f"{style.info('›')} Analyzing {style.bold(mode.value)} changes...")
     with profile.section("strip_whitespace_only", collector):
@@ -503,14 +573,25 @@ async def _generate_standard_workflow(
             f"{style.model(config.analysis_model)} {style.dim('summary')} {style.model(config.summary_model)}"
         )
     with profile.section("prepare_diff", collector):
-        if should_use_map_reduce(diff, config, token_counter):
+        use_map_reduce = should_use_map_reduce(diff, config, token_counter)
+        if use_map_reduce:
             analysis_diff = diff
         elif len(diff) > int(config.max_diff_length):
             print(style.warning(f"Applying smart truncation (diff size: {len(diff)} characters)"))
             analysis_diff = smart_truncate_diff(diff, int(config.max_diff_length), config, token_counter)
         else:
             analysis_diff = diff
-    analysis = await _generate_analysis(config, stat, analysis_diff, scope_candidates, user_context, args, collector)
+    on_observations: Callable[[Sequence[FileObservation]], None] | None = None
+    if changelog_runner is not None:
+        if use_map_reduce:
+            # Changelog generation reuses the map phase's per-file observations
+            # and overlaps with the reduce call; started by the hook below.
+            on_observations = changelog_runner.start_with_observations
+        else:
+            changelog_runner.start_with_diff()
+    analysis = await _generate_analysis(
+        config, stat, analysis_diff, scope_candidates, user_context, args, collector, on_observations
+    )
     return await _message_from_analysis(analysis, config, stat, user_context, args, collector)
 
 
@@ -557,6 +638,7 @@ async def _generate_analysis(
     user_context: str | None,
     args: argparse.Namespace,
     collector: profile.TimingCollector | None = None,
+    on_observations: Callable[[Sequence[FileObservation]], None] | None = None,
 ) -> ConventionalAnalysis:
     with profile.section("collect_analysis_context", collector):
         project_context = None
@@ -577,6 +659,7 @@ async def _generate_analysis(
             project_context=project_context,
             debug_output=args.debug_output,
             debug_prefix="analysis",
+            on_observations=on_observations,
         )
 
 

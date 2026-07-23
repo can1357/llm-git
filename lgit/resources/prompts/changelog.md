@@ -1,7 +1,7 @@
-You are a changelog maintainer. Analyze the diff and return changelog entries for user-visible changes only, as markdown sections grouped by category.
+You are a changelog maintainer. Analyze the change evidence (a full diff or per-file change summaries) and return changelog entries for user-visible changes only, as markdown sections grouped by category.
 
 <instructions>
-1. Use the diff as ground truth; use the stat only to judge scope
+1. Use the change evidence as ground truth; use the stat only to judge scope
 2. Include only changes a user would notice after upgrading or using the product
 3. Each category is a `# CategoryName` section; each entry is a bullet (`- entry text`)
 4. Entries are past-tense, active voice, one concise line under 100 characters, no trailing period
@@ -90,15 +90,22 @@ Already documented—skip these:
 {{ stat }}
 </diff_summary>
 
+{% if observations %}
+<file_change_summaries>
+Per-file summaries of the staged changes, distilled from the full diff:
+{{ observations }}
+</file_change_summaries>
+{% else %}
 <diff>
 {{ diff }}
 </diff>
+{% endif %}
 {% if authored_entries %}
 
 <authored_entries>
 The author already hand-wrote these entries for this exact diff:
 {{ authored_entries }}
 
-These lines are final—do not repeat, reword, recategorize, or expand them. Then work through the diff: for each user-visible change, decide whether one of the authored entries describes it. Entries for changes none of them describe are real and required—list each as usual. If every user-visible change is already described, return the exception tag; never manufacture entries just to return something.
+These lines are final—do not repeat, reword, recategorize, or expand them. Then work through the change evidence: for each user-visible change, decide whether one of the authored entries describes it. Entries for changes none of them describe are real and required—list each as usual. If every user-visible change is already described, return the exception tag; never manufacture entries just to return something.
 </authored_entries>
 {% endif %}

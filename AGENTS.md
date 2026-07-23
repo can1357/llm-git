@@ -96,12 +96,13 @@ uv run pytest -k truncate                    # Match by name
 4. Analysis call - AI returns markdown conventional-commit analysis:
    - Heading identifies type, optional scope, and summary
    - Bullets become structured detail points; issue refs are parsed from output
-5. `generate_summary_from_analysis()` - AI call for summary generation:
+5. Changelog overlap (staged mode, committing): `_ChangelogRunner` starts changelog generation concurrently with message generation — diff-based for small/fast paths, or reusing map-phase per-file observations (`run_map_reduce(on_observations=...)`) so the changelog model never re-reads a large diff. Generation overlaps the reduce/summary calls; index/worktree application (`apply_changelog_updates`) still happens only after validation, at the same point the sequential flow ran.
+6. `generate_summary_from_analysis()` - AI call for summary generation:
    - Input: type + scope + detail points + stat
    - Returns plain text in `<summary>...</summary>` tags (≤72 chars)
-6. `post_process_commit_message()` - Enforce capitalization, punctuation
-7. `validate_commit_message()` - Check past-tense verbs, length limits
-8. Create commit (unless dry-run)
+7. `post_process_commit_message()` - Enforce capitalization, punctuation
+8. `validate_commit_message()` - Check past-tense verbs, length limits
+9. Await changelog generation, apply + stage entries, then create commit (unless dry-run)
 
 **Compose Mode** (`lgit/compose.py:run_compose_mode`):
 1. Scope to the staged tree, exactly like the regular commit path: callers `git add -A` first only when nothing is staged (`_run_compose` → `_auto_stage_if_needed`). `run_compose_mode` then captures that staged tree ONCE (`git write-tree`) as the fixed target; every round diffs `HEAD` against it (`git diff HEAD <target>`, with rename detection) and pins blobs from it — so anything staged or edited mid-run is excluded and stays staged, exactly as a normal commit would leave it. Unstaged worktree edits and untracked files are never in scope. The loop is unconstrained — each round commits what its plan covers and re-plans the rest until `HEAD` reaches the target — but errors out if a round produces no commits while changes remain (a no-op plan), instead of spinning forever.
@@ -165,7 +166,7 @@ uv run pytest -k truncate                    # Match by name
 
 **Snapshot isolation elsewhere:**
 - Standard/fast staged mode captures the index tree after auto-stage/changelog (`lgit/cli.py`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
-- Changelog maintenance (`lgit/changelog.py`) generates entries against the *staged* copy of `CHANGELOG.md` and stages the result as an exact blob, so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately. Reconciliation may replace or drop only entries from `HEAD`'s `[Unreleased]`; entries authored in the pending change are structurally protected, and unmatched operations are skipped.
+- Changelog maintenance (`lgit/changelog.py`) generates entries against the *staged* copy of `CHANGELOG.md` and stages the result as an exact blob, so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately. Reconciliation may replace or drop only entries from `HEAD`'s `[Unreleased]`; entries authored in the pending change are structurally protected, and unmatched operations are skipped. The flow is split into `prepare_changelog_flow` (git reads) / `generate_changelog_updates` (concurrent LLM calls per boundary) / `apply_changelog_updates` (write + stage), so the CLI can overlap generation with commit-message generation. When map-reduce ran, each boundary's prompt receives that boundary's per-file observations (`<file_change_summaries>`) instead of its raw diff; boundaries not covered by observations fall back to the diff prompt. Changelog discovery uses `git ls-files` (tracked + untracked-not-ignored), never a worktree walk.
 - Hand-written changelog edits are respected: `[Unreleased]` entries the author added in this change (staged/worktree vs `HEAD:`, `_entries_added_since`) are passed to the model as `authored_entries` — it documents only changes they don't cover, returning nothing when they cover everything. As a backstop, generated entries that restate an existing bullet (verbatim or ≥70% content-word overlap, `_drop_duplicate_entries`) are dropped before insertion.
 - Compose changelog weaving updates the real index and worktree only while each copy still matches what the run last staged or wrote; mid-run user changes win and remain untouched.
 

@@ -72,6 +72,33 @@ def test_map_phase_model_uses_summary_model(monkeypatch: pytest.MonkeyPatch) -> 
     assert map_reduce_module.MAP_PHASE_CONCURRENCY == 16
 
 
+def test_run_map_reduce_fires_observation_hook_before_reduce(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = CommitConfig(cache_enabled=False)
+    events: list[str] = []
+    observed = [map_reduce_module.FileObservation("src/lib.rs", ("updated library",))]
+
+    async def fake_observe_diff_files(*args: Any, **kwargs: Any) -> list[map_reduce_module.FileObservation]:
+        del args, kwargs
+        events.append("map")
+        return observed
+
+    async def fake_reduce_phase(*args: Any, **kwargs: Any) -> ConventionalAnalysis:
+        del args, kwargs
+        events.append("reduce")
+        return ConventionalAnalysis(commit_type="chore", summary="updated library")
+
+    monkeypatch.setattr(map_reduce_module, "observe_diff_files", fake_observe_diff_files)
+    monkeypatch.setattr(map_reduce_module, "reduce_phase", fake_reduce_phase)
+
+    def hook(observations: object) -> None:
+        assert observations is observed
+        events.append("hook")
+
+    asyncio.run(map_reduce_module.run_map_reduce(config, "stat", "diff", on_observations=hook))
+
+    assert events == ["map", "hook", "reduce"]
+
+
 def test_build_file_batches_single_batch_when_under_budget() -> None:
     files = [_file_with_tokens("a.rs", 4), _file_with_tokens("b.rs", 4), _file_with_tokens("c.rs", 1)]
 

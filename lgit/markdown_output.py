@@ -494,13 +494,7 @@ def _normalize_escaped_whitespace(text: str) -> str:
         return text
     parts = text.split("`")
     for i in range(0, len(parts), 2):
-        parts[i] = (
-            parts[i]
-            .replace("\\r\\n", "\n")
-            .replace("\\n", "\n")
-            .replace("\\r", "\n")
-            .replace("\\t", "\t")
-        )
+        parts[i] = parts[i].replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n").replace("\\t", "\t")
     return "`".join(parts)
 
 

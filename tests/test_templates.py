@@ -100,6 +100,24 @@ def test_render_changelog_prompt_renders_markdown(tmp_path: Path, monkeypatch: p
     assert "Added authored entry" in revisable.user
 
 
+def test_render_changelog_prompt_observations_replace_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _prepare_prompts(tmp_path, monkeypatch)
+
+    parts = render_changelog_prompt(
+        "CHANGELOG.md",
+        False,
+        "src/api.rs | 4 ++--",
+        "diff --git a/src/api.rs b/src/api.rs\n",
+        observations="# src/api.rs\n- added retry logic to the client",
+    )
+
+    assert "<file_change_summaries>" in parts.user
+    assert "- added retry logic to the client" in parts.user
+    assert "diff --git" not in parts.user
+    # The stat block stays available for scope judgement in both variants.
+    assert "src/api.rs | 4 ++--" in parts.user
+
+
 def test_render_fast_prompt_surfaces_type_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _prepare_prompts(tmp_path, monkeypatch)
 

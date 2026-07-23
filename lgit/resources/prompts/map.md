@@ -10,7 +10,8 @@ For each `<file>` in `<files>`:
 3. Keep each observation under 100 characters
 4. Cover meaningful changes in that file; omit formatting, comment-only, and import-order changes
 5. Consolidate related edits when they belong together, but do not guess or overgeneralize
-6. Do not mention commit type, scope, changelog, or any reduce-phase classification
+6. Note user-visible behavior changes (new capabilities, changed defaults, fixes, removals) explicitly and factually
+7. Do not mention commit type, scope, changelog, or any reduce-phase classification
 </instructions>
 
 <scope>

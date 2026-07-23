@@ -21,6 +21,7 @@ from .templates import render_changelog_prompt
 
 if TYPE_CHECKING:
     from .config import CommitConfig
+    from .map_reduce import FileObservation
 
 _REVISE_BLOCK_RE = re.compile(r"<revise\b[^>]*>(.*?)(?:</revise>|$)", re.IGNORECASE | re.DOTALL)
 _REVISION_LINE_RE = re.compile(r"^\s*(OLD|NEW)\s*:(.*)$", re.IGNORECASE)
@@ -73,26 +74,30 @@ class _BoundaryPrep:
     can_revise: bool
 
 
-async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogBoundary]:
-    """Generate and stage changelog entries for currently staged files."""
+@dataclass(slots=True)
+class PreparedChangelogFlow:
+    """Boundary contexts collected from git, ready for generation and applying."""
+
+    repo_dir: Path
+    preps: list[_BoundaryPrep]
+
+
+def prepare_changelog_flow(args: Any, config: CommitConfig) -> PreparedChangelogFlow:
+    """Collect per-boundary context (diffs, stats, unreleased sections) for staged files."""
 
     repo_dir = Path(getattr(args, "dir", "."))
+    prepared = PreparedChangelogFlow(repo_dir, [])
     staged_files = _staged_files(repo_dir)
     candidate_files = [path for path in staged_files if not path.lower().endswith("changelog.md")]
     if not candidate_files:
-        return []
+        return prepared
 
     changelogs = _find_changelogs(repo_dir)
     if not changelogs:
-        return []
-
-    boundaries = detect_boundaries(candidate_files, changelogs, repo_dir)
-    updated: list[ChangelogBoundary] = []
-    untracked_to_stage: list[str] = []
+        return prepared
 
     max_diff_length = config.max_diff_length
-    prepared: list[_BoundaryPrep] = []
-    for boundary in boundaries:
+    for boundary in detect_boundaries(candidate_files, changelogs, repo_dir):
         diff = _diff_for_files(boundary.files, repo_dir, max_diff_length)
         if not diff.strip():
             continue
@@ -127,7 +132,7 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             authored_entries = _format_entry_map(_entries_added_since(head_unreleased, unreleased, worktree_unreleased))
 
         can_revise = bool(config.changelog_revise) and head_unreleased is not None and bool(existing_entries)
-        prepared.append(
+        prepared.preps.append(
             _BoundaryPrep(
                 boundary,
                 diff,
@@ -144,24 +149,50 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
                 can_revise,
             )
         )
+    return prepared
 
-    generated = await asyncio.gather(
-        *(
-            generate_changelog_entries(
-                prep.boundary.changelog_path,
-                _is_package_changelog(prep.boundary.changelog_path, repo_dir),
-                prep.stat,
-                prep.diff,
-                prep.existing_entries,
-                prep.authored_entries,
-                prep.can_revise,
-                config,
+
+async def generate_changelog_updates(
+    prepared: PreparedChangelogFlow,
+    config: CommitConfig,
+    observations: Sequence[FileObservation] | None = None,
+) -> list[tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]]:
+    """Run the changelog model concurrently for every prepared boundary.
+
+    When map-phase ``observations`` are given, boundaries covered by them are
+    prompted with per-file change summaries instead of their raw diff.
+    """
+
+    return list(
+        await asyncio.gather(
+            *(
+                generate_changelog_entries(
+                    prep.boundary.changelog_path,
+                    _is_package_changelog(prep.boundary.changelog_path, prepared.repo_dir),
+                    prep.stat,
+                    prep.diff,
+                    prep.existing_entries,
+                    prep.authored_entries,
+                    prep.can_revise,
+                    config,
+                    observations=_observations_markdown(observations, prep.boundary.files),
+                )
+                for prep in prepared.preps
             )
-            for prep in prepared
         )
     )
 
-    for prep, (entries, revisions) in zip(prepared, generated, strict=True):
+
+def apply_changelog_updates(
+    prepared: PreparedChangelogFlow,
+    generated: Sequence[tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]],
+) -> list[ChangelogBoundary]:
+    """Write generated entries into worktree changelogs and stage exact blobs."""
+
+    repo_dir = prepared.repo_dir
+    updated: list[ChangelogBoundary] = []
+    untracked_to_stage: list[str] = []
+    for prep, (entries, revisions) in zip(prepared.preps, generated, strict=True):
         staged_entries = prep.unreleased.entries
         worktree_entries = prep.worktree_unreleased.entries if prep.worktree_unreleased is not None else None
         applied: list[ChangelogRevision] = []
@@ -201,6 +232,32 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
     if untracked_to_stage:
         run_git(["add", "--", *untracked_to_stage], cwd=repo_dir)
     return updated
+
+
+async def run_changelog_flow(
+    args: Any,
+    config: CommitConfig,
+    observations: Sequence[FileObservation] | None = None,
+) -> list[ChangelogBoundary]:
+    """Generate and stage changelog entries for currently staged files."""
+
+    prepared = prepare_changelog_flow(args, config)
+    generated = await generate_changelog_updates(prepared, config, observations)
+    return apply_changelog_updates(prepared, generated)
+
+
+def _observations_markdown(observations: Sequence[FileObservation] | None, files: Collection[str]) -> str | None:
+    """Render map-phase observations for ``files`` as per-file markdown, or None when uncovered."""
+
+    if observations is None:
+        return None
+    wanted = set(files)
+    sections = [
+        "# {}\n{}".format(item.file, "\n".join(f"- {text}" for text in item.observations))
+        for item in observations
+        if item.file in wanted and item.observations
+    ]
+    return "\n\n".join(sections) if sections else None
 
 
 @dataclass(slots=True)
@@ -605,8 +662,13 @@ async def generate_changelog_entries(
     authored_entries: str | None,
     can_revise: bool,
     config: CommitConfig,
+    observations: str | None = None,
 ) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
-    """Ask the configured model for Keep a Changelog entries and revision operations."""
+    """Ask the configured model for Keep a Changelog entries and revision operations.
+
+    ``observations`` (per-file change-summary markdown) replaces the raw diff
+    in the prompt when provided.
+    """
 
     prompt = render_changelog_prompt(
         os.fspath(changelog_path),
@@ -616,6 +678,7 @@ async def generate_changelog_entries(
         existing_entries=existing_entries,
         authored_entries=authored_entries,
         can_revise=can_revise,
+        observations=observations,
     )
     from .api import OneShotSpec, run_oneshot
 
@@ -936,13 +999,17 @@ __all__ = [
     "ChangelogBoundary",
     "ChangelogWeaver",
     "ChangelogRevision",
+    "PreparedChangelogFlow",
     "UnreleasedSection",
+    "apply_changelog_updates",
     "apply_revisions",
     "detect_boundaries",
     "generate_changelog_entries",
+    "generate_changelog_updates",
     "normalize_changelog_entry",
     "parse_changelog_revisions",
     "parse_unreleased_section",
+    "prepare_changelog_flow",
     "run_changelog_flow",
     "stage_changelog_blob",
     "write_entries",
