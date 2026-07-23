@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -53,6 +54,25 @@ class ChangelogBoundary:
     stat: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundaryPrep:
+    """One boundary's collected context, ready for concurrent entry generation."""
+
+    boundary: ChangelogBoundary
+    diff: str
+    stat: str
+    rel_path: str
+    is_tracked: bool
+    changelog_content: str
+    worktree_content: str
+    unreleased: UnreleasedSection
+    worktree_unreleased: UnreleasedSection | None
+    head_unreleased: UnreleasedSection | None
+    existing_entries: str | None
+    authored_entries: str | None
+    can_revise: bool
+
+
 async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogBoundary]:
     """Generate and stage changelog entries for currently staged files."""
 
@@ -71,6 +91,7 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
     untracked_to_stage: list[str] = []
 
     max_diff_length = config.max_diff_length
+    prepared: list[_BoundaryPrep] = []
     for boundary in boundaries:
         diff = _diff_for_files(boundary.files, repo_dir, max_diff_length)
         if not diff.strip():
@@ -106,23 +127,47 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             authored_entries = _format_entry_map(_entries_added_since(head_unreleased, unreleased, worktree_unreleased))
 
         can_revise = bool(config.changelog_revise) and head_unreleased is not None and bool(existing_entries)
-
-        entries, revisions = await generate_changelog_entries(
-            boundary.changelog_path,
-            _is_package_changelog(boundary.changelog_path, repo_dir),
-            stat,
-            diff,
-            existing_entries,
-            authored_entries,
-            can_revise,
-            config,
+        prepared.append(
+            _BoundaryPrep(
+                boundary,
+                diff,
+                stat,
+                rel_path,
+                is_tracked,
+                changelog_content,
+                worktree_content,
+                unreleased,
+                worktree_unreleased,
+                head_unreleased,
+                existing_entries,
+                authored_entries,
+                can_revise,
+            )
         )
-        staged_entries = unreleased.entries
-        worktree_entries = worktree_unreleased.entries if worktree_unreleased is not None else None
+
+    generated = await asyncio.gather(
+        *(
+            generate_changelog_entries(
+                prep.boundary.changelog_path,
+                _is_package_changelog(prep.boundary.changelog_path, repo_dir),
+                prep.stat,
+                prep.diff,
+                prep.existing_entries,
+                prep.authored_entries,
+                prep.can_revise,
+                config,
+            )
+            for prep in prepared
+        )
+    )
+
+    for prep, (entries, revisions) in zip(prepared, generated, strict=True):
+        staged_entries = prep.unreleased.entries
+        worktree_entries = prep.worktree_unreleased.entries if prep.worktree_unreleased is not None else None
         applied: list[ChangelogRevision] = []
-        if can_revise:
-            assert head_unreleased is not None
-            revisable = {entry.casefold() for values in head_unreleased.entries.values() for entry in values}
+        if prep.can_revise:
+            assert prep.head_unreleased is not None
+            revisable = {entry.casefold() for values in prep.head_unreleased.entries.values() for entry in values}
             staged_entries, applied = apply_revisions(staged_entries, revisions, revisable)
             if worktree_entries is not None:
                 worktree_entries, _ = apply_revisions(worktree_entries, revisions, revisable)
@@ -131,27 +176,27 @@ async def run_changelog_flow(args: Any, config: CommitConfig) -> list[ChangelogB
             continue
 
         updated_staged = write_entries(
-            changelog_content,
-            replace(unreleased, entries=staged_entries),
+            prep.changelog_content,
+            replace(prep.unreleased, entries=staged_entries),
             entries,
         )
         updated_worktree = (
             write_entries(
-                worktree_content,
-                replace(worktree_unreleased, entries=worktree_entries),
+                prep.worktree_content,
+                replace(prep.worktree_unreleased, entries=worktree_entries),
                 entries,
             )
-            if worktree_unreleased is not None and worktree_entries is not None
+            if prep.worktree_unreleased is not None and worktree_entries is not None
             else updated_staged
         )
-        boundary.changelog_path.write_text(updated_worktree, encoding="utf-8")
+        prep.boundary.changelog_path.write_text(updated_worktree, encoding="utf-8")
 
-        if is_tracked:
-            stage_changelog_blob(rel_path, updated_staged, repo_dir)
+        if prep.is_tracked:
+            stage_changelog_blob(prep.rel_path, updated_staged, repo_dir)
         else:
-            untracked_to_stage.append(rel_path)
+            untracked_to_stage.append(prep.rel_path)
         _report_applied_revisions(applied)
-        updated.append(ChangelogBoundary(boundary.changelog_path, boundary.files, diff, stat))
+        updated.append(ChangelogBoundary(prep.boundary.changelog_path, prep.boundary.files, prep.diff, prep.stat))
 
     if untracked_to_stage:
         run_git(["add", "--", *untracked_to_stage], cwd=repo_dir)
@@ -632,19 +677,17 @@ def _staged_files(dir: Path) -> list[str]:
 
 
 def _find_changelogs(dir: Path) -> list[Path]:
+    """Locate tracked plus untracked-but-not-ignored CHANGELOG.md files via git.
+
+    Avoids walking the worktree (node_modules and friends); gitignored
+    changelogs are never changelog boundaries.
+    """
+    patterns = ["CHANGELOG.md", "**/CHANGELOG.md"]
+    tracked = run_git(["ls-files", "--", *patterns], cwd=dir).stdout
+    untracked = run_git(["ls-files", "--others", "--exclude-standard", "--", *patterns], cwd=dir).stdout
     paths = {
-        dir / path
-        for path in run_git(["ls-files", "--", "CHANGELOG.md", "**/CHANGELOG.md"], cwd=dir).stdout.splitlines()
-        if Path(path).name == "CHANGELOG.md"
+        dir / line for line in (*tracked.splitlines(), *untracked.splitlines()) if Path(line).name == "CHANGELOG.md"
     }
-    for path in dir.rglob("CHANGELOG.md"):
-        if ".git" in path.parts:
-            continue
-        try:
-            exact_path = next(child for child in path.parent.iterdir() if child.name == "CHANGELOG.md")
-        except OSError, StopIteration:
-            continue
-        paths.add(exact_path)
     return sorted(paths, key=lambda path: _relative_to(path, dir))
 
 
