@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import pwd
 import re
 import subprocess
 import sys
@@ -39,6 +38,7 @@ from lgit.diffing import parse_diff, reconstruct_diff
 from lgit.map_reduce import FileObservation, observe_diff_files
 from lgit.validation import is_past_tense_first_word
 
+pwd = pytest.importorskip("pwd", reason="live quality gate requires a POSIX host")
 pytestmark = pytest.mark.skipif(
     not os.environ.get("LLM_GIT_QUALITY_GATE"),
     reason="live LLM quality gate; set LLM_GIT_QUALITY_GATE=1 to run",
