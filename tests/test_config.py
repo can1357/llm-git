@@ -36,7 +36,8 @@ def test_prompts_dir_wires_template_overrides(tmp_path: Path, monkeypatch: pytes
     (override / "summary.md").write_text("OVERRIDE SYSTEM\n<!-- USER -->\nx", encoding="utf-8")
 
     config_file = tmp_path / "config.toml"
-    config_file.write_text(f'prompts_dir = "{override}"\n', encoding="utf-8")
+    # TOML literal string: Windows backslashes must not be parsed as escapes.
+    config_file.write_text(f"prompts_dir = '{override}'\n", encoding="utf-8")
     CommitConfig.load(config_file)
     assert load_template_file("summary").startswith("OVERRIDE SYSTEM")
 
