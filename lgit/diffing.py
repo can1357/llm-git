@@ -264,6 +264,32 @@ def reconstruct_diff(files: list[FileDiff] | tuple[FileDiff, ...]) -> str:
     return "\n".join(sections)
 
 
+# Per-file cap for prompt-bound diffs: a single file section still larger than
+# this after blob-line collapse is generated or vendored content whose bulk
+# carries no commit-analysis signal.
+MAX_PROMPT_FILE_BYTES = 100_000
+
+
+def scrub_diff_for_prompt(diff: str, max_file_bytes: int = MAX_PROMPT_FILE_BYTES) -> str:
+    """Prepare a diff for LLM prompts: collapse blob lines, then cap oversized file sections.
+
+    Oversized sections are collapsed to their headers plus edge lines via
+    :meth:`FileDiff.truncate`. Prompt-side only — the result is not an applicable
+    patch; never use it for staging.
+    """
+
+    diff = collapse_blob_lines(diff)
+    if len(diff) <= max_file_bytes:
+        return diff
+    files = parse_diff(diff)
+    if not any(file.size > max_file_bytes for file in files):
+        return diff
+    for file in files:
+        if file.size > max_file_bytes:
+            file.truncate(max_file_bytes)
+    return reconstruct_diff(files)
+
+
 def smart_truncate_diff(
     diff: str,
     max_length: int,

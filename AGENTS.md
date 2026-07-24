@@ -148,7 +148,7 @@ uv run pytest -k truncate                    # Match by name
 5. For each file: keep first 15 + last 10 lines, truncate middle
 6. Annotate with `[... X lines omitted ...]`
 
-**Blob-line collapse** (`collapse_blob_lines`): every LLM-bound diff (standard/fast analysis, compose planning + per-group messages, changelog, rewrite) first collapses lines >512 chars — hex/base64 blobs, minified bundles, long string literals — to `head[..omitted 14KB..]tail`. Line-count budgets alone can't catch these (a single 5MB line survives "first 15 lines"). Prompt-side only; never applied to diffs used for staging.
+**Prompt scrub** (`scrub_diff_for_prompt`): every LLM-bound diff (standard/fast analysis, compose planning + per-group messages, changelog, rewrite) is scrubbed first: lines >512 chars — hex/base64 blobs, minified bundles, long string literals — collapse to `head[..omitted 14KB..]tail` (`collapse_blob_lines`), then any file section still >100KB is capped to headers plus edge lines. Line-count budgets alone can't catch these (a single 5MB line survives "first 15 lines"). Binary files (images) are safe by construction — diffs are generated without `--binary`, so they appear only as one-line `Binary files … differ` headers. Prompt-side only; never applied to diffs used for staging.
 
 ## Hunk-Level Staging (`lgit/patch.py`)
 

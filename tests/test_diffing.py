@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from lgit.diffing import FileDiff, collapse_blob_lines, parse_diff, reconstruct_diff
+from lgit.diffing import FileDiff, collapse_blob_lines, parse_diff, reconstruct_diff, scrub_diff_for_prompt
 
 
 def _file_diff(
@@ -303,3 +303,48 @@ def test_file_diff_truncate_many_lines_respects_byte_budget() -> None:
     file.truncate(4_000)
 
     assert file.size <= 4_000
+
+
+def test_scrub_diff_for_prompt_leaves_small_diff_untouched() -> None:
+    diff = "diff --git a/test.rs b/test.rs\n@@ -1 +1 @@\n+let x = 1;"
+
+    assert scrub_diff_for_prompt(diff) is diff
+
+
+def test_scrub_diff_for_prompt_caps_oversized_file_section() -> None:
+    # Many short lines: blob-line collapse can't shrink this, only the per-file cap can.
+    big_content = "\n".join(f"+generated row {i}" for i in range(20_000))
+    diff = (
+        f"diff --git a/generated.json b/generated.json\n@@ -0,0 +1,20000 @@\n{big_content}\n"
+        "diff --git a/small.rs b/small.rs\n@@ -1 +1 @@\n+let x = 1;"
+    )
+
+    result = scrub_diff_for_prompt(diff, max_file_bytes=10_000)
+
+    assert len(result) < 12_000
+    assert "... (truncated" in result
+    # both file headers and the small file's content survive
+    assert "diff --git a/generated.json b/generated.json" in result
+    assert "diff --git a/small.rs b/small.rs\n@@ -1 +1 @@\n+let x = 1;" in result
+
+
+def test_scrub_diff_for_prompt_collapses_blob_lines_first() -> None:
+    diff = "diff --git a/asset.svg b/asset.svg\n@@ -0,0 +1 @@\n+" + "Q" * 200_000
+
+    result = scrub_diff_for_prompt(diff)
+
+    # the blob-line pass alone brings the section under the per-file cap
+    assert "[..omitted 195KB..]" in result
+    assert len(result) < 500
+
+
+def test_scrub_diff_for_prompt_keeps_binary_sections() -> None:
+    diff = (
+        "diff --git a/image.png b/image.png\nindex 123..456 100644\nBinary files a/image.png and b/image.png differ\n"
+        "diff --git a/big.txt b/big.txt\n@@ -0,0 +1,20000 @@\n" + "\n".join(f"+row {i}" for i in range(20_000))
+    )
+
+    result = scrub_diff_for_prompt(diff, max_file_bytes=10_000)
+
+    assert "Binary files a/image.png and b/image.png differ" in result
+    assert "... (truncated" in result
