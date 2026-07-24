@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lgit-cli"
-version = "5.0.0"
+version = "5.1.0"
 description = "AI-powered git commit message generator using Claude and other LLMs via OpenAI-compatible APIs"
 readme = "README.md"
 requires-python = ">=3.14"
