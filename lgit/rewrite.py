@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from . import style
 from .analysis import extract_scope_candidates
 from .api import generate_conventional_analysis, generate_summary_from_analysis
-from .diffing import smart_truncate_diff
+from .diffing import collapse_blob_lines, smart_truncate_diff
 from .errors import ValidationFailure
 from .git import (
     check_working_tree_clean,
@@ -168,7 +168,7 @@ async def generate_for_commit(commit: Any, config: CommitConfig, dir: str | os.P
     """Generate and validate one replacement conventional commit message."""
 
     commit_hash = commit.hash
-    diff = get_git_diff("commit", commit_hash, dir, config)
+    diff = collapse_blob_lines(get_git_diff("commit", commit_hash, dir, config))
     stat = get_git_stat("commit", commit_hash, dir, config)
     max_diff_length = config.max_diff_length
     if len(diff) > max_diff_length:

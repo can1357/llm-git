@@ -29,7 +29,13 @@ from .changelog import (
     run_changelog_flow,
 )
 from .config import CommitConfig
-from .diffing import classify_diff_whitespace, smart_truncate_diff, strip_whitespace_only_files, truncate_diff_by_lines
+from .diffing import (
+    classify_diff_whitespace,
+    collapse_blob_lines,
+    smart_truncate_diff,
+    strip_whitespace_only_files,
+    truncate_diff_by_lines,
+)
 from .errors import LgitError, NoChanges, ValidationFailure
 from .map_reduce import FileObservation, should_use_map_reduce
 from .markdown_output import fallback_summary
@@ -532,6 +538,7 @@ async def _generate_fast_workflow(
 ) -> ConventionalCommit:
     with profile.section("strip_whitespace_only", collector):
         diff = strip_whitespace_only_files(diff) or diff
+        diff = collapse_blob_lines(diff)
     with profile.section("truncate_diff_by_lines", collector):
         diff = truncate_diff_by_lines(diff, 10_000, config)
     with profile.section("extract_scope_candidates", collector):
@@ -559,6 +566,7 @@ async def _generate_standard_workflow(
     style.status(f"{style.info('›')} Analyzing {style.bold(mode.value)} changes...")
     with profile.section("strip_whitespace_only", collector):
         diff = strip_whitespace_only_files(diff) or diff
+        diff = collapse_blob_lines(diff)
     with profile.section("extract_scope_candidates", collector):
         scope_candidates, _wide = (
             extract_scope_candidates(numstat, args.target, args.dir, config) if numstat.strip() else ("(none)", False)

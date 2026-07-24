@@ -116,7 +116,11 @@ class FileDiff:
             keep_start = 15
             keep_end = 10
             omitted = len(lines) - keep_start - keep_end
-            self.content = "\n".join([*lines[:keep_start], f"... (truncated {omitted} lines) ...", *lines[-keep_end:]])
+            content = "\n".join([*lines[:keep_start], f"... (truncated {omitted} lines) ...", *lines[-keep_end:]])
+            if _byte_len(content) <= available:
+                self.content = content
+                return
+            self.content = _truncate_utf8(content, available) + truncation_suffix
             return
 
         self.content = _truncate_utf8(self.content, available) + truncation_suffix
@@ -131,6 +135,43 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
     if len(data) <= max_bytes:
         return text
     return data[:max_bytes].decode("utf-8", errors="ignore")
+
+
+# No human-authored diff line this long carries commit-analysis signal; anything
+# beyond it is a machine-generated payload (hex/base64 blob, minified bundle,
+# embedded asset) that only burns prompt tokens.
+BLOB_LINE_THRESHOLD = 512
+_BLOB_KEEP_HEAD = 120
+_BLOB_KEEP_TAIL = 24
+
+
+def _format_omitted_size(count: int) -> str:
+    if count >= 1024 * 1024:
+        return f"{count / (1024 * 1024):.1f}MB"
+    if count >= 1024:
+        return f"{count / 1024:.0f}KB"
+    return f"{count}B"
+
+
+def collapse_blob_lines(diff: str, threshold: int = BLOB_LINE_THRESHOLD) -> str:
+    """Collapse blob-like lines (hex/base64 payloads, minified bundles, long string literals) for LLM prompts.
+
+    Each line longer than ``threshold`` is reduced to its head, an ``[..omitted 14KB..]``
+    marker, and its tail. The result is no longer an applicable patch — use only on
+    diff text bound for prompts, never on diffs used for staging.
+    """
+
+    if len(diff) <= threshold:
+        return diff
+    lines = diff.split("\n")
+    changed = False
+    for idx, line in enumerate(lines):
+        if len(line) <= threshold:
+            continue
+        omitted = len(line) - _BLOB_KEEP_HEAD - _BLOB_KEEP_TAIL
+        lines[idx] = f"{line[:_BLOB_KEEP_HEAD]}[..omitted {_format_omitted_size(omitted)}..]{line[-_BLOB_KEEP_TAIL:]}"
+        changed = True
+    return "\n".join(lines) if changed else diff
 
 
 @dataclass(slots=True)

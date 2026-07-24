@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import style
-from .diffing import smart_truncate_diff
+from .diffing import collapse_blob_lines, smart_truncate_diff
 from .errors import GitError, ValidationFailure
 from .git import run_git
 from .markdown_output import parse_changelog_response
@@ -98,7 +98,7 @@ def prepare_changelog_flow(args: Any, config: CommitConfig) -> PreparedChangelog
 
     max_diff_length = config.max_diff_length
     for boundary in detect_boundaries(candidate_files, changelogs, repo_dir):
-        diff = _diff_for_files(boundary.files, repo_dir, max_diff_length)
+        diff = collapse_blob_lines(_diff_for_files(boundary.files, repo_dir, max_diff_length))
         if not diff.strip():
             continue
         if len(diff) > max_diff_length:
@@ -398,11 +398,9 @@ class ChangelogWeaver:
             repo_dir,
         )
         states = {state.changelog_path: state for state in self.boundaries}
-        group_diff = (
-            smart_truncate_diff(diff, self.config.max_diff_length, self.config)
-            if len(diff) > self.config.max_diff_length
-            else diff
-        )
+        group_diff = collapse_blob_lines(diff)
+        if len(group_diff) > self.config.max_diff_length:
+            group_diff = smart_truncate_diff(group_diff, self.config.max_diff_length, self.config)
         for boundary in matched:
             state = states[boundary.changelog_path]
             try:

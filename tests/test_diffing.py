@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from lgit.diffing import FileDiff, parse_diff, reconstruct_diff
+from lgit.diffing import FileDiff, collapse_blob_lines, parse_diff, reconstruct_diff
 
 
 def _file_diff(
@@ -257,3 +257,49 @@ def test_reconstruct_diff_empty_content() -> None:
 
 def test_reconstruct_diff_empty_sequence() -> None:
     assert reconstruct_diff([]) == ""
+
+
+def test_collapse_blob_lines_leaves_normal_diff_untouched() -> None:
+    diff = "diff --git a/test.rs b/test.rs\n+let x = 1;\n-let x = 0;"
+
+    assert collapse_blob_lines(diff) is diff
+
+
+def test_collapse_blob_lines_collapses_hex_blob() -> None:
+    blob = '+pub static SLIR: &[u8] = b"' + "\\x53" * 8000 + '";'
+    diff = f"diff --git a/blob.rs b/blob.rs\n{blob}\n+let x = 1;"
+
+    result = collapse_blob_lines(diff)
+
+    assert len(result) < 500
+    assert "[..omitted 31KB..]" in result
+    assert result.startswith("diff --git a/blob.rs b/blob.rs\n+pub static SLIR")
+    assert result.endswith("+let x = 1;")
+    # head and tail of the blob line survive around the marker
+    assert '\\x53";' in result
+
+
+def test_collapse_blob_lines_formats_megabytes() -> None:
+    diff = "+" + "A" * (3 * 1024 * 1024)
+
+    result = collapse_blob_lines(diff)
+
+    assert "[..omitted 3.0MB..]" in result
+
+
+def test_collapse_blob_lines_respects_threshold() -> None:
+    line = "+" + "B" * 400
+
+    assert collapse_blob_lines(line, threshold=512) is line
+    assert "[..omitted" in collapse_blob_lines(line, threshold=100)
+
+
+def test_file_diff_truncate_many_lines_respects_byte_budget() -> None:
+    # >30 lines where the kept head lines are themselves huge: the 15/10 line
+    # sampling alone would blow the budget, so the byte guard must kick in.
+    content = "\n".join("x" * 10_000 for _ in range(100))
+    file = _file_diff("test.rs", header="header", content=content)
+
+    file.truncate(4_000)
+
+    assert file.size <= 4_000

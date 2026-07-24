@@ -350,8 +350,9 @@ async def run_compose_round(
 
     token_counter = _create_token_counter(config)
     observations = []
-    if not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(snapshot.diff, config, token_counter):
-        observations = await map_reduce.observe_diff_files(snapshot.diff, config.summary_model, config, token_counter)
+    planning_diff = diffing.collapse_blob_lines(snapshot.diff)
+    if not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(planning_diff, config, token_counter):
+        observations = await map_reduce.observe_diff_files(planning_diff, config.summary_model, config, token_counter)
     if observations:
         _save_debug_artifact(
             args,
@@ -1731,6 +1732,7 @@ async def _message_parts_from_api(
     counter: Any,
     debug_prefix: str,
 ) -> tuple[list[str], str | None]:
+    diff = diffing.collapse_blob_lines(diff)
     strategy = _compose_analysis_strategy(diff, config, counter)
     if strategy is ComposeAnalysisStrategy.MAP_REDUCE:
         analysis = await map_reduce.run_map_reduce(

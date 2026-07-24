@@ -148,6 +148,8 @@ uv run pytest -k truncate                    # Match by name
 5. For each file: keep first 15 + last 10 lines, truncate middle
 6. Annotate with `[... X lines omitted ...]`
 
+**Blob-line collapse** (`collapse_blob_lines`): every LLM-bound diff (standard/fast analysis, compose planning + per-group messages, changelog, rewrite) first collapses lines >512 chars — hex/base64 blobs, minified bundles, long string literals — to `head[..omitted 14KB..]tail`. Line-count budgets alone can't catch these (a single 5MB line survives "first 15 lines"). Prompt-side only; never applied to diffs used for staging.
+
 ## Hunk-Level Staging (`lgit/patch.py`)
 
 **Problem**: Compose splits the *staged* tree but spends minutes in LLM calls. Reading the live worktree (`git add <file>`) at staging time would let unstaged edits made to a staged file in the meantime leak into the generated commits.
