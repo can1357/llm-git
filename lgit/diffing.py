@@ -199,15 +199,26 @@ def parse_diff(diff: str) -> list[FileDiff]:
 
     file_diffs: list[FileDiff] = []
     current: FileDiff | None = None
+    header_lines: list[str] = []
+    content_lines: list[str] = []
     in_diff_header = False
+
+    def flush_current() -> None:
+        nonlocal current, header_lines, content_lines
+        if current is not None:
+            current.header = "\n".join(header_lines)
+            current.content = "\n".join(content_lines)
+            file_diffs.append(current)
+            header_lines = []
+            content_lines = []
 
     for line in diff.splitlines():
         if line.startswith("diff --git"):
-            if current is not None:
-                file_diffs.append(current)
+            flush_current()
             parts = line.split()
             filename = parts[3].removeprefix("b/") if len(parts) > 3 else "unknown"
-            current = FileDiff(filename=filename, header=line)
+            current = FileDiff(filename=filename, header="")
+            header_lines.append(line)
             in_diff_header = True
             continue
 
@@ -216,7 +227,7 @@ def parse_diff(diff: str) -> list[FileDiff]:
 
         if line.startswith("Binary files"):
             current.is_binary = True
-            current.header += "\n" + line
+            header_lines.append(line)
         elif line.startswith(
             (
                 "index ",
@@ -232,23 +243,20 @@ def parse_diff(diff: str) -> list[FileDiff]:
                 "---",
             )
         ):
-            current.header += "\n" + line
+            header_lines.append(line)
         elif line.startswith("@@"):
             in_diff_header = False
-            current.header += "\n" + line
+            header_lines.append(line)
         elif not in_diff_header:
-            if current.content:
-                current.content += "\n"
-            current.content += line
+            content_lines.append(line)
             if line.startswith("+") and not line.startswith("+++"):
                 current.additions += 1
             elif line.startswith("-") and not line.startswith("---"):
                 current.deletions += 1
         else:
-            current.header += "\n" + line
+            header_lines.append(line)
 
-    if current is not None:
-        file_diffs.append(current)
+    flush_current()
     return file_diffs
 
 
