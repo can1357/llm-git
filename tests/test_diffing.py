@@ -348,3 +348,82 @@ def test_scrub_diff_for_prompt_keeps_binary_sections() -> None:
 
     assert "Binary files a/image.png and b/image.png differ" in result
     assert "... (truncated" in result
+
+
+def test_parse_diff_file_status() -> None:
+    diff = """diff --git a/new.rs b/new.rs
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/new.rs
+@@ -0,0 +1,1 @@
++fn new() {}
+diff --git a/edited.rs b/edited.rs
+index 1111111..2222222 100644
+--- a/edited.rs
++++ b/edited.rs
+@@ -1,1 +1,1 @@
+-fn old() {}
++fn edited() {}
+diff --git a/old_name.rs b/new_name.rs
+similarity index 95%
+rename from old_name.rs
+rename to new_name.rs
+index 3333333..4444444 100644
+diff --git a/gone.rs b/gone.rs
+deleted file mode 100644
+index 5555555..0000000
+--- a/gone.rs
++++ /dev/null
+@@ -1,1 +0,0 @@
+-fn gone() {}"""
+
+    statuses = {file.filename: file.status for file in parse_diff(diff)}
+
+    assert statuses["new.rs"] == "added"
+    assert statuses["edited.rs"] == "modified"
+    assert statuses["new_name.rs"] == "renamed"
+    assert statuses["gone.rs"] == "deleted"
+
+
+def test_condense_stat_keeps_totals_only_by_default() -> None:
+    from lgit.diffing import condense_stat
+
+    stat = (
+        " src/big.rs    | 500 ++++++----\n"
+        " src/small.rs  |   2 +-\n"
+        " 2 files changed, 400 insertions(+), 102 deletions(-)"
+    )
+
+    condensed = condense_stat(stat)
+
+    assert "src/big.rs" not in condensed
+    assert "src/small.rs" not in condensed
+    assert "2 files changed, 400 insertions(+), 102 deletions(-)" in condensed
+
+
+def test_condense_stat_keeps_largest_files_in_original_order() -> None:
+    from lgit.diffing import condense_stat
+
+    stat = (
+        " a.rs | 1 +\n"
+        " b.rs | 900 +++++\n"
+        " c.rs | 5 +-\n"
+        " d.rs | 300 ++--\n"
+        " 4 files changed, 1000 insertions(+), 206 deletions(-)"
+    )
+
+    condensed = condense_stat(stat, max_files=2)
+
+    lines = condensed.splitlines()
+    assert lines[0].startswith(" b.rs")
+    assert lines[1].startswith(" d.rs")
+    assert "2 more files omitted" in lines[2]
+    assert lines[3].startswith(" 4 files changed")
+
+
+def test_condense_stat_returns_small_stat_unchanged() -> None:
+    from lgit.diffing import condense_stat
+
+    stat = " a.rs | 1 +\n 1 file changed, 1 insertion(+)"
+    assert condense_stat(stat, max_files=5) == stat

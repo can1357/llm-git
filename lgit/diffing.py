@@ -49,6 +49,8 @@ class FileDiff:
     deletions: int = 0
     is_binary: bool = False
 
+    status: str = "modified"  # added | deleted | renamed | modified
+
     @property
     def size(self) -> int:
         """Return the UTF-8 byte size used for budgeting."""
@@ -194,6 +196,33 @@ class WhitespaceReport:
         return self.all_whitespace
 
 
+def condense_stat(stat: str, max_files: int = 0) -> str:
+    """Condense a ``git diff --stat`` block to its ``max_files`` largest per-file lines plus the totals line.
+
+    ``max_files=0`` keeps only the totals line. Small stats (at or under the
+    budget) are returned unchanged. Used to shrink LLM prompts whose per-file
+    data is supplied elsewhere (map-reduce observations).
+    """
+
+    lines = [line for line in stat.splitlines() if line.strip()]
+    file_lines = [line for line in lines if "|" in line]
+    if len(file_lines) <= max_files:
+        return stat
+    other_lines = [line for line in lines if "|" not in line]
+
+    def change_count(line: str) -> int:
+        tail = line.rsplit("|", 1)[1].strip()
+        digits = tail.split(None, 1)[0] if tail else ""
+        return int(digits) if digits.isdigit() else 0
+
+    kept = set(sorted(file_lines, key=change_count, reverse=True)[:max_files])
+    condensed = [line for line in file_lines if line in kept]
+    omitted = len(file_lines) - len(condensed)
+    if omitted and condensed:
+        condensed.append(f" ... {omitted} more files omitted ...")
+    return "\n".join(condensed + other_lines)
+
+
 def parse_diff(diff: str) -> list[FileDiff]:
     """Parse a unified git diff into file-level sections."""
 
@@ -244,6 +273,12 @@ def parse_diff(diff: str) -> list[FileDiff]:
             )
         ):
             header_lines.append(line)
+            if line.startswith("new file"):
+                current.status = "added"
+            elif line.startswith("deleted file"):
+                current.status = "deleted"
+            elif line.startswith("rename "):
+                current.status = "renamed"
         elif line.startswith("@@"):
             in_diff_header = False
             header_lines.append(line)
