@@ -19,6 +19,7 @@ from jinja2 import Template
 
 from . import cache as llm_cache
 from . import pricing, profile
+from .diffing import condense_stat
 from .errors import ApiContextLengthExceeded, ApiError, LgitError
 from .markdown_output import (
     analysis_from_mapping,
@@ -35,7 +36,7 @@ from .markdown_output import (
 )
 from .models import CommitSummary, ConventionalAnalysis, ConventionalCommit, ResolvedApiMode, resolve_model_name
 from .normalization import post_process_commit_message
-from .validation import is_past_tense_first_word, validate_summary_quality
+from .validation import is_past_tense_first_word, repair_summary_tense, validate_summary_quality
 
 if TYPE_CHECKING:
     from .config import CommitConfig
@@ -238,7 +239,7 @@ async def generate_summary_from_analysis(
             "chars": chars,
             "user_context": user_context or "",
             "details": details,
-            "stat": stat,
+            "stat": condense_stat(stat, max_files=30),
         },
     )
     spec = OneShotSpec(
@@ -257,14 +258,24 @@ async def generate_summary_from_analysis(
         summary = _summary_from_output(response.output, response.text_content)
     except Exception:
         summary = ""
-    summary = strip_type_prefix(
-        summary
-        or analysis.summary
-        or fallback_summary(stat, analysis.body_texts(), limit=config.summary_hard_limit, commit_type=commit_type)
-    )
-    if not validate_summary_quality(summary, commit_type, stat).ok:
-        summary = _fallback_summary_for_commit(stat, analysis.body_texts(), commit_type, config.summary_hard_limit)
-    return summary[: config.summary_hard_limit].rstrip(" .")
+    chosen = ""
+    draft = ""
+    draft_rejection = ""
+    for raw in (summary, "" if analysis.summary is None else str(analysis.summary)):
+        candidate = strip_type_prefix(raw).strip()
+        if not candidate:
+            continue
+        accepted, rejection = _accept_summary(candidate, commit_type, stat)
+        if accepted:
+            chosen = accepted
+            break
+        if not draft:
+            draft, draft_rejection = candidate, rejection or ""
+    if not chosen and draft:
+        chosen = await _rewrite_summary_for_compliance(config, spec, draft, draft_rejection, commit_type, chars, stat)
+    if not chosen:
+        chosen = _fallback_summary_for_commit(stat, analysis.body_texts(), commit_type, config.summary_hard_limit)
+    return chosen[: config.summary_hard_limit].rstrip(" .")
 
 
 async def generate_analysis_with_map_reduce(
@@ -370,6 +381,59 @@ def _fallback_summary_for_commit(stat: str, details: Iterable[str], commit_type:
         return str(CommitSummary.from_raw(prefixed, max_length=limit))
     except LgitError:
         return fallback_summary("", details_list, limit=limit, commit_type=commit_type)
+
+
+def _accept_summary(candidate: str, commit_type: str, stat: str) -> tuple[str | None, str | None]:
+    """Validate a summary candidate, mechanically repairing a leading present-tense verb first.
+
+    Returns ``(accepted_summary, None)`` on success, else ``(None, rejection_reason)``.
+    """
+
+    report = validate_summary_quality(candidate, commit_type, stat)
+    if report.ok:
+        return candidate, None
+    repaired = repair_summary_tense(candidate)
+    if repaired is not None and validate_summary_quality(repaired, commit_type, stat).ok:
+        return repaired, None
+    return None, "; ".join(issue.message for issue in report.errors)
+
+
+async def _rewrite_summary_for_compliance(
+    config: CommitConfig,
+    spec: OneShotSpec,
+    draft: str,
+    rejection: str,
+    commit_type: str,
+    chars: int,
+    stat: str,
+) -> str:
+    """Ask the summary model to minimally rewrite a rejected draft into a compliant summary.
+
+    A pure text-editing task with no diff, details, or stat context — much easier for a small
+    model than regenerating the summary from scratch.
+    """
+
+    system_prompt, user_prompt = render_prompt(
+        "summary-rewrite",
+        {"commit_type": commit_type, "chars": chars, "draft": draft, "rejection": rejection},
+    )
+    retry_spec = replace(
+        spec,
+        operation="summary-rewrite",
+        prompt_family="summary-rewrite",
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        progress_label="summary rewrite",
+    )
+    try:
+        response = await _run_oneshot_response(config, retry_spec)
+        candidate = strip_type_prefix(_summary_from_output(response.output, response.text_content)).strip()
+    except Exception:
+        return ""
+    if not candidate:
+        return ""
+    accepted, _ = _accept_summary(candidate, commit_type, stat)
+    return accepted or ""
 
 
 def render_prompt(family: str, context: Mapping[str, Any]) -> tuple[str, str]:
@@ -830,6 +894,13 @@ def _render_with_template_helper(templates: Any, family: str, context: Mapping[s
                 str(context.get("details", "")),
                 str(context.get("stat", "")),
                 context.get("user_context"),
+            )
+        case "summary-rewrite":
+            parts = helper(
+                str(context.get("commit_type", "")),
+                str(context.get("chars", "")),
+                str(context.get("draft", "")),
+                str(context.get("rejection", "")),
             )
         case "map":
             parts = helper(context.get("files", ()), str(context.get("context_header", "")))

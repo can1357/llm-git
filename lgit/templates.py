@@ -20,6 +20,7 @@ PROMPT_CATEGORIES = (
     "map",
     "reduce",
     "fast",
+    "summary-rewrite",
     "compose-intent",
     "compose-bind",
 )
@@ -159,6 +160,13 @@ def render_summary_prompt(
         "user_context": user_context,
     }
     return render_prompt_parts("summary.md", template_content, context)
+
+
+def render_summary_rewrite_prompt(commit_type: str, chars: str, draft: str, rejection: str) -> PromptParts:
+    """Render the summary-rewrite prompt that minimally edits a rejected draft into compliance."""
+    template_content = load_template_file("summary-rewrite")
+    context = {"commit_type": commit_type, "chars": chars, "draft": draft, "rejection": rejection}
+    return render_prompt_parts("summary-rewrite.md", template_content, context)
 
 
 def render_changelog_prompt(
@@ -348,6 +356,7 @@ __all__ = [
     "load_template_file",
     "render_analysis_prompt",
     "render_summary_prompt",
+    "render_summary_rewrite_prompt",
     "render_changelog_prompt",
     "render_map_prompt",
     "render_reduce_prompt",

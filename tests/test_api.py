@@ -169,3 +169,82 @@ def test_build_fast_commit_sanitizes_path_like_scope_output() -> None:
 
     assert commit.scope is not None
     assert commit.scope.as_str() == "github/release-notes"
+
+
+def _refactor_analysis() -> Any:
+    from lgit.models import ConventionalAnalysis
+
+    return ConventionalAnalysis.from_raw(
+        commit_type="refactor",
+        details=(
+            "Added custom core implementations for ULID generation, secret management, and caching in omp-core.",
+            "Replaced external dependencies with internal counterparts.",
+        ),
+    )
+
+
+def _summary_response(text: str) -> api_module.OneShotResponse:
+    return api_module.OneShotResponse(
+        output=None,
+        source=api_module.OneShotSource.PLAIN_TEXT_CONTENT,
+        text_content=f"<summary>{text}</summary>",
+    )
+
+
+def test_generate_summary_repairs_present_tense_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[api_module.OneShotSpec] = []
+
+    async def fake_run(config: CommitConfig, spec: api_module.OneShotSpec) -> api_module.OneShotResponse:
+        del config
+        calls.append(spec)
+        return _summary_response("replace third-party dependencies with custom core implementations")
+
+    monkeypatch.setattr(api_module, "_run_oneshot_response", fake_run)
+    summary = asyncio.run(
+        api_module.generate_summary_from_analysis(CommitConfig(cache_enabled=False), _refactor_analysis())
+    )
+
+    assert summary == "replaced third-party dependencies with custom core implementations"
+    assert len(calls) == 1
+
+
+def test_generate_summary_rewrites_unrepairable_draft_with_small_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[api_module.OneShotSpec] = []
+
+    async def fake_run(config: CommitConfig, spec: api_module.OneShotSpec) -> api_module.OneShotResponse:
+        del config
+        calls.append(spec)
+        if len(calls) == 1:
+            return _summary_response("dependency story goes internal")
+        return _summary_response("migrated dependencies to internal implementations")
+
+    monkeypatch.setattr(api_module, "_run_oneshot_response", fake_run)
+    summary = asyncio.run(
+        api_module.generate_summary_from_analysis(CommitConfig(cache_enabled=False), _refactor_analysis())
+    )
+
+    assert summary == "migrated dependencies to internal implementations"
+    assert len(calls) == 2
+    rewrite = calls[1]
+    assert rewrite.operation == "summary-rewrite"
+    assert "dependency story goes internal" in rewrite.user_prompt
+    assert "past-tense verb" in rewrite.user_prompt
+    # The rewrite is a pure text-editing task: no detail points or diff stat leak in.
+    assert "<detail_points>" not in rewrite.user_prompt
+    assert "<diff_stat>" not in rewrite.user_prompt
+
+
+def test_generate_summary_falls_back_to_full_first_detail_after_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_run(config: CommitConfig, spec: api_module.OneShotSpec) -> api_module.OneShotResponse:
+        del config, spec
+        return _summary_response("dependency story goes internal")
+
+    monkeypatch.setattr(api_module, "_run_oneshot_response", fake_run)
+    summary = asyncio.run(
+        api_module.generate_summary_from_analysis(CommitConfig(cache_enabled=False), _refactor_analysis())
+    )
+
+    # Deterministic fallback keeps the whole first detail instead of clamping to 50 chars.
+    assert (
+        summary == "Added custom core implementations for ULID generation, secret management, and caching in omp-core"
+    )
