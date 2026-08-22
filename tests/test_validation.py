@@ -183,3 +183,22 @@ def test_validate_total_length_at_guideline() -> None:
     assert report.ok
     assert report.errors == ()
     assert report.warnings == ()
+
+
+def test_repair_summary_tense_converts_leading_present_verb() -> None:
+    from lgit.validation import repair_summary_tense
+
+    assert (
+        repair_summary_tense("replace third-party dependencies with custom implementations")
+        == "replaced third-party dependencies with custom implementations"
+    )
+    assert repair_summary_tense("Consolidate core utilities") == "consolidated core utilities"
+    assert repair_summary_tense("add") == "added"
+
+
+def test_repair_summary_tense_returns_none_when_no_repair_applies() -> None:
+    from lgit.validation import repair_summary_tense
+
+    assert repair_summary_tense("") is None
+    assert repair_summary_tense("garbled nonsense words") is None
+    assert repair_summary_tense("added already-past summary") is None

@@ -159,6 +159,18 @@ def present_to_past(present: str) -> str | None:
     return _load_validation_data().past_tense.get(present.lower())
 
 
+def repair_summary_tense(summary: str) -> str | None:
+    """Rewrite a leading present-tense verb to its past form, or ``None`` when no repair applies."""
+
+    words = summary.split(maxsplit=1)
+    if not words:
+        return None
+    past = present_to_past(words[0])
+    if past is None:
+        return None
+    return past if len(words) == 1 else f"{past} {words[1]}"
+
+
 def split_verb_token(token: str) -> tuple[str, str] | None:
     """Split a first token into its leading ASCII verb segment and suffix."""
 
@@ -541,6 +553,7 @@ __all__ = [
     "is_past_tense_first_word",
     "is_past_tense_verb",
     "present_to_past",
+    "repair_summary_tense",
     "split_verb_token",
     "validate_commit_message",
     "validate_summary_quality",
