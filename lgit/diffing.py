@@ -257,7 +257,7 @@ def parse_diff(diff: str) -> list[FileDiff]:
         if line.startswith("Binary files"):
             current.is_binary = True
             header_lines.append(line)
-        elif line.startswith(
+        elif in_diff_header and line.startswith(
             (
                 "index ",
                 "new file",
@@ -281,7 +281,7 @@ def parse_diff(diff: str) -> list[FileDiff]:
                 current.status = "renamed"
         elif line.startswith("@@"):
             in_diff_header = False
-            header_lines.append(line)
+            content_lines.append(line)
         elif not in_diff_header:
             content_lines.append(line)
             if line.startswith("+") and not line.startswith("+++"):
@@ -322,7 +322,7 @@ def scrub_diff_for_prompt(diff: str, max_file_bytes: int = MAX_PROMPT_FILE_BYTES
     """
 
     diff = collapse_blob_lines(diff)
-    if len(diff) <= max_file_bytes:
+    if _byte_len(diff) <= max_file_bytes:
         return diff
     files = parse_diff(diff)
     if not any(file.size > max_file_bytes for file in files):

@@ -15,7 +15,7 @@ from .api import (
     render_prompt,
     run_oneshot,
 )
-from .diffing import FileDiff, condense_stat, parse_diff, reconstruct_diff
+from .diffing import FileDiff, condense_stat, parse_diff
 from .markdown_output import analysis_from_mapping, fallback_summary, parse_conventional_analysis_markdown
 from .models import AnalysisDetail, ConventionalAnalysis, resolve_model_name
 from .tokens import create_token_counter
@@ -183,6 +183,7 @@ async def _map_phase(
                 config,
                 counter,
                 f"map batch {batch_idx + 1}/{len(batches)} ({len(batch_files)} files)",
+                budget,
             )
             return list(zip(batch_indices, observations, strict=True))
 
@@ -205,8 +206,9 @@ async def _map_file_batch(
     config: CommitConfig,
     counter: Any,
     progress_label: str,
+    budget: int,
 ) -> list[FileObservation]:
-    rendered = [_render_file_diff_for_batch(file, counter) for file in files]
+    rendered = [_render_file_diff_for_batch(file, counter, budget) for file in files]
     prompt_files = [{"path": file.filename, "diff": diff} for file, diff in zip(files, rendered, strict=True)]
     system_prompt, user_prompt = _render_map_prompt(prompt_files, context_header)
     response = await run_oneshot(
@@ -316,24 +318,31 @@ def _build_file_batches_for_indices(
     files: Sequence[FileDiff], indices: Iterable[int], counter: Any, budget: int
 ) -> list[list[int]]:
     token_budget = max(1, int(budget))
+    byte_budget = token_budget * 4
     batches: list[list[int]] = []
     current: list[int] = []
     current_tokens = 0
+    current_bytes = 0
     for idx in indices:
-        file_tokens = files[idx].token_estimate(counter)
-        if file_tokens > token_budget:
+        file = files[idx]
+        file_tokens = file.token_estimate(counter)
+        file_bytes = file.size + (1 if file.content else 0)
+        if file_tokens > token_budget or file_bytes > byte_budget:
             if current:
                 batches.append(current)
                 current = []
                 current_tokens = 0
+                current_bytes = 0
             batches.append([idx])
             continue
-        if current and current_tokens + file_tokens > token_budget:
+        if current and (current_tokens + file_tokens > token_budget or current_bytes + file_bytes > byte_budget):
             batches.append(current)
             current = []
             current_tokens = 0
+            current_bytes = 0
         current.append(idx)
         current_tokens += file_tokens
+        current_bytes += file_bytes
     if current:
         batches.append(current)
     return batches
@@ -344,14 +353,16 @@ def _included_files(files: Sequence[FileDiff], config: CommitConfig) -> list[Fil
     return [file for file in files if not any(file.filename.endswith(pattern) for pattern in excluded)]
 
 
-def _render_file_diff_for_batch(file: FileDiff, counter: Any) -> str:
-    if file.token_estimate(counter) <= MAX_FILE_TOKENS:
+def _render_file_diff_for_batch(file: FileDiff, counter: Any, budget: int) -> str:
+    max_bytes = max(1, budget * 4)
+    rendered_bytes = file.size + (1 if file.content else 0)
+    if file.token_estimate(counter) <= budget and rendered_bytes <= max_bytes:
         return _reconstruct_single_file_diff(file)
     clone = FileDiff(
         file.filename, file.header, file.content, file.additions, file.deletions, file.is_binary, file.status
     )
-    clone.truncate(MAX_FILE_TOKENS * 4)
-    return reconstruct_diff([clone])
+    clone.truncate(max(1, max_bytes - 1))
+    return _reconstruct_single_file_diff(clone)
 
 
 def _reconstruct_single_file_diff(file: FileDiff) -> str:

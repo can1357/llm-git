@@ -45,6 +45,25 @@ index 123..456 100644
     assert "use std::collections::HashMap" in files[0].content
 
 
+def test_parse_diff_preserves_multi_hunk_order() -> None:
+    diff = """diff --git a/src/lib.rs b/src/lib.rs
+index 111..222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,2 @@
+-old one
++new one
+---old marker
++++new marker
+ context
+@@ -20,2 +20,2 @@
+-old two
++new two
+ context"""
+
+    assert reconstruct_diff(parse_diff(diff)) == diff
+
+
 def test_parse_diff_multi_file() -> None:
     diff = """diff --git a/src/lib.rs b/src/lib.rs
 index 111..222 100644
@@ -326,6 +345,29 @@ def test_scrub_diff_for_prompt_caps_oversized_file_section() -> None:
     # both file headers and the small file's content survive
     assert "diff --git a/generated.json b/generated.json" in result
     assert "diff --git a/small.rs b/small.rs\n@@ -1 +1 @@\n+let x = 1;" in result
+
+
+def test_scrub_diff_for_prompt_caps_many_hunk_headers() -> None:
+    hunks = "".join(f"@@ -{idx},1 +{idx},1 @@\n-old {idx}\n+new {idx}\n" for idx in range(1, 5_000))
+    diff = f"diff --git a/catalog.json b/catalog.json\nindex 111..222 100644\n{hunks}"
+
+    result = scrub_diff_for_prompt(diff, max_file_bytes=10_000)
+    files = parse_diff(result)
+
+    assert len(files) == 1
+    assert files[0].size <= 10_000
+    assert "@@" not in files[0].header
+    assert result.count("@@") < 5_000
+
+
+def test_scrub_diff_for_prompt_enforces_byte_cap_for_multibyte_text() -> None:
+    content = "\n".join("+😀" for _ in range(3_000))
+    diff = f"diff --git a/unicode.txt b/unicode.txt\n@@ -0,0 +1,3000 @@\n{content}"
+
+    result = scrub_diff_for_prompt(diff, max_file_bytes=10_000)
+
+    assert len(result.encode()) <= 10_001
+    assert "... (truncated" in result
 
 
 def test_scrub_diff_for_prompt_collapses_blob_lines_first() -> None:

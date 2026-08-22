@@ -136,6 +136,28 @@ def test_build_file_batches_isolates_oversized_files() -> None:
     assert map_reduce_module.build_file_batches(files, _test_counter(), 10) == [[0, 1], [2], [3]]
 
 
+def test_build_file_batches_enforces_byte_budget_for_multibyte_text() -> None:
+    files = [
+        FileDiff(f"unicode-{idx}.txt", "", "😀" * 2_000, additions=1, deletions=0, is_binary=False) for idx in range(3)
+    ]
+
+    assert map_reduce_module.build_file_batches(files, _test_counter(), 5_000) == [[0, 1], [2]]
+
+
+def test_render_file_diff_respects_map_batch_budget() -> None:
+    file = _file_with_tokens("generated.json", 20_000)
+
+    rendered = map_reduce_module._render_file_diff_for_batch(file, _test_counter(), 4_000)
+
+    assert len(rendered.encode()) <= 16_000
+    assert "... (truncated)" in rendered
+    multibyte = FileDiff("unicode.txt", "", "😀" * 7_000, additions=1, deletions=0, is_binary=False)
+    rendered_multibyte = map_reduce_module._render_file_diff_for_batch(multibyte, _test_counter(), 6_000)
+
+    assert len(rendered_multibyte.encode()) <= 24_000
+    assert "... (truncated)" in rendered_multibyte
+
+
 def test_batch_response_mapping_matches_paths_and_falls_back_for_omissions() -> None:
     files = [
         _file_with_tokens("src/lib.rs", 1),
