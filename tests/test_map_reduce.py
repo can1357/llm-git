@@ -261,3 +261,62 @@ def test_parse_string_to_observations_bullet_points() -> None:
         "fixed bug in parser",
         "updated tests",
     ]
+
+
+def test_render_observations_markdown_annotates_status_and_counts() -> None:
+    observations = [
+        map_reduce_module.FileObservation("crates/core/src/ulid.rs", ("added ULID implementation",), 120, 0, "added"),
+        map_reduce_module.FileObservation("crates/core/src/lib.rs", ("exported new modules",), 3, 1),
+        map_reduce_module.FileObservation("old_name.rs", (), 0, 0, "renamed"),
+    ]
+
+    rendered = map_reduce_module.render_observations_markdown(observations)
+
+    assert "# crates/core/src/ulid.rs (added, +120/-0)\n- added ULID implementation" in rendered
+    assert "# crates/core/src/lib.rs (+3/-1)\n- exported new modules" in rendered
+    assert "# old_name.rs (renamed)\n" in rendered
+
+
+def test_map_phase_model_prefers_map_model_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = CommitConfig(
+        summary_model="claude-haiku-4-5",
+        analysis_model="claude-opus-4.1",
+        map_model="claude-sonnet-4.5",
+        cache_enabled=False,
+    )
+    captured: dict[str, str] = {}
+
+    async def fake_observe_diff_files(
+        diff: str,
+        map_model_name: str,
+        config: CommitConfig,
+        counter: Any | None = None,
+    ) -> list[map_reduce_module.FileObservation]:
+        del diff, config, counter
+        captured["map_model_name"] = map_model_name
+        return [map_reduce_module.FileObservation("src/lib.rs", ("updated library",))]
+
+    async def fake_reduce_phase(*args: Any, **kwargs: Any) -> ConventionalAnalysis:
+        del args, kwargs
+        return ConventionalAnalysis(commit_type="chore", summary="updated library")
+
+    monkeypatch.setattr(map_reduce_module, "observe_diff_files", fake_observe_diff_files)
+    monkeypatch.setattr(map_reduce_module, "reduce_phase", fake_reduce_phase)
+
+    asyncio.run(map_reduce_module.run_map_reduce(config, "stat", "diff"))
+
+    assert captured["map_model_name"] == "claude-sonnet-4.5"
+
+
+def test_effective_map_budget_fills_lanes_in_one_wave() -> None:
+    budget = map_reduce_module._effective_map_budget
+
+    # Small diffs hit the per-call floor, not one batch per lane.
+    assert budget(30_000, 16_000) == map_reduce_module.MIN_MAP_BATCH_TOKENS
+    # Mid-size diffs split across all lanes with 25% packing slack:
+    # ceil(82_000 * 1.25 / 16) = 6407.
+    assert budget(82_000, 16_000) == 6407
+    # Huge diffs stay capped by the configured budget.
+    assert budget(400_000, 16_000) == 16_000
+    # An explicit user cap below the floor wins.
+    assert budget(30_000, 2_000) == 2_000

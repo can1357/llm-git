@@ -15,6 +15,7 @@ from . import style
 from .diffing import scrub_diff_for_prompt, smart_truncate_diff
 from .errors import GitError, ValidationFailure
 from .git import run_git
+from .map_reduce import render_observations_markdown
 from .markdown_output import parse_changelog_response
 from .models import ChangelogCategory, resolve_model_name
 from .templates import render_changelog_prompt
@@ -252,12 +253,8 @@ def _observations_markdown(observations: Sequence[FileObservation] | None, files
     if observations is None:
         return None
     wanted = set(files)
-    sections = [
-        "# {}\n{}".format(item.file, "\n".join(f"- {text}" for text in item.observations))
-        for item in observations
-        if item.file in wanted and item.observations
-    ]
-    return "\n\n".join(sections) if sections else None
+    covered = [item for item in observations if item.file in wanted and item.observations]
+    return render_observations_markdown(covered) if covered else None
 
 
 @dataclass(slots=True)

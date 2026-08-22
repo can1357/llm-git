@@ -25,6 +25,7 @@ Base the answer only on the provided observations, stat, and scope candidates. D
 
 <synthesis_rules>
 - Produce 3-4 strong grouped details when possible; use the 6-item limit only for genuinely distinct outcomes.
+- Each `# file` heading may be annotated with a status (`added`, `deleted`, `renamed`; unannotated files were modified) and its `+added/-deleted` line counts. Only describe a crate, module, package, or component as introduced/created when its own files are `added`; `added` files inside an existing component extend that component, they do not introduce it.
 - Synthesize repeated file observations into the shared behavior, abstraction, or user-visible outcome they support.
 - Prefer broader, evidence-backed details over enumerating files, hunks, or one observation per file.
 - If observations conflict, reconcile them conservatively using the most specific and repeated evidence.

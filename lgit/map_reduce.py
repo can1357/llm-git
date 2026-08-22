@@ -15,7 +15,7 @@ from .api import (
     render_prompt,
     run_oneshot,
 )
-from .diffing import FileDiff, parse_diff, reconstruct_diff
+from .diffing import FileDiff, condense_stat, parse_diff, reconstruct_diff
 from .markdown_output import analysis_from_mapping, fallback_summary, parse_conventional_analysis_markdown
 from .models import AnalysisDetail, ConventionalAnalysis, resolve_model_name
 from .tokens import create_token_counter
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 MAX_FILE_TOKENS = 50_000
 MAP_PHASE_CONCURRENCY = 16
+MIN_MAP_BATCH_TOKENS = 4_000
 MAX_CONTEXT_FILES = 20
 
 
@@ -36,6 +37,7 @@ class FileObservation:
     observations: tuple[str, ...]
     additions: int = 0
     deletions: int = 0
+    status: str = "modified"  # added | deleted | renamed | modified
 
 
 def should_use_map_reduce(diff: str, config: CommitConfig, counter: Any | None = None) -> bool:
@@ -85,15 +87,17 @@ async def observe_diff_files(
 async def reduce_phase(
     observations: Sequence[FileObservation], stat: str, scope_candidates: str, model_name: str, config: CommitConfig
 ) -> ConventionalAnalysis:
-    """Synthesize map observations into final conventional analysis."""
+    """Synthesize map observations into final conventional analysis.
+
+    Observations are rendered as per-file markdown and the stat is condensed to
+    its totals line: every path and change count already appears in the
+    observations, so the prompt stays roughly half the size of the raw inputs.
+    """
 
     type_enum = list(config.types) or ["chore"]
-    observations_json = json.dumps(
-        [_observation_to_mapping(item) for item in observations], ensure_ascii=False, indent=2
-    )
     system_prompt, user_prompt = _render_reduce_prompt(
-        observations_json,
-        stat,
+        render_observations_markdown(observations),
+        condense_stat(stat),
         scope_candidates,
         format_types_description(config),
     )
@@ -144,7 +148,7 @@ async def run_map_reduce(
 
     counter = counter or create_token_counter(config)
     reduce_model = resolve_model_name(model_name or config.analysis_model)
-    map_model = resolve_model_name(config.summary_model)
+    map_model = resolve_model_name(config.effective_map_model)
     observations = await observe_diff_files(diff, map_model, config, counter)
     if on_observations is not None:
         on_observations(observations)
@@ -155,12 +159,14 @@ async def _map_phase(
     files: Sequence[FileDiff], map_model_name: str, config: CommitConfig, counter: Any
 ) -> list[FileObservation]:
     context_headers = _ContextHeaders(files)
-    batches = build_llm_file_batches(files, counter, config.map_batch_token_budget)
+    total_tokens = sum(file.token_estimate(counter) for file in files if not file.is_binary)
+    budget = _effective_map_budget(total_tokens, config.map_batch_token_budget)
+    batches = build_llm_file_batches(files, counter, budget)
     observations_by_index: list[FileObservation | None] = [None] * len(files)
     for idx, file in enumerate(files):
         if file.is_binary:
             observations_by_index[idx] = FileObservation(
-                file.filename, ("Binary file changed.",), file.additions, file.deletions
+                file.filename, ("Binary file changed.",), file.additions, file.deletions, file.status
             )
 
     semaphore = asyncio.Semaphore(MAP_PHASE_CONCURRENCY)
@@ -241,7 +247,9 @@ def _map_batch_response_to_observations(
         raw_observations = _parse_observations(entry.get("observations", []))
         if not raw_observations and stopped_at_max_tokens:
             raw_observations = [_fallback_observation_text(file.filename)]
-        observations.append(FileObservation(file.filename, tuple(raw_observations), file.additions, file.deletions))
+        observations.append(
+            FileObservation(file.filename, tuple(raw_observations), file.additions, file.deletions, file.status)
+        )
     return observations
 
 
@@ -288,6 +296,22 @@ def _parse_observations(value: Any) -> list[str]:
     return []
 
 
+def _effective_map_budget(total_tokens: int, cap: int) -> int:
+    """Return the map batch budget that fills every concurrency lane in one wave.
+
+    Map wall time is the slowest batch, and batch latency is decode-dominated,
+    so the budget shrinks with the diff until all ``MAP_PHASE_CONCURRENCY``
+    lanes are used — bounded below by ``MIN_MAP_BATCH_TOKENS`` (per-call
+    overhead floor) and above by the configured ``map_batch_token_budget`` cap
+    (prompt-size guard for very large diffs).
+    """
+
+    # 25% slack absorbs greedy-packing overflow so batch count stays at or
+    # under the lane count; without it a few batches spill into a second wave.
+    ideal = -(-max(0, total_tokens) * 5 // (MAP_PHASE_CONCURRENCY * 4))
+    return min(max(1, cap), max(MIN_MAP_BATCH_TOKENS, ideal))
+
+
 def _build_file_batches_for_indices(
     files: Sequence[FileDiff], indices: Iterable[int], counter: Any, budget: int
 ) -> list[list[int]]:
@@ -323,7 +347,9 @@ def _included_files(files: Sequence[FileDiff], config: CommitConfig) -> list[Fil
 def _render_file_diff_for_batch(file: FileDiff, counter: Any) -> str:
     if file.token_estimate(counter) <= MAX_FILE_TOKENS:
         return _reconstruct_single_file_diff(file)
-    clone = FileDiff(file.filename, file.header, file.content, file.additions, file.deletions, file.is_binary)
+    clone = FileDiff(
+        file.filename, file.header, file.content, file.additions, file.deletions, file.is_binary, file.status
+    )
     clone.truncate(MAX_FILE_TOKENS * 4)
     return reconstruct_diff([clone])
 
@@ -333,7 +359,9 @@ def _reconstruct_single_file_diff(file: FileDiff) -> str:
 
 
 def _fallback_file_observation(file: FileDiff) -> FileObservation:
-    return FileObservation(file.filename, (_fallback_observation_text(file.filename),), file.additions, file.deletions)
+    return FileObservation(
+        file.filename, (_fallback_observation_text(file.filename),), file.additions, file.deletions, file.status
+    )
 
 
 def _fallback_observation_text(filename: str) -> str:
@@ -388,13 +416,22 @@ def _render_reduce_prompt(
         )
 
 
-def _observation_to_mapping(item: FileObservation) -> dict[str, Any]:
-    return {
-        "file": item.file,
-        "observations": list(item.observations),
-        "additions": item.additions,
-        "deletions": item.deletions,
-    }
+def render_observations_markdown(observations: Sequence[FileObservation]) -> str:
+    """Render observations as per-file markdown sections.
+
+    Headings carry the file status (when not ``modified``) and nonzero change
+    counts, e.g. ``# src/ulid.rs (added, +120/-0)``.
+    """
+
+    sections = []
+    for item in observations:
+        annotations = [] if item.status == "modified" else [item.status]
+        if item.additions or item.deletions:
+            annotations.append(f"+{item.additions}/-{item.deletions}")
+        suffix = f" ({', '.join(annotations)})" if annotations else ""
+        bullets = "\n".join(f"- {text}" for text in item.observations)
+        sections.append(f"# {item.file}{suffix}\n{bullets}")
+    return "\n\n".join(sections)
 
 
 def _path_basename(path: str) -> str:
@@ -473,6 +510,7 @@ __all__ = [
     "build_llm_file_batches",
     "observe_diff_files",
     "reduce_phase",
+    "render_observations_markdown",
     "run_map_reduce",
     "should_use_map_reduce",
 ]
