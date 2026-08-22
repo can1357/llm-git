@@ -190,14 +190,24 @@ def test_build_footers_combined() -> None:
     ]
 
 
-def test_resolve_fast_mode_model_defaults_to_haiku() -> None:
-    assert cli._resolve_fast_mode_model(_args(), CommitConfig()) == "claude-haiku-4-5"
+def test_load_config_model_override_reaches_every_model_role(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('summary_model = "small-model"\n', encoding="utf-8")
+
+    config = cli._load_config(_args("--config", str(config_file), "-m", "opus"))
+
+    assert config.analysis_model == "claude-opus-4.8"
+    assert config.effective_map_model == "claude-opus-4.8"
+    assert config.effective_fast_model == "claude-opus-4.8"
 
 
-def test_resolve_fast_mode_model_uses_legacy_selector() -> None:
-    config = CommitConfig(analysis_model="gpt-5.3-codex-spark", legacy_model="gpt-5.3-codex-spark")
+def test_load_config_keeps_configured_fast_model_without_override(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('summary_model = "small-model"\nanalysis_model = "big-model"\n', encoding="utf-8")
 
-    assert cli._resolve_fast_mode_model(_args(), config) == "gpt-5.3-codex-spark"
+    config = cli._load_config(_args("--config", str(config_file)))
+
+    assert config.effective_fast_model == "small-model"
 
 
 def test_auto_fast_changed_lines_matches_small_diff() -> None:

@@ -437,6 +437,7 @@ def _load_config(args: argparse.Namespace) -> CommitConfig:
         config.analysis_model = resolved_model
         config.summary_model = resolved_model
         config.map_model = resolved_model
+        config.fast_model = resolved_model
     if args.sign:
         config.gpg_sign = True
     if args.signoff:
@@ -546,7 +547,7 @@ async def _generate_fast_workflow(
         scope_candidates, _wide = (
             extract_scope_candidates(numstat, args.target, args.dir, config) if numstat.strip() else ("(none)", False)
         )
-    style.status(f"{style.dim('›')} {style.dim('fast mode:')} {style.model(_resolve_fast_mode_model(args, config))}")
+    style.status(f"{style.dim('›')} {style.dim('fast mode:')} {style.model(config.effective_fast_model)}")
     style.status(f"{style.info('›')} Analyzing {style.bold(mode.value)} changes...")
     if changelog_runner is not None:
         changelog_runner.start_with_diff()
@@ -610,10 +611,6 @@ async def _generate_standard_workflow(
     return await _message_from_analysis(analysis, config, stat, user_context, args, collector)
 
 
-def _resolve_fast_mode_model(args: argparse.Namespace, config: CommitConfig) -> str:
-    return str(config.analysis_model if args.model or config.legacy_model else resolve_model_name("haiku"))
-
-
 async def _generate_fast_message(
     config: CommitConfig,
     stat: str,
@@ -623,7 +620,7 @@ async def _generate_fast_message(
     args: argparse.Namespace,
     collector: profile.TimingCollector | None = None,
 ) -> ConventionalCommit:
-    fast_config = replace(config, analysis_model=_resolve_fast_mode_model(args, config))
+    fast_config = replace(config, analysis_model=config.effective_fast_model)
     try:
         async with profile.section("generate_fast_commit", collector):
             message = await generate_fast_commit(

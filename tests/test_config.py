@@ -49,6 +49,17 @@ def test_prompts_dir_wires_template_overrides(tmp_path: Path, monkeypatch: pytes
     assert not (tmp_path / ".llm-git").exists()
 
 
+def test_fast_model_falls_back_to_summary_model() -> None:
+    # Stock default keeps fast mode on the cheap tier.
+    assert CommitConfig().effective_fast_model == "claude-haiku-4-5"
+
+    role_split = CommitConfig.from_mapping({"summary_model": "small-model", "analysis_model": "big-model"})
+    assert role_split.effective_fast_model == "small-model"
+
+    explicit = CommitConfig.from_mapping({"summary_model": "small-model", "fast_model": "mid-model"})
+    assert explicit.effective_fast_model == "mid-model"
+
+
 def test_map_model_falls_back_to_summary_model() -> None:
     config = CommitConfig.from_mapping({"summary_model": "small-model"})
     assert config.effective_map_model == "small-model"

@@ -94,6 +94,7 @@ class CommitConfig:
     analysis_model: str = DEFAULT_ANALYSIS_MODEL
     summary_model: str = DEFAULT_SUMMARY_MODEL
     map_model: str = ""
+    fast_model: str = ""
     legacy_model: str | None = None
     excluded_files: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED_FILES))
     low_priority_extensions: list[str] = field(default_factory=lambda: list(DEFAULT_LOW_PRIORITY_EXTENSIONS))
@@ -165,6 +166,11 @@ class CommitConfig:
     def effective_map_model(self) -> str:
         """Return the model for map-phase calls: ``map_model``, falling back to ``summary_model``."""
         return self.map_model or self.summary_model
+
+    @property
+    def effective_fast_model(self) -> str:
+        """Return the model for fast-mode single calls: ``fast_model``, falling back to ``summary_model``."""
+        return self.fast_model or self.summary_model
 
     @property
     def resolved_api_mode(self) -> ResolvedApiMode:
@@ -407,6 +413,7 @@ _FIELD_COERCERS = {
     "analysis_model": _to_str,
     "summary_model": _to_str,
     "map_model": _to_str,
+    "fast_model": _to_str,
     "legacy_model": _to_optional_str,
     "excluded_files": _to_str_list,
     "low_priority_extensions": _to_str_list,
