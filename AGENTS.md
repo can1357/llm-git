@@ -96,6 +96,7 @@ uv run pytest -k truncate                    # Match by name
 4. Analysis call - AI returns markdown conventional-commit analysis:
    - Heading identifies type, optional scope, and summary
    - Bullets become structured detail points; issue refs are parsed from output
+- Large diffs use map-reduce instead: per-file observations carry a file `status` (`added`/`deleted`/`renamed`/`modified`) into the reduce prompt so new files inside an existing component are not misreported as introducing it
 5. Changelog overlap (staged mode, committing): `_ChangelogRunner` starts changelog generation concurrently with message generation — diff-based for small/fast paths, or reusing map-phase per-file observations (`run_map_reduce(on_observations=...)`) so the changelog model never re-reads a large diff. Generation overlaps the reduce/summary calls; index/worktree application (`apply_changelog_updates`) still happens only after validation, at the same point the sequential flow ran.
 6. `generate_summary_from_analysis()` - AI call for summary generation:
    - Input: type + scope + detail points + stat
@@ -175,12 +176,14 @@ uv run pytest -k truncate                    # Match by name
 ## Prompt Engineering
 
 **Prompt files**:
-- One markdown prompt per family under `lgit/resources/prompts/<family>.md` (families: `analysis`, `summary`, `changelog`, `map`, `reduce`, `compose-intent`, `compose-bind`, `fast`).
+- One markdown prompt per family under `lgit/resources/prompts/<family>.md` (families: `analysis`, `summary`, `summary-rewrite`, `changelog`, `map`, `reduce`, `compose-intent`, `compose-bind`, `fast`).
 - Rendered at runtime via Jinja2 (`lgit/templates.py`). Overrides are opt-in: set `prompts_dir` in config to a directory containing `<family>.md` files; nothing is ever auto-written to disk.
 
-**Validation retry**: Summary generation retries once on validation failure with constraint injection
+**Validation retry**: Summary generation salvages rejected model output before falling back
 - Validates: past-tense verb, no type repetition, type-file consistency heuristics
-- Fallback: Uses first detail or heuristic if retry exhausted
+- Mechanical repair first: a leading present-tense verb is rewritten via `present_to_past()` (`repair_summary_tense()`), no extra API call; the reduce/analysis heading is tried as a second candidate
+- Then one `summary-rewrite` call: the summary model minimally edits the rejected draft into compliance (`summary-rewrite.md`) — a pure text task with no diff/details context
+- Fallback: Uses first detail or heuristic if repair and rewrite are exhausted
 - See `validate_summary_quality()` in `lgit/validation.py`
 
 ## Type System (`lgit/models.py`)
@@ -234,6 +237,7 @@ uv run pytest -k truncate                    # Match by name
 api_base_url = "http://localhost:4000"
 analysis_model = "claude-sonnet-4.5"
 summary_model = "claude-haiku-4-5-20251001"
+map_model = ""                # Map-phase (per-file observation) model; empty = summary_model
 
 summary_guideline = 72        # Target length
 summary_soft_limit = 96       # Triggers retry
@@ -248,7 +252,7 @@ changelog_revise = true      # Reconcile earlier Unreleased entries
 changelog_reasoning_effort = "low"  # Reasoning effort for changelog calls (chat-completions mode); "" = provider default
 
 
-exclude_old_message = false   # When true, git show omits original message
+exclude_old_message = true    # git show omits the original message from commit-mode prompts (default)   # When true, git show omits original message
 prompts_dir = ""              # Optional dir of <family>.md prompt overrides; empty = packaged prompts
 ```
 
@@ -264,6 +268,7 @@ prompts_dir = ""              # Optional dir of <family>.md prompt overrides; em
 
 **Models:**
 - Default: Sonnet 4.5 for analysis, Haiku 4.5 for summary
+- Map phase (per-file observations, runs in parallel) uses `map_model`, falling back to `summary_model`; it reads raw diffs, so it benefits from a stronger model than the summary role while parallelism hides the extra per-call latency
 - Optional: Opus 4.1 via `-m opus` (more powerful, slower, expensive)
 - Compose mode uses analysis model for both grouping + per-commit generation
 
