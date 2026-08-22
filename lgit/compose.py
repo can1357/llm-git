@@ -51,11 +51,13 @@ class _ComposeArgs(Protocol):
     debug_output: str | None
 
 
-COMPOSE_PLAN_SCHEMA_VERSION = "v3"
+COMPOSE_PLAN_SCHEMA_VERSION = "v4"
 COMPOSE_MESSAGE_PARALLELISM = 8
 # Compose planning intentionally switches representation as snapshots grow:
 # small/medium snapshots preserve per-file detail, while large snapshots plan by
 # path area to keep prompts bounded and avoid monolithic LLM output.
+# Large snapshots stop subdividing once they expose enough workstream-level areas;
+# repositories with only a few workstreams keep splitting for useful granularity.
 MAX_OBSERVATIONS_PER_FILE = 3
 COMPOSE_SUMMARY_MEDIUM_FILE_THRESHOLD = 60
 COMPOSE_SUMMARY_MEDIUM_HUNK_THRESHOLD = 200
@@ -64,8 +66,11 @@ COMPOSE_SUMMARY_LARGE_HUNK_THRESHOLD = 500
 COMPOSE_AREA_TARGET_MAX_FILES = 60
 COMPOSE_AREA_TARGET_MAX_HUNKS = 140
 COMPOSE_AREA_TARGET_MAX_DEPTH = 6
-COMPOSE_MONOLITH_FALLBACK_TARGET_THRESHOLD = 8
+COMPOSE_AREA_TARGET_MAX_COUNT = 48
+COMPOSE_AREA_TARGET_MIN_COUNT = 24
+COMPOSE_MONOLITH_FALLBACK_TARGET_THRESHOLD = 3
 COMPOSE_MONOLITH_FALLBACK_WORKSTREAM_THRESHOLD = 3
+COMPOSE_GRAB_BAG_WORKSTREAM_THRESHOLD = 5
 MAX_BIND_FILES_PER_REQUEST = 18
 MAX_BIND_HUNKS_PER_REQUEST = 120
 _DEPENDENCY_MANIFESTS = {
@@ -362,7 +367,7 @@ async def run_compose_round(
             [_observation_to_jsonable(item) for item in observations],
         )
 
-    max_commits = args.compose_max_commits or 20
+    max_commits = args.compose_max_commits or 32
     model = config.analysis_model
     plan = _load_cached_plan(repo_dir, snapshot, max_commits, model)
     if plan is None:
@@ -466,7 +471,8 @@ def _analyze_compose_intent_from_mapping(
     raw_groups = data.get("groups", ())
     groups = [_intent_group_from_mapping(item, idx) for idx, item in enumerate(raw_groups, start=1)]
     planning_index = _build_planning_index(snapshot)
-    return _normalize_intent_plan(snapshot, planning_index, groups, config, max_commits)
+    normalized = _normalize_intent_plan(snapshot, planning_index, groups, config, max_commits)
+    return _split_grab_bag_groups(snapshot, normalized, max_commits)
 
 
 async def _analyze_compose_intent(
@@ -745,6 +751,11 @@ def _build_planning_index(snapshot: ComposeSnapshot) -> PlanningIndex:
         aliases[target.target_id] = target.target_id
         aliases[target.target_id.upper()] = target.target_id
         aliases[_normalize_file_reference(target.label)] = target.target_id
+        for file_id in target.file_ids:
+            file = snapshot.file_by_id(file_id)
+            if file is not None:
+                aliases[file.file_id] = target.target_id
+                aliases[_normalize_file_reference(file.path)] = target.target_id
     return PlanningIndex(mode=mode, targets=targets, aliases=aliases)
 
 
@@ -777,24 +788,41 @@ def _build_area_planning_targets(snapshot: ComposeSnapshot) -> list[PlanningTarg
 def _collect_planning_buckets(
     snapshot: ComposeSnapshot, file_ids: Sequence[str], depth: int
 ) -> list[tuple[str, tuple[str, ...]]]:
-    files = [file for file_id in file_ids for file in [snapshot.file_by_id(file_id)] if file is not None]
-    hunk_count = sum(len(file.hunk_ids) for file in files)
-    max_depth = max((len(file.path.split("/")) for file in files), default=depth)
-    if (
-        (len(files) <= COMPOSE_AREA_TARGET_MAX_FILES and hunk_count <= COMPOSE_AREA_TARGET_MAX_HUNKS)
-        or depth >= COMPOSE_AREA_TARGET_MAX_DEPTH
-        or depth >= max_depth
-    ):
-        return [(_planning_bucket_label(snapshot, file_ids), tuple(file_ids))]
-    groups: dict[str, list[str]] = defaultdict(list)
-    for file in files:
-        groups[_prefix_at_depth(file.path, depth + 1)].append(file.file_id)
-    if len(groups) <= 1:
-        return _collect_planning_buckets(snapshot, file_ids, depth + 1)
-    out: list[tuple[str, tuple[str, ...]]] = []
-    for group_file_ids in groups.values():
-        out.extend(_collect_planning_buckets(snapshot, group_file_ids, depth + 1))
-    return out
+    buckets: list[tuple[int, tuple[str, ...]]] = [(depth, tuple(file_ids))]
+    while len(buckets) < COMPOSE_AREA_TARGET_MIN_COUNT:
+        chosen: tuple[tuple[int, int, int, int], int, int, list[list[str]]] | None = None
+        for idx, (bucket_depth, bucket_file_ids) in enumerate(buckets):
+            files = [file for file_id in bucket_file_ids for file in [snapshot.file_by_id(file_id)] if file is not None]
+            hunk_count = sum(len(file.hunk_ids) for file in files)
+            max_depth = max((len(file.path.split("/")) for file in files), default=bucket_depth)
+            if (
+                (len(files) <= COMPOSE_AREA_TARGET_MAX_FILES and hunk_count <= COMPOSE_AREA_TARGET_MAX_HUNKS)
+                or bucket_depth >= COMPOSE_AREA_TARGET_MAX_DEPTH
+                or bucket_depth >= max_depth
+            ):
+                continue
+
+            groups: dict[str, list[str]] = defaultdict(list)
+            for file in files:
+                groups[_prefix_at_depth(file.path, bucket_depth + 1)].append(file.file_id)
+            children = list(groups.values())
+            if len(children) > 1 and len(buckets) - 1 + len(children) > COMPOSE_AREA_TARGET_MAX_COUNT:
+                continue
+
+            pressure = max(
+                -(-len(files) // COMPOSE_AREA_TARGET_MAX_FILES),
+                -(-hunk_count // COMPOSE_AREA_TARGET_MAX_HUNKS),
+            )
+            score = (pressure, hunk_count, len(files), -idx)
+            if chosen is None or score > chosen[0]:
+                chosen = (score, idx, bucket_depth, children)
+
+        if chosen is None:
+            break
+        _, idx, bucket_depth, children = chosen
+        buckets[idx : idx + 1] = [(bucket_depth + 1, tuple(child)) for child in children]
+
+    return [(_planning_bucket_label(snapshot, ids), ids) for _, ids in buckets]
 
 
 def _prefix_at_depth(path: str, depth: int) -> str:
@@ -914,8 +942,8 @@ def _render_planning_notes(index: PlanningIndex) -> str:
 
 def _render_split_bias(index: PlanningIndex) -> str:
     if index.mode is PlanningMode.FILE:
-        return "Prefer fewer groups when the split is uncertain."
-    return "Prefer splitting unrelated areas into separate groups. Only return one broad group if nearly every area clearly belongs to the same atomic change."
+        return "Prefer fewer groups when the split is uncertain. Keep test files in the same group as the implementation they cover."
+    return "Prefer splitting unrelated areas into separate groups. Only return one broad group if nearly every area clearly belongs to the same atomic change. Keep a tests-only area in the same group as the implementation area it covers."
 
 
 def _normalize_file_reference(raw_file_ref: str) -> str:
@@ -1108,6 +1136,118 @@ def _normalize_intent_plan(
         )
     compute_dependency_order(finalized)
     return tuple(finalized)
+
+
+def _split_grab_bag_groups(
+    snapshot: ComposeSnapshot,
+    groups: Sequence[ComposeIntentGroup],
+    max_commits: int,
+) -> tuple[ComposeIntentGroup, ...]:
+    partitions_by_index: dict[int, list[tuple[str, tuple[str, ...]]]] = {}
+    for idx, group in enumerate(groups):
+        partition_files: dict[str, list[str]] = {}
+        for file_id in group.file_ids:
+            file = snapshot.file_by_id(file_id)
+            if file is None:
+                continue
+            key = "repo" if "/" not in file.path else _workstream_key_for_label(file.path)
+            partition_files.setdefault(key, []).append(file_id)
+        if len(partition_files) >= COMPOSE_GRAB_BAG_WORKSTREAM_THRESHOLD:
+            partitions_by_index[idx] = [(key, tuple(file_ids)) for key, file_ids in partition_files.items()]
+
+    available_slots = max(0, max_commits - len(groups))
+    split_indices: set[int] = set()
+    for idx, partitions in sorted(partitions_by_index.items(), key=lambda item: (-len(item[1]), item[0])):
+        extra_groups = len(partitions) - 1
+        if extra_groups <= available_slots:
+            split_indices.add(idx)
+            available_slots -= extra_groups
+    if not split_indices:
+        return tuple(groups)
+
+    used_group_ids = {group.group_id for group in groups}
+    next_group_number = 1
+    for group_id in used_group_ids:
+        candidate = _extract_group_id_candidate(group_id)
+        if candidate is not None:
+            next_group_number = max(next_group_number, int(candidate[1:]) + 1)
+
+    def allocate_group_id() -> str:
+        nonlocal next_group_number
+        while f"G{next_group_number}" in used_group_ids:
+            next_group_number += 1
+        group_id = f"G{next_group_number}"
+        used_group_ids.add(group_id)
+        next_group_number += 1
+        return group_id
+
+    split_ids: dict[str, tuple[str, ...]] = {}
+    expanded_groups: list[ComposeIntentGroup] = []
+    for idx, group in enumerate(groups):
+        if idx not in split_indices:
+            expanded_groups.append(group)
+            continue
+
+        partitions = partitions_by_index[idx]
+        group_text = " ".join(
+            (
+                group.rationale,
+                group.scope.as_str() if group.scope is not None else "",
+            )
+        )
+        group_tokens = set(_planning_text_tokens(group_text))
+        ranked_partitions: list[tuple[int, int, int]] = []
+        for position, (key, file_ids) in enumerate(partitions):
+            paths = [file.path for file_id in file_ids for file in [snapshot.file_by_id(file_id)] if file is not None]
+            tokens = set(_planning_text_tokens(" ".join((key, *paths))))
+            ranked_partitions.append((len(group_tokens & tokens), len(file_ids), -position))
+        _, _, negative_primary = max(ranked_partitions)
+        primary = -negative_primary
+        ordered_positions = [primary, *(position for position in range(len(partitions)) if position != primary)]
+        generated: list[ComposeIntentGroup] = []
+        for position in ordered_positions:
+            key, file_ids = partitions[position]
+            if position == primary:
+                split_group = ComposeIntentGroup(
+                    group.group_id,
+                    group.commit_type,
+                    group.scope,
+                    file_ids,
+                    group.rationale,
+                    group.dependencies,
+                )
+            else:
+                split_group = ComposeIntentGroup(
+                    allocate_group_id(),
+                    _fallback_commit_type_for_group(snapshot, (key,), file_ids),
+                    _fallback_scope_for_label(key),
+                    file_ids,
+                    _fallback_rationale_for_labels((key,)),
+                    group.dependencies,
+                )
+            generated.append(split_group)
+        expanded_groups.extend(generated)
+        split_ids[group.group_id] = tuple(item.group_id for item in generated)
+
+    rewritten: list[ComposeIntentGroup] = []
+    for group in expanded_groups:
+        dependencies: list[str] = []
+        for dependency in group.dependencies:
+            for expanded_dependency in split_ids.get(dependency, (dependency,)):
+                if expanded_dependency != group.group_id and expanded_dependency not in dependencies:
+                    dependencies.append(expanded_dependency)
+        rewritten.append(
+            ComposeIntentGroup(
+                group.group_id,
+                group.commit_type,
+                group.scope,
+                group.file_ids,
+                group.rationale,
+                tuple(dependencies),
+            )
+        )
+    compute_dependency_order(rewritten)
+    return tuple(rewritten)
 
 
 def _seed_group_target(group: ComposeIntentGroup, planning_index: PlanningIndex, claimed: set[str]) -> list[str]:
@@ -1309,6 +1449,8 @@ def _fallback_commit_type_for_group(
         return CommitType.from_raw("build")
     if files and all(_compose_file_category(file) in {"config", "dependency"} for file in files):
         return CommitType.from_raw("chore")
+    if files and all("new file mode" in file.patch_header for file in files):
+        return CommitType.from_raw("feat")
     return CommitType.from_raw("refactor")
 
 

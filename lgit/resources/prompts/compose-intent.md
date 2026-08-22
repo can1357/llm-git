@@ -8,30 +8,32 @@ Return your groups in a markdown-like format where each group defines a standalo
 1. Each group is identified by a group ID (G1, G2, G3, etc.)
 2. Each group has one commit type (from the `<commit_types>` list) and optional scope
 3. Groups are independent when possible; use dependencies for strict ordering
-4. Return 1–5 groups (or the requested maximum)
-5. Every provided file ID must appear in at least one group
+4. Return no more than the requested maximum; use fewer only when the changes are genuinely atomic
+5. Assign every provided file or area ID to exactly one group
+7. Never split tests from the implementation they cover: put both in one group, and only emit a test-only group when the code under test is not part of this change
+8. Keep documentation, generated artifacts, and dependency manifests with the implementation they belong to unless they are an independent change
+9. Group by intent, not by file type, path adjacency, or broad labels such as "core", "tools", or "tests"
+7. Keep tests, documentation, generated artifacts, and dependency manifests with the implementation they belong to unless they are an independent change
+8. Group by intent, not by file type, path adjacency, or broad labels such as "core", "tools", or "tests"
 
 Format rules:
 - `G1 := type(scope): rationale` — group definition
 - `G2 <- G1` — G2 depends on G1
-- `Files:` section lists file assignments
-- `- GN: file1, file2, file3` — files in group GN
+- `Files:` must list only the provided `F...` or `A...` target IDs, never paths or hunk IDs
+- `- GN: F001, F002, F003` — target IDs assigned to group GN
 </instructions>
 
 <output_format>
 You MUST return the result in this format WITHOUT the fences:
 ```
 G1 := feat(api): add authentication endpoints
-G2 := test(api): add comprehensive tests
-G3 := docs(api): document new endpoints
+G2 := feat(client): consume authentication endpoints
 
 G2 <- G1
-G3 <- G1
 
 Files:
-- G1: src/auth.rs, src/models.rs
-- G2: tests/auth.test.ts
-- G3: docs/API.md
+- G1: F001, F002
+- G2: F003, F004
 ```
 </output_format>
 
@@ -43,6 +45,11 @@ max_commits: {{ max_commits }}
 <planning_targets>
 {{ planning_targets }}
 </planning_targets>
+
+<planning_guidance>
+{{ planning_notes }}
+{{ split_bias }}
+</planning_guidance>
 
 {% if types_description %}
 <commit_types>

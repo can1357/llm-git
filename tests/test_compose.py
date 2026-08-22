@@ -793,6 +793,82 @@ def test_build_planning_index_uses_area_targets_for_large_snapshot() -> None:
     assert "planning over" in compose._render_planning_stat(planning_index)
 
 
+def test_area_planning_stops_at_workstream_boundaries_and_aliases_paths() -> None:
+    diff: list[str] = []
+    for crate_idx in range(24):
+        path = f"crates/crate_{crate_idx:02}/src/lib.rs"
+        diff.extend(
+            [
+                f"diff --git a/{path} b/{path}\n",
+                "index 1111111..2222222 100644\n",
+                f"--- a/{path}\n",
+                f"+++ b/{path}\n",
+            ]
+        )
+        for hunk_idx in range(24):
+            line_no = hunk_idx * 2 + 1
+            diff.extend(
+                [
+                    f"@@ -{line_no},1 +{line_no},1 @@\n",
+                    f"-old_{crate_idx}_{hunk_idx}\n",
+                    f"+new_{crate_idx}_{hunk_idx}\n",
+                ]
+            )
+    snapshot = build_compose_snapshot("".join(diff), "")
+    planning_index = compose._build_planning_index(snapshot)
+
+    assert planning_index.mode == compose.PlanningMode.AREA
+    assert len(planning_index.targets) == 24
+    assert {target.label for target in planning_index.targets} == {
+        f"crates/crate_{idx:02}/src/lib.rs" for idx in range(24)
+    }
+    first_file = snapshot.files[0]
+    first_target = next(target for target in planning_index.targets if first_file.file_id in target.file_ids)
+    assert planning_index.aliases[first_file.path] == first_target.target_id
+    assert planning_index.aliases[first_file.file_id] == first_target.target_id
+
+
+def test_split_grab_bag_groups_partitions_unrelated_workstreams() -> None:
+    paths = [f"crates/workstream_{idx}/src/lib.rs" for idx in range(5)]
+    diff = "".join(
+        (
+            f"diff --git a/{path} b/{path}\n"
+            "index 1111111..2222222 100644\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        for path in paths
+    )
+    snapshot = build_compose_snapshot(diff, "")
+    group = ComposeIntentGroup(
+        "G1",
+        "chore",
+        Scope("build"),
+        tuple(file.file_id for file in snapshot.files),
+        "update build configuration",
+        (),
+    )
+
+    groups = compose._split_grab_bag_groups(snapshot, (group,), 5)
+
+    assert len(groups) == 5
+    assert {file_id for item in groups for file_id in item.file_ids} == {file.file_id for file in snapshot.files}
+    assert all(
+        len(
+            {
+                snapshot.file_by_id(file_id).path.split("/")[1]
+                for file_id in item.file_ids
+                if snapshot.file_by_id(file_id) is not None
+            }
+        )
+        == 1
+        for item in groups
+    )
+
+
 def test_normalize_intent_plan_expands_area_targets() -> None:
     snapshot = _build_multi_area_snapshot()
     planning_index = compose._build_planning_index(snapshot)
@@ -889,6 +965,22 @@ index 1111111..2222222 100644
     assert file is not None
 
     assert compose._fallback_commit_type_for_group(snapshot, [], [file.file_id]).as_str() == "build"
+
+
+def test_fallback_commit_type_classifies_new_source_workstream_as_feat() -> None:
+    diff = """diff --git a/crates/new/src/lib.rs b/crates/new/src/lib.rs
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/crates/new/src/lib.rs
+@@ -0,0 +1,1 @@
++pub fn added() {}
+"""
+    snapshot = build_compose_snapshot(diff, "")
+    file = snapshot.file_by_path("crates/new/src/lib.rs")
+    assert file is not None
+
+    assert compose._fallback_commit_type_for_group(snapshot, [], [file.file_id]).as_str() == "feat"
 
 
 def test_chunk_ambiguous_files_splits_large_binding_request() -> None:

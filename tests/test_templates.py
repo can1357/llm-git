@@ -168,6 +168,8 @@ def test_render_compose_intent_prompt() -> None:
 
     assert "Plan atomic commits" in parts.system
     assert "max_commits: 3" in parts.user
+    assert "Prefer conservative grouping over speculative splitting." in parts.user
+    assert "Prefer fewer groups when the split is uncertain." in parts.user
     assert "src/foo.rs" in parts.user
     assert "<commit_types>" in parts.user
     assert "new capability" in parts.user
