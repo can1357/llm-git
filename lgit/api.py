@@ -18,7 +18,7 @@ import httpx
 from jinja2 import Template
 
 from . import cache as llm_cache
-from . import pricing, profile
+from . import pricing, profile, style
 from .diffing import condense_stat
 from .errors import ApiContextLengthExceeded, ApiError, LgitError
 from .markdown_output import (
@@ -34,7 +34,14 @@ from .markdown_output import (
 from .markdown_output import (
     strip_type_prefix as strip_markdown_type_prefix,
 )
-from .models import CommitSummary, ConventionalAnalysis, ConventionalCommit, ResolvedApiMode, resolve_model_name
+from .models import (
+    CommitSummary,
+    ConventionalAnalysis,
+    ConventionalCommit,
+    ResolvedApiMode,
+    resolve_model_chain,
+    resolve_model_name,
+)
 from .normalization import post_process_commit_message
 from .validation import is_past_tense_first_word, repair_summary_tense, validate_summary_quality
 
@@ -287,7 +294,6 @@ async def generate_analysis_with_map_reduce(
     and fires only when the map-reduce path is taken.
     """
 
-    from . import style
     from .map_reduce import run_map_reduce, should_use_map_reduce
     from .tokens import create_token_counter
 
@@ -498,6 +504,39 @@ def decode_cache_payload(tool_name: str, operation: str, stored: str) -> tuple[A
 
 
 async def _run_oneshot_response(config: CommitConfig, spec: OneShotSpec) -> OneShotResponse:
+    """Run one request, walking the model chain when a model fails outright.
+
+    Each candidate gets the full retry budget; a model that still fails — 5xx
+    stream stalls, refusals, or a context window that cannot hold the prompt —
+    hands off to the next entry of the ``;``-separated chain instead of failing
+    the whole run.
+    """
+
+    candidates = resolve_model_chain(spec.model or "")
+    for idx, candidate in enumerate(candidates):
+        try:
+            return await _run_oneshot_attempt(config, replace(spec, model=candidate))
+        except (
+            LgitError,
+            httpx.TimeoutException,
+            httpx.TransportError,
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            if idx == len(candidates) - 1:
+                raise
+            fallback = candidates[idx + 1]
+            style.warn(f"{spec.operation}: {candidate} failed ({_fallback_reason(exc)}); falling back to {fallback}")
+    raise LgitError(f"No model candidates configured for {spec.operation}")
+
+
+def _fallback_reason(exc: Exception) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    return text if len(text) <= 160 else f"{text[:157]}..."
+
+
+async def _run_oneshot_attempt(config: CommitConfig, spec: OneShotSpec) -> OneShotResponse:
     mode = _resolved_mode(config, spec.model or "")
     cache_entry = _build_cache_entry(config, spec)
     if cache_entry is not None:

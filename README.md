@@ -140,9 +140,11 @@ Create `~/.config/llm-git/config.toml`:
 api_base_url = "http://localhost:4000"    # Default: LiteLLM proxy
 api_key = "sk-..."                        # Or use LLM_GIT_API_KEY env var
 
-# Model
+# Model — any role accepts a `;`-separated fallback chain, tried left to right
 analysis_model = "claude-sonnet-4.5"      # Diff analysis / classification
 summary_model = "claude-haiku-4-5"        # Summary line generation
+map_model = ""                            # Per-file map phase; empty = summary_model
+fast_model = "flash-lite;haiku"           # Fast mode; falls back when the primary stalls
 
 # Commit message limits
 summary_guideline = 72                    # Target length

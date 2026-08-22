@@ -243,6 +243,8 @@ analysis_model = "claude-sonnet-4.5"
 summary_model = "claude-haiku-4-5-20251001"
 map_model = ""                # Map-phase (per-file observation) model; empty = summary_model
 fast_model = ""               # Fast-mode (single-call) model; empty = summary_model
+# Any model role accepts a `;`-separated fallback chain, tried left to right:
+# analysis_model = "flash-lite;haiku"
 
 summary_guideline = 72        # Target length
 summary_soft_limit = 96       # Triggers retry
@@ -275,6 +277,7 @@ prompts_dir = ""              # Optional dir of <family>.md prompt overrides; em
 - Default: Sonnet 4.5 for analysis, Haiku 4.5 for summary
 - Map phase (per-file observations, runs in parallel) uses `map_model`, falling back to `summary_model`; it reads raw diffs, so it benefits from a stronger model than the summary role while parallelism hides the extra per-call latency
 - Fast mode (`--fast`, and the auto-fast path) uses `fast_model`, falling back to `summary_model` — one call for the whole message, so it stays on the cheap/low-latency tier. `-m` overrides every role, including this one
+- **Fallback chains**: every model role (and `-m`) accepts `"primary;fallback;..."` (`resolve_model_chain`). Each candidate gets the full `max_retries` budget inside `_run_oneshot_response`; if it still fails — 5xx stream stalls such as Gemini `Thinking loop detected`, refusals, or a prompt that cannot fit its context window — the next candidate runs and a warning names both models. Only the last candidate's failure propagates. Cache keys, cost accounting, and API-mode resolution all use the concrete candidate, so a fallback response is cached under the model that actually served it
 - Optional: Opus 4.1 via `-m opus` (more powerful, slower, expensive)
 - Compose mode uses analysis model for both grouping + per-commit generation
 

@@ -39,7 +39,7 @@ from .diffing import (
 from .errors import LgitError, NoChanges, ValidationFailure
 from .map_reduce import FileObservation, should_use_map_reduce
 from .markdown_output import fallback_summary
-from .models import ConventionalAnalysis, ConventionalCommit, Mode, resolve_model_name
+from .models import ConventionalAnalysis, ConventionalCommit, Mode, format_model_chain, resolve_model_name
 from .normalization import post_process_commit_message
 from .tokens import create_token_counter
 from .validation import check_type_scope_consistency, validate_commit_message, validate_summary_quality
@@ -547,7 +547,9 @@ async def _generate_fast_workflow(
         scope_candidates, _wide = (
             extract_scope_candidates(numstat, args.target, args.dir, config) if numstat.strip() else ("(none)", False)
         )
-    style.status(f"{style.dim('›')} {style.dim('fast mode:')} {style.model(config.effective_fast_model)}")
+    style.status(
+        f"{style.dim('›')} {style.dim('fast mode:')} {style.model(format_model_chain(config.effective_fast_model))}"
+    )
     style.status(f"{style.info('›')} Analyzing {style.bold(mode.value)} changes...")
     if changelog_runner is not None:
         changelog_runner.start_with_diff()
@@ -576,17 +578,17 @@ async def _generate_standard_workflow(
     with profile.section("create_token_counter", collector):
         token_counter = create_token_counter(config)
     if config.analysis_model == config.summary_model == config.effective_map_model:
-        style.status(f"{style.dim('›')} {style.dim('model:')} {style.model(config.analysis_model)}")
+        style.status(f"{style.dim('›')} {style.dim('model:')} {style.model(format_model_chain(config.analysis_model))}")
     elif config.effective_map_model != config.summary_model:
         style.status(
             f"{style.dim('›')} {style.dim('models:')} {style.dim('map')} "
-            f"{style.model(config.effective_map_model)} {style.dim('analysis')} "
-            f"{style.model(config.analysis_model)} {style.dim('summary')} {style.model(config.summary_model)}"
+            f"{style.model(format_model_chain(config.effective_map_model))} {style.dim('analysis')} "
+            f"{style.model(format_model_chain(config.analysis_model))} {style.dim('summary')} {style.model(format_model_chain(config.summary_model))}"
         )
     else:
         style.status(
             f"{style.dim('›')} {style.dim('models:')} {style.dim('analysis')} "
-            f"{style.model(config.analysis_model)} {style.dim('summary')} {style.model(config.summary_model)}"
+            f"{style.model(format_model_chain(config.analysis_model))} {style.dim('summary')} {style.model(format_model_chain(config.summary_model))}"
         )
     with profile.section("prepare_diff", collector):
         use_map_reduce = should_use_map_reduce(diff, config, token_counter)

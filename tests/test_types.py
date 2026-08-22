@@ -9,6 +9,8 @@ from lgit.models import (
     coerce_optional_scope,
     default_classifier_hint,
     default_types,
+    format_model_chain,
+    resolve_model_chain,
     resolve_model_name,
 )
 
@@ -32,6 +34,22 @@ from lgit.models import (
 )
 def test_resolve_model_name(alias: str, resolved: str) -> None:
     assert resolve_model_name(alias) == resolved
+
+
+def test_resolve_model_chain_orders_primary_then_fallbacks() -> None:
+    assert resolve_model_chain("lite;haiku") == ("gemini-3.1-flash-lite", "claude-haiku-4-5")
+    # Whitespace, blanks, and repeats are noise, not extra candidates.
+    assert resolve_model_chain(" lite ;; haiku ; lite ") == ("gemini-3.1-flash-lite", "claude-haiku-4-5")
+    assert resolve_model_chain("custom/provider-model") == ("custom/provider-model",)
+    assert resolve_model_chain("") == ("",)
+
+
+def test_format_model_chain_drops_provider_prefixes() -> None:
+    assert (
+        format_model_chain("openrouter/google/gemini-3.1-flash-lite;cerebras/gpt-oss-120b;haiku")
+        == "gemini-3.1-flash-lite->gpt-oss-120b->claude-haiku-4-5"
+    )
+    assert format_model_chain("claude-haiku-4-5") == "claude-haiku-4-5"
 
 
 @pytest.mark.parametrize(

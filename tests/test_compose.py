@@ -553,7 +553,7 @@ def test_compose_target_tree_excludes_changes_staged_after_invocation(
     assert run_git(empty_repo, "diff", "--cached", "--name-only").stdout.split() == ["c.py"]
 
 
-def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.MonkeyPatch, empty_repo: Path) -> None:
     rounds: list[int] = []
 
     async def fake_round(
@@ -578,7 +578,7 @@ def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.Monk
     monkeypatch.setattr(compose.git, "write_real_index_tree", lambda *a, **k: "T0")
     monkeypatch.setattr(compose, "run_compose_round", fake_round)
     monkeypatch.setattr(compose.git, "get_compose_diff", fake_diff)
-    args = Namespace(dir=".", compose_preview=False)
+    args = Namespace(dir=str(empty_repo), compose_preview=False)
 
     hashes = asyncio.run(compose.run_compose_mode(args, CommitConfig()))
 
@@ -586,7 +586,9 @@ def test_run_compose_mode_loops_until_staged_diff_empty(monkeypatch: pytest.Monk
     assert rounds == [1, 2]
 
 
-def test_run_compose_mode_errors_when_a_round_makes_no_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_compose_mode_errors_when_a_round_makes_no_progress(
+    monkeypatch: pytest.MonkeyPatch, empty_repo: Path
+) -> None:
     async def fake_round(
         args: object,
         config: object,
@@ -599,7 +601,7 @@ def test_run_compose_mode_errors_when_a_round_makes_no_progress(monkeypatch: pyt
     monkeypatch.setattr(compose.git, "write_real_index_tree", lambda *a, **k: "T0")
     monkeypatch.setattr(compose, "run_compose_round", fake_round)
     monkeypatch.setattr(compose.git, "get_compose_diff", lambda *a, **k: "staged diff remains")
-    args = Namespace(dir=".", compose_preview=False)
+    args = Namespace(dir=str(empty_repo), compose_preview=False)
 
     with pytest.raises(GitError, match="no progress"):
         asyncio.run(compose.run_compose_mode(args, CommitConfig()))

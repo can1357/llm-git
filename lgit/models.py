@@ -116,6 +116,37 @@ def resolve_model_name(name: str) -> str:
     return _MODEL_ALIASES.get(name, name)
 
 
+MODEL_CHAIN_SEPARATOR = ";"
+
+
+def resolve_model_chain(name: str) -> tuple[str, ...]:
+    """Resolve a ``;``-separated model chain into ordered full model names.
+
+    The first entry is the primary model; later entries are fallbacks tried in
+    order when a request exhausts its retries against the previous one — for
+    example ``"flash-lite;haiku"`` survives a provider that stalls on a stream.
+    Blank segments and repeats are dropped; a plain name yields a 1-tuple.
+    """
+
+    resolved: list[str] = []
+    for part in str(name).split(MODEL_CHAIN_SEPARATOR):
+        candidate = resolve_model_name(part.strip())
+        if candidate and candidate not in resolved:
+            resolved.append(candidate)
+    return tuple(resolved) or ("",)
+
+
+def format_model_chain(name: str) -> str:
+    """Render a model chain for status output as ``primary->fallback``.
+
+    Provider prefixes carry no information once the model is chosen, so only the
+    trailing segment survives: ``"openrouter/google/gemini-3.1-flash-lite;haiku"``
+    renders as ``"gemini-3.1-flash-lite->claude-haiku-4-5"``.
+    """
+
+    return "->".join(candidate.rsplit("/", 1)[-1] for candidate in resolve_model_chain(name))
+
+
 @dataclass(frozen=True, slots=True)
 class TypeConfig:
     """Classification guidance for one conventional commit type."""
@@ -871,7 +902,10 @@ __all__ = [
     "SUMMARY_GUIDELINE_LENGTH",
     "Mode",
     "ApiMode",
+    "MODEL_CHAIN_SEPARATOR",
+    "format_model_chain",
     "ResolvedApiMode",
+    "resolve_model_chain",
     "resolve_model_name",
     "TypeConfig",
     "CategoryMatch",

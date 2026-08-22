@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from typing import Any
 
 import lgit.api as api_module
 import pytest
 from lgit.config import CommitConfig
-from lgit.errors import ApiContextLengthExceeded
+from lgit.errors import ApiContextLengthExceeded, LgitError
 from lgit.profile import env_flag_value_enabled
 
 
@@ -114,6 +116,90 @@ def test_retry_api_call_does_not_retry_context_length_errors(monkeypatch: pytest
         asyncio.run(api_module._run_oneshot_response(config, _summary_spec()))
 
     assert attempts == 1
+
+
+def _chain_spec(chain: str) -> api_module.OneShotSpec:
+    return replace(_summary_spec(), model=chain)
+
+
+def _summary_send(attempted: list[str], failing: str, error: Exception):
+    async def fake_send_oneshot(
+        config: CommitConfig,
+        spec: api_module.OneShotSpec,
+        mode: Any,
+    ) -> tuple[dict[str, Any], str, None]:
+        del config, mode
+        attempted.append(spec.model or "")
+        if spec.model == failing:
+            raise error
+        return {}, json.dumps({"choices": [{"message": {"content": "<summary>rebuilt the parser</summary>"}}]}), None
+
+    return fake_send_oneshot
+
+
+def test_model_chain_falls_back_after_retries_are_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        api_module,
+        "_send_oneshot",
+        _summary_send(
+            attempted,
+            "gemini-3.1-flash-lite",
+            api_module._RetryableResponse("server error 502: Thinking loop detected"),
+        ),
+    )
+    config = CommitConfig(max_retries=2, initial_backoff_ms=0, cache_enabled=False)
+
+    response = asyncio.run(api_module._run_oneshot_response(config, _chain_spec("lite;haiku")))
+
+    # The stalling model burns its whole retry budget before the chain moves on.
+    assert attempted == ["gemini-3.1-flash-lite", "gemini-3.1-flash-lite", "claude-haiku-4-5"]
+    assert response.output == {"summary": "rebuilt the parser"}
+
+
+def test_model_chain_falls_back_on_context_length_without_retrying(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        api_module,
+        "_send_oneshot",
+        _summary_send(
+            attempted,
+            "gemini-3.1-flash-lite",
+            ApiContextLengthExceeded(operation="summary", model="gemini-3.1-flash-lite", status=400, body="too long"),
+        ),
+    )
+    config = CommitConfig(max_retries=3, initial_backoff_ms=0, cache_enabled=False)
+
+    response = asyncio.run(api_module._run_oneshot_response(config, _chain_spec("lite;haiku")))
+
+    assert attempted == ["gemini-3.1-flash-lite", "claude-haiku-4-5"]
+    assert response.output == {"summary": "rebuilt the parser"}
+
+
+def test_model_chain_raises_when_every_candidate_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempted: list[str] = []
+
+    async def always_failing(
+        config: CommitConfig,
+        spec: api_module.OneShotSpec,
+        mode: Any,
+    ) -> tuple[dict[str, Any], str, None]:
+        del config, mode
+        attempted.append(spec.model or "")
+        raise api_module._RetryableResponse("server error 502: Thinking loop detected")
+
+    monkeypatch.setattr(api_module, "_send_oneshot", always_failing)
+    config = CommitConfig(max_retries=2, initial_backoff_ms=0, cache_enabled=False)
+
+    with pytest.raises(LgitError, match="Max retries exceeded"):
+        asyncio.run(api_module._run_oneshot_response(config, _chain_spec("lite;haiku")))
+
+    assert attempted == [
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-flash-lite",
+        "claude-haiku-4-5",
+        "claude-haiku-4-5",
+    ]
 
 
 def test_run_oneshot_returns_context_length_error(monkeypatch: pytest.MonkeyPatch) -> None:

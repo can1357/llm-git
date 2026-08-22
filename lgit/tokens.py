@@ -8,6 +8,8 @@ from urllib.parse import urljoin
 
 import httpx
 
+from .models import resolve_model_chain
+
 
 @dataclass(slots=True)
 class TokenCounter:
@@ -62,7 +64,9 @@ def create_token_counter(config: object) -> TokenCounter:
     return TokenCounter(
         api_base_url=str(getattr(config, "api_base_url", "http://localhost:4000")),
         api_key=getattr(config, "api_key", None),
-        model=str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8"))),
+        model=resolve_model_chain(str(getattr(config, "analysis_model", getattr(config, "model", "claude-opus-4.8"))))[
+            0
+        ],
         timeout=float(getattr(config, "connect_timeout_secs", 10) or 10),
     )
 
