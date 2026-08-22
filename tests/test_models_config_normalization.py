@@ -132,7 +132,7 @@ def test_fast_prompt_renders_from_packaged_resources(tmp_path, monkeypatch) -> N
         },
     )
 
-    assert system.startswith("You are a senior engineer writing a conventional commit message.")
+    assert system.startswith("Senior engineer writing a conventional commit message.")
     assert "type(scope): summary" in system
     assert "<file_changes>\n1 file changed, 2 insertions(+)\n</file_changes>" in user
     assert "<scope_candidates>\nconfig\n</scope_candidates>" in user

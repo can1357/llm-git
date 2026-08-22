@@ -57,10 +57,10 @@ def test_render_analysis_prompt_requests_holistic_summary() -> None:
         )
     )
 
-    assert "Generate Summary" in parts.system
+    assert "## 2. Summary" in parts.system
     assert "# type(scope): summary" in parts.system
     assert "umbrella headline for the whole changeset" in parts.system
-    assert "Does not copy detail #1" in parts.system
+    assert "never copies detail #1" in parts.system
 
 
 def test_render_changelog_prompt_renders_markdown() -> None:
