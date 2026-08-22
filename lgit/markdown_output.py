@@ -86,7 +86,7 @@ def fallback_summary(
         candidate = "Updated files"
     if needs_verb and not _starts_with_past_tense(candidate):
         candidate = f"{_summary_verb(normalized_type)} {candidate}"
-    cap = max(1, min(limit, 50))
+    cap = max(1, limit)
     candidate = _truncate_summary(candidate, cap).rstrip(".")
     first_word = candidate.split(maxsplit=1)[0] if candidate else ""
     if first_word.lower() == normalized_type.lower():
