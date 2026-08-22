@@ -110,6 +110,10 @@ uv run pytest -k truncate                    # Match by name
 2. Intent analysis - AI identifies logical commit groups from markdown:
    - Returns group headings with file IDs/hunk IDs that are mapped to compose groups
    - **CRITICAL**: Each group specifies file paths + hunk headers (e.g., `@@ -10,5 +10,7 @@`) or `["ALL"]`
+   - Planning targets are per-file (`F...`) for small snapshots and per-path-area (`A...`) for large ones (`_build_planning_index`). Area subdivision stops once `COMPOSE_AREA_TARGET_MIN_COUNT` (24) targets exist and never exceeds `COMPOSE_AREA_TARGET_MAX_COUNT` (48), so a monorepo plans over ~30 workstream-sized areas instead of hundreds of single files — the signal a planner needs to split by subsystem rather than bucket alphabetically
+   - Model output is accepted as area IDs, file IDs, or paths: `PlanningIndex.aliases` maps every file id and path back to its area, so a planner that answers with paths is normalized instead of silently falling back
+   - `_split_grab_bag_groups` is a structural backstop: any returned group spanning `COMPOSE_GRAB_BAG_WORKSTREAM_THRESHOLD` (5) or more workstreams is partitioned per workstream while `max_commits` slots remain, keeping the model's own rationale on the partition that matches it
+   - `--compose-max-commits` defaults to 32; each group still holds whole workstreams, so the ceiling bounds commits, not areas
 3. Dependency order - Topological sort (Kahn's algorithm) to ensure working state
 4. Display proposed splits, optionally stop (preview mode)
 5. Execute - For each group in dependency order:
@@ -149,7 +153,7 @@ uv run pytest -k truncate                    # Match by name
 5. For each file: keep first 15 + last 10 lines, truncate middle
 6. Annotate with `[... X lines omitted ...]`
 
-**Prompt scrub** (`scrub_diff_for_prompt`): every LLM-bound diff (standard/fast analysis, compose planning + per-group messages, changelog, rewrite) is scrubbed first: lines >512 chars — hex/base64 blobs, minified bundles, long string literals — collapse to `head[..omitted 14KB..]tail` (`collapse_blob_lines`), then any file section still >100KB is capped to headers plus edge lines. Line-count budgets alone can't catch these (a single 5MB line survives "first 15 lines"). Binary files (images) are safe by construction — diffs are generated without `--binary`, so they appear only as one-line `Binary files … differ` headers. Prompt-side only; never applied to diffs used for staging.
+**Prompt scrub** (`scrub_diff_for_prompt`): every LLM-bound diff (standard/fast analysis, compose planning + per-group messages, changelog, rewrite) is scrubbed first: lines >512 chars — hex/base64 blobs, minified bundles, long string literals — collapse to `head[..omitted 14KB..]tail` (`collapse_blob_lines`), then any file section still >100KB is capped to its `diff --git`/`index`/`+++`/`---` metadata plus edge lines. `parse_diff` keeps `@@` hunk headers in file *content*, not in `header`: a file with thousands of hunks is otherwise uncappable — 21.5k surviving `@@` lines alone became a 143k-token request and blew the context window of any 131k model. Line-count budgets alone can't catch these (a single 5MB line survives "first 15 lines"). Binary files (images) are safe by construction — diffs are generated without `--binary`, so they appear only as one-line `Binary files … differ` headers. Prompt-side only; never applied to diffs used for staging.
 
 ## Hunk-Level Staging (`lgit/patch.py`)
 
@@ -238,6 +242,7 @@ api_base_url = "http://localhost:4000"
 analysis_model = "claude-sonnet-4.5"
 summary_model = "claude-haiku-4-5-20251001"
 map_model = ""                # Map-phase (per-file observation) model; empty = summary_model
+fast_model = ""               # Fast-mode (single-call) model; empty = summary_model
 
 summary_guideline = 72        # Target length
 summary_soft_limit = 96       # Triggers retry
@@ -269,6 +274,7 @@ prompts_dir = ""              # Optional dir of <family>.md prompt overrides; em
 **Models:**
 - Default: Sonnet 4.5 for analysis, Haiku 4.5 for summary
 - Map phase (per-file observations, runs in parallel) uses `map_model`, falling back to `summary_model`; it reads raw diffs, so it benefits from a stronger model than the summary role while parallelism hides the extra per-call latency
+- Fast mode (`--fast`, and the auto-fast path) uses `fast_model`, falling back to `summary_model` — one call for the whole message, so it stays on the cheap/low-latency tier. `-m` overrides every role, including this one
 - Optional: Opus 4.1 via `-m opus` (more powerful, slower, expensive)
 - Compose mode uses analysis model for both grouping + per-commit generation
 
