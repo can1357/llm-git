@@ -436,6 +436,7 @@ def _load_config(args: argparse.Namespace) -> CommitConfig:
         resolved_model = resolve_model_name(args.model)
         config.analysis_model = resolved_model
         config.summary_model = resolved_model
+        config.map_model = resolved_model
     if args.sign:
         config.gpg_sign = True
     if args.signoff:
@@ -573,8 +574,14 @@ async def _generate_standard_workflow(
         )
     with profile.section("create_token_counter", collector):
         token_counter = create_token_counter(config)
-    if config.analysis_model == config.summary_model:
+    if config.analysis_model == config.summary_model == config.effective_map_model:
         style.status(f"{style.dim('›')} {style.dim('model:')} {style.model(config.analysis_model)}")
+    elif config.effective_map_model != config.summary_model:
+        style.status(
+            f"{style.dim('›')} {style.dim('models:')} {style.dim('map')} "
+            f"{style.model(config.effective_map_model)} {style.dim('analysis')} "
+            f"{style.model(config.analysis_model)} {style.dim('summary')} {style.model(config.summary_model)}"
+        )
     else:
         style.status(
             f"{style.dim('›')} {style.dim('models:')} {style.dim('analysis')} "

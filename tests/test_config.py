@@ -47,3 +47,13 @@ def test_prompts_dir_wires_template_overrides(tmp_path: Path, monkeypatch: pytes
     CommitConfig.load(empty_file)
     assert not load_template_file("summary").startswith("OVERRIDE SYSTEM")
     assert not (tmp_path / ".llm-git").exists()
+
+
+def test_map_model_falls_back_to_summary_model() -> None:
+    config = CommitConfig.from_mapping({"summary_model": "small-model"})
+    assert config.effective_map_model == "small-model"
+
+    split = CommitConfig.from_mapping({"summary_model": "small-model", "map_model": "big-model"})
+    assert split.map_model == "big-model"
+    assert split.effective_map_model == "big-model"
+    assert split.summary_model == "small-model"

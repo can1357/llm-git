@@ -352,7 +352,9 @@ async def run_compose_round(
     observations = []
     planning_diff = diffing.scrub_diff_for_prompt(snapshot.diff)
     if not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(planning_diff, config, token_counter):
-        observations = await map_reduce.observe_diff_files(planning_diff, config.summary_model, config, token_counter)
+        observations = await map_reduce.observe_diff_files(
+            planning_diff, config.effective_map_model, config, token_counter
+        )
     if observations:
         _save_debug_artifact(
             args,
