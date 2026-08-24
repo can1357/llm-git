@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 try:
     __version__ = metadata.version("lgit-cli")
 except metadata.PackageNotFoundError:
-    __version__ = "5.0.0"
+    __version__ = "5.4.0"
 
 _CORE_MODEL_EXPORTS = (
     "Mode",
