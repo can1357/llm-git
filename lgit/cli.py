@@ -383,7 +383,7 @@ def _print_llm_spend() -> None:
         line = f"LLM cost: ${spend.cost_usd:.4f} ({tokens})"
         if spend.saved_usd > 0:
             line += f", saved ${spend.saved_usd:.4f} via cache"
-    print(style.dim(line))
+    style.status(style.dim(line))
 
 
 def _compact_count(count: int) -> str:
@@ -595,7 +595,7 @@ async def _generate_standard_workflow(
         if use_map_reduce:
             analysis_diff = diff
         elif len(diff) > int(config.max_diff_length):
-            print(style.warning(f"Applying smart truncation (diff size: {len(diff)} characters)"))
+            style.status(style.warning(f"Applying smart truncation (diff size: {len(diff)} characters)"))
             analysis_diff = smart_truncate_diff(diff, int(config.max_diff_length), config, token_counter)
         else:
             analysis_diff = diff

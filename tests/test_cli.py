@@ -97,6 +97,28 @@ def test_emit_commit_hash_only_prints_to_stdout_when_piped(
     assert capsys.readouterr().out == ""
 
 
+def test_dry_run_pipe_stdout_carries_only_the_commit_message(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pipe-mode stdout must be the commit message only; LLM spend goes to stderr."""
+    from lgit import pricing, style
+    from lgit.models import ConventionalCommit
+
+    monkeypatch.setattr(style, "_PIPE_MODE", True)
+    pricing.reset_session()
+    pricing.record_usage("claude-haiku-4-5", pricing.TokenUsage(input_tokens=100, output_tokens=20))
+
+    message = ConventionalCommit.from_raw(
+        commit_type="feat", scope="sandbox", summary="added mock feature", body=["Added a sample feature."]
+    )
+    cli._print_message(message, title="Generated Commit Message")
+    cli._print_llm_spend()
+
+    captured = capsys.readouterr()
+    assert captured.out == message.format_commit_message()
+    assert "LLM cost" in captured.err
+
+
 def test_trace_output_flag_enables_file_profiling() -> None:
     args = _args("--trace-output", "profile.jsonl", "--dry-run")
 
