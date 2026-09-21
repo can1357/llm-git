@@ -65,8 +65,10 @@ uv run pytest -k truncate                    # Match by name
 - `diffing` - Smart diff truncation with priority scoring
 - `errors` - Error/exception types
 - `git` - Git command wrappers (diff, stat, commit, history operations)
+- `judgment` - Typed judgments (yes/no probability, pick-one choice) over small states via TypeSafe's System One API (jev); cached and cost-accounted like model calls, optional (no key = no judge)
 - `map_reduce` - Parallel per-file analysis for large diffs
 - `markdown_output` - Markdown rendering and heuristic fallback summary
+- `mechanical` - Hunk-level judgments: every hunk of a prompt-bound diff gets a mechanical probability and an intent kind; follow-through hunks (imports, call sites, formatting, generated output) become one-line markers, the rest carry a `[judged: <type>]` hint on their `@@` header
 - `models` - Type-safe commit types, scopes, summaries; model-name resolution; compose data types
 - `normalization` - Unicode normalization, commit message formatting
 - `patch` - Hunk-level staging for compose mode
@@ -88,41 +90,44 @@ uv run pytest -k truncate                    # Match by name
 
 **Standard Mode** (`lgit/cli.py`):
 1. `get_git_diff()` + `get_git_stat()` - Extract changes based on mode (staged/unstaged/commit)
-2. `smart_truncate_diff()` - Truncate if >100KB with priority-based selection:
+2. `prune_mechanical_hunks()` (`lgit/mechanical.py`) - With a judge configured and the diff ≥ `mechanical_prune_min_tokens`, every hunk is judged (one request per file, two questions per hunk — mechanical `noul` + kind `choice` over `HUNK_KINDS` using the configured type descriptions — chunked under jev's ~32k-token ceiling, all files concurrent ≈ 1s wall). Hunks at ≥ `mechanical_hunk_threshold` become `[mechanical after-effect omitted: +a/-d lines]` markers (a file whose hunks are all mechanical collapses to one marker); the remaining hunks' `@@` headers gain `[judged: feat|fix|test|...]` when the kind choice is ≥ `KIND_CONFIDENCE_FLOOR` (0.6) — a prior for the small analysis/fast models, which the prompts say the diff overrides. Guards: a diff that is entirely mechanical, or has fewer than two hunks, is never pruned (hints still render). The `stat` is untouched, so scope/wide-change logic still sees every file. Applies to both the standard and fast workflows (before map-reduce sizing and truncation) and to compose's per-group analysis diffs
+3. `smart_truncate_diff()` - Truncate if >100KB with priority-based selection:
    - Priority: source files > config > tests > binaries > lock files
    - Preserve ALL file headers, truncate content proportionally
    - Keep context (first 15 + last 10 lines per file)
-3. `extract_scope_candidates()` - Parse git numstat to identify changed modules/components
-4. Analysis call - AI returns markdown conventional-commit analysis:
+4. `extract_scope_candidates()` - Parse git numstat to identify changed modules/components
+5. Analysis call - AI returns markdown conventional-commit analysis:
    - Heading identifies type, optional scope, and summary
    - Bullets become structured detail points; issue refs are parsed from output
 - Large diffs use map-reduce instead: per-file observations carry a file `status` (`added`/`deleted`/`renamed`/`modified`) into the reduce prompt so new files inside an existing component are not misreported as introducing it
-5. Changelog overlap (staged mode, committing): `_ChangelogRunner` starts changelog generation concurrently with message generation — diff-based for small/fast paths, or reusing map-phase per-file observations (`run_map_reduce(on_observations=...)`) so the changelog model never re-reads a large diff. Generation overlaps the reduce/summary calls; index/worktree application (`apply_changelog_updates`) still happens only after validation, at the same point the sequential flow ran.
-6. `generate_summary_from_analysis()` - AI call for summary generation:
+6. Changelog overlap (staged mode, committing): `_ChangelogRunner` starts changelog generation concurrently with message generation — diff-based for small/fast paths, or reusing map-phase per-file observations (`run_map_reduce(on_observations=...)`) so the changelog model never re-reads a large diff. Generation overlaps the reduce/summary calls; index/worktree application (`apply_changelog_updates`) still happens only after validation, at the same point the sequential flow ran.
+7. `generate_summary_from_analysis()` - AI call for summary generation:
    - Input: type + scope + detail points + stat
    - Returns plain text in `<summary>...</summary>` tags (≤72 chars)
-7. `post_process_commit_message()` - Enforce capitalization, punctuation
-8. `validate_commit_message()` - Check past-tense verbs, length limits
-9. Await changelog generation, apply + stage entries, then create commit (unless dry-run)
+8. `post_process_commit_message()` - Enforce capitalization, punctuation
+9. `validate_commit_message()` - Check past-tense verbs, length limits
+10. Await changelog generation, apply + stage entries, then create commit (unless dry-run)
 
 **Compose Mode** (`lgit/compose.py:run_compose_mode`):
 1. Scope to the staged tree, exactly like the regular commit path: callers `git add -A` first only when nothing is staged (`_run_compose` → `_auto_stage_if_needed`). `run_compose_mode` then captures that staged tree ONCE (`git write-tree`) as the fixed target; every round diffs `HEAD` against it (`git diff HEAD <target>`, with rename detection) and pins blobs from it — so anything staged or edited mid-run is excluded and stays staged, exactly as a normal commit would leave it. Unstaged worktree edits and untracked files are never in scope. The loop is unconstrained — each round commits what its plan covers and re-plans the rest until `HEAD` reaches the target — but errors out if a round produces no commits while changes remain (a no-op plan), instead of spinning forever.
-2. Intent analysis - AI identifies logical commit groups from markdown:
+2. Hunk judgments (`classify_hunks` → `HunkJudgments`, once per round, same judge/thresholds as standard mode): mechanical hunk ids (a) prune the observe-phase diff (`render_snapshot_diff`), (b) are hidden from the planner's sampled hunk list and replaced with a per-file/area note (`... N mechanical follow-through hunks not listed` / `all N hunks are mechanical follow-through; group with their cause`), and (c) prune each group's analysis diff (`ComposeGroupPatch.analysis_diff`; the stageable `diff` is never pruned). Kind hints tag the planner's listed hunks (`- F001-H002 [fix] old:...`) so it can group by intent, and ride into each group's analysis diff
+3. Intent analysis - AI identifies logical commit groups from markdown:
    - Returns group headings with file IDs/hunk IDs that are mapped to compose groups
    - **CRITICAL**: Each group specifies file paths + hunk headers (e.g., `@@ -10,5 +10,7 @@`) or `["ALL"]`
    - Planning targets are per-file (`F...`) for small snapshots and per-path-area (`A...`) for large ones (`_build_planning_index`). Area subdivision stops once `COMPOSE_AREA_TARGET_MIN_COUNT` (24) targets exist and never exceeds `COMPOSE_AREA_TARGET_MAX_COUNT` (48), so a monorepo plans over ~30 workstream-sized areas instead of hundreds of single files — the signal a planner needs to split by subsystem rather than bucket alphabetically
    - Model output is accepted as area IDs, file IDs, or paths: `PlanningIndex.aliases` maps every file id and path back to its area, so a planner that answers with paths is normalized instead of silently falling back
    - `_split_grab_bag_groups` is a structural backstop: any returned group spanning `COMPOSE_GRAB_BAG_WORKSTREAM_THRESHOLD` (5) or more workstreams is partitioned per workstream while `max_commits` slots remain, keeping the model's own rationale on the partition that matches it
    - `--compose-max-commits` defaults to 32; each group still holds whole workstreams, so the ceiling bounds commits, not areas
-3. Dependency order - Topological sort (Kahn's algorithm) to ensure working state
-4. Display proposed splits, optionally stop (preview mode)
-5. Execute - For each group in dependency order:
+4. Hunk binding for files claimed by several groups (`_bind_compose_plan`): with a judge, `_bind_with_judge` asks one `choice` question per hunk over the file's candidate groups (criteria = `type(scope): rationale`, state = the file's hunks; all files concurrent, ~1s wall), accepts choices at ≥ `COMPOSE_BIND_CONFIDENCE_FLOOR` (0.5), and hands the rest to the deterministic fallback (earliest candidate in dependency order) — judgments are deterministic, so there is no repair round. Without a judge, `_bind_with_model` runs the batched `compose-bind` calls on the analysis model plus one repair round, as before
+5. Dependency order - Topological sort (Kahn's algorithm) to ensure working state
+6. Display proposed splits, optionally stop (preview mode)
+7. Execute - For each group in dependency order:
    - Capture baseline diff once (against original HEAD)
    - Hunk-aware staging:
      - If all hunks = `["ALL"]`: stage whole files
      - Otherwise: extract specific hunks, `git apply --cached <patch>`
    - Generate commit message via standard flow
-   - Generate and reconcile changelog entries for the group before writing its commit tree. Claimed changelog files stay out of compose planning, and the user's staged changelog edit rides the first commit; `--no-changelog` or `changelog_enabled = false` disables the weave.
+   - Reconcile the group's changelog entries before writing its commit tree. Entries for every group are generated in one parallel wave alongside the commit messages (`ChangelogWeaver.generate_groups`, each against the round's seeded chain), because serial per-group changelog calls were the bulk of compose wall time (27s of 35s measured); `weave_group` then reconciles each group's entries against the chain as it has accumulated — cross-group repeats are dropped by the judged de-duplication, revisions that no longer match are skipped. Consequence: a later group's model does not see a sibling's new entry within the same run (HEAD's Unreleased entries are still revisable). Claimed changelog files stay out of compose planning, and the user's staged changelog edit rides the first commit; `--no-changelog` or `changelog_enabled = false` disables the weave.
    - Create commit + capture new HEAD hash
    - Optionally run tests
 
@@ -174,7 +179,8 @@ uv run pytest -k truncate                    # Match by name
 **Snapshot isolation elsewhere:**
 - Standard/fast staged mode captures the index tree after auto-stage/changelog (`lgit/cli.py`). If the index still matches, plain `git commit` runs (hooks included). If it drifted mid-run, the snapshot tree is committed directly (`commit-tree` + checked ref update, hooks skipped) — the index and worktree are left untouched, so mid-run staging stays staged for the next commit.
 - Changelog maintenance (`lgit/changelog.py`) generates entries against the *staged* copy of `CHANGELOG.md` and stages the result as an exact blob, so unrelated unstaged changelog edits never enter the commit; the worktree copy gets the entries inserted separately. Reconciliation may replace or drop only entries from `HEAD`'s `[Unreleased]`; entries authored in the pending change are structurally protected, and unmatched operations are skipped. The flow is split into `prepare_changelog_flow` (git reads) / `generate_changelog_updates` (concurrent LLM calls per boundary) / `apply_changelog_updates` (write + stage), so the CLI can overlap generation with commit-message generation. When map-reduce ran, each boundary's prompt receives that boundary's per-file observations (`<file_change_summaries>`) instead of its raw diff; boundaries not covered by observations fall back to the diff prompt. Changelog discovery uses `git ls-files` (tracked + untracked-not-ignored), never a worktree walk.
-- Hand-written changelog edits are respected: `[Unreleased]` entries the author added in this change (staged/worktree vs `HEAD:`, `_entries_added_since`) are passed to the model as `authored_entries` — it documents only changes they don't cover, returning nothing when they cover everything. As a backstop, generated entries that restate an existing bullet (verbatim or ≥70% content-word overlap, `_drop_duplicate_entries`) are dropped before insertion.
+- Hand-written changelog edits are respected: `[Unreleased]` entries the author added in this change (staged/worktree vs `HEAD:`, `_entries_added_since`) are passed to the model as `authored_entries` — it documents only changes they don't cover, returning nothing when they cover everything. As a backstop, generated entries that restate an existing bullet are dropped before insertion (`drop_duplicate_entries`, run inside the concurrent generation task so it never lands on the critical path): verbatim repeats always; content-stem overlap with one existing entry decides the clear cases locally (≥70% duplicate, <15% distinct); only the band between goes to the judge (one request per boundary, one `noul` per candidate, dropped at ≥ `changelog_duplicate_threshold`) — the judge catches paraphrases the overlap heuristic misses (e.g. "models now fall back to the next model in the chain" vs an existing fallback-chain entry) and is kept for those without a judge.
+- Changelog-worthiness gate (`generate_changelog_entries`): with a judge, one `noul` over the boundary's stat + clipped diff (or observations; ~$0.00015 per commit) decides whether the change is user-visible; below `changelog_gate_threshold` (0.3) the changelog model is not called at all. Measured: releases/version bumps 0.07-0.13, refactors and developer docs 0.72-0.76, features/fixes 0.89-0.97 — so the gate only removes the plainly-internal calls. It is a serial ~0.8s round trip on the changelog path, so it only runs for diffs ≥ `changelog_gate_min_tokens` (8000 — the standard, non-fast path, where analysis + summary hide it and the call it saves is dear); on fast-path commits the changelog path is the critical path and the gate would cost more wall time than the ~$0.001 call it could save. In compose, `ChangelogWeaver.judge_groups` judges every group concurrently alongside message generation instead of serially inside the commit loop.
 - Compose changelog weaving updates the real index and worktree only while each copy still matches what the run last staged or wrote; mid-run user changes win and remain untouched.
 
 ## Prompt Engineering
@@ -261,7 +267,22 @@ changelog_reasoning_effort = "low"  # Reasoning effort for changelog calls (chat
 
 exclude_old_message = true    # git show omits the original message from commit-mode prompts (default)   # When true, git show omits original message
 prompts_dir = ""              # Optional dir of <family>.md prompt overrides; empty = packaged prompts
+
+# Typed judgments (TypeSafe jev). No key (config or TYPESAFE_API_KEY) = no judge = previous behaviour.
+judgment_enabled = true       # LLM_GIT_JUDGMENT_DISABLED=1 overrides; tests set it via conftest
+judgment_api_key = ""         # `!cmd` supported like api_key
+judgment_base_url = "https://api.typesafe.ai"   # TYPESAFE_BASE_URL overrides the default
+judgment_model = "jev-latest"
+mechanical_hunk_threshold = 0.7      # imports/re-exports/pass-through score 0.75-0.9, behaviour <0.3, fixture edits 0.5-0.7
+mechanical_prune_min_tokens = 5000   # the round trip is a flat ~1s; below this it does not pay
+mechanical_prune_min_model_rate = 1.0  # prune only when the analysis model bills >= this $/M input (unknown = yes)
+mechanical_kind_hints = true         # per-hunk `[judged: <type>]` hints; ~40% of the judgment bill
+changelog_gate_threshold = 0.3       # skip the changelog model below this judged user-visibility; 0 disables
+changelog_gate_min_tokens = 8000     # gate only standard-path diffs; on the fast path the round trip is pure latency
+changelog_duplicate_threshold = 0.6  # drop generated entries judged to restate an existing one at/above this
 ```
+
+**Judgment economics (measured 2026-09-21, cache cold, 4 commits of 12-20k prompt tokens):** jev bills input only at $0.042/M (`model_pricing.json`), rejects requests above ~32k tokens (`JUDGMENT_STATE_CHAR_BUDGET` chunks under that), and answers in ~0.8s regardless of size with 32-way concurrency. Judging a diff costs ~2x its tokens (the full mechanical question is 127 tokens/hunk, the kind choice 87; cheaper phrasings and cross-file batching were tried and rejected because they blur the import/logic separation — batching pushed a core logic hunk from 0.04 to 0.78). Mechanical hunks are small in bytes, so pruning removes 3-12% of prompt tokens on ordinary feature commits and ~50% on sweeping mechanical refactors. Net on `gemini-3.1-flash-lite` ($0.25/M): cost +10-25%, latency +1s, message quality even → `mechanical_prune_min_model_rate` (default $1/M) turns pruning off for it. Net on `claude-haiku-4-5`: cost 0 to −8% on feature commits, −45% on a typing refactor, latency +0.5-2s. Sonnet/Opus-class analysis models are where it pays unambiguously. The clear wins independent of model price: compose hunk binding (25 hunks across 12 ambiguous files in 1.25s, parallel, vs sequential analysis-model batches), the changelog gate on standard-path commits (drops the whole changelog call on release bumps/deps/tests at p≈0.1, hidden behind analysis), and judged changelog de-duplication (catches paraphrases the word-overlap heuristic misses at negligible cost). **Latency rule that shaped the defaults:** every judge call is a flat ~0.8s; it is free only when overlapped with a slower model call. The fast path (fast call ≈ 0.8s, changelog ≈ 2-5s) has nothing to hide it behind, so no judge call runs serially there (pruning off by rate, gate off by size, dedup only in the uncertain band). End-to-end A/B on staged commits (judgments off vs on, changelog present): large commits at parity or better, release bumps cheaper and faster when gated, small commits unchanged; the changelog model's own 2-5s variance dwarfs any remaining difference. Compose A/B (10 squashed commits, 25 files, changelog present, flash-lite): serial per-group changelog generation took 17-35s per run; the parallel wave brought it to 10-14s at the same cost. Judgments on vs off at equal group count: parity on wall and cost (+$0.0003 jev), but parallel generation makes cross-group changelog repeats likely and the word-overlap heuristic missed them in 2/2 "off" runs ("Added support for semicolon-separated model fallback chains…" alongside "Added model fallback support via semicolon-separated model lists") while the judged band caught them in 3/3 "on" runs. Judge binding and pruning did not engage in these runs (no ambiguous files; flash-lite below the rate floor). Judgment responses are cached in the same SQLite cache (`judgment/<operation>` rows keyed on state + questions) and counted in session spend.
 
 # Implementation Notes
 
@@ -310,6 +331,8 @@ uv run mypy                 # optional local type check
 # Common Issues
 
 **Compose mode empty commits**: Ensure AI returns hunk headers from diff, not fabricated. If model struggles, file may need `hunks: ["ALL"]` for entire file.
+
+**A real change was pruned as mechanical**: raise `mechanical_hunk_threshold` (0.8 keeps everything but imports/re-exports) or set `mechanical_prune_min_tokens` high enough to skip that diff; judgments are cached, so re-running with `LLM_GIT_CACHE_DISABLED=1` re-judges. Judgment failures never abort a run — unjudged hunks stay in the diff and one `RuntimeWarning` names the failure.
 
 **Hunk extraction fails**: Check the diff parser correctly handles `diff --git a/... b/...` headers. File path matching is sensitive to `a/` and `b/` prefixes.
 

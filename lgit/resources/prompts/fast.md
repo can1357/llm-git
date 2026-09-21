@@ -6,6 +6,8 @@ Rules:
 - `scope`: narrow lowercase module/component only when the diff clearly supports it. Prefer `scope_candidates`. Omit `(scope)` if unclear, cross-cutting, repo-wide, or no single scope covers most of the change.
 - `summary`: specific past-tense phrase, no type prefix, no trailing period, ≤72 characters.
 - `details`: 0-3 past-tense sentences, each ending with a period. Only material changes; skip renames, imports, formatting, incidental churn.
+- Hunks shown as `[mechanical after-effect omitted: ...]` are follow-through edits already judged immaterial; count their files for type and scope, never describe them.
+- A hunk header ending in `[judged: <type>]` is a per-hunk type hint from a cheap classifier: a good prior for `type` and for which hunks matter, but the diff decides.
 - Mixed or noisy diff → summarize the main cohesive change; conservative scope over guessing.
 - Never invent behavior, file contents, or reasons not visible in the diff.
 

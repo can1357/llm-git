@@ -15,6 +15,7 @@ from . import style
 from .diffing import scrub_diff_for_prompt, smart_truncate_diff
 from .errors import GitError, ValidationFailure
 from .git import run_git
+from .judgment import Judge, JudgmentRequest, Noul, NoulAnswer, clip_text
 from .map_reduce import render_observations_markdown
 from .markdown_output import parse_changelog_response
 from .models import ChangelogCategory, resolve_model_name
@@ -23,6 +24,24 @@ from .templates import render_changelog_prompt
 if TYPE_CHECKING:
     from .config import CommitConfig
     from .map_reduce import FileObservation
+
+# Judged changelog-worthiness measured on real commits: features/fixes score 0.89-0.97,
+# release bumps 0.07-0.13, refactors and developer-facing docs 0.72-0.76. The gate only
+# skips the model when the change is plainly internal; anything ambiguous still runs.
+_WORTHINESS_QUESTION = Noul(
+    "Does this change add, alter, fix, remove, or deprecate anything a user of the project would notice — "
+    "behaviour, output, CLI or API surface, defaults, error handling, performance, or documentation they rely on — "
+    "such that it merits a Keep a Changelog entry under Added/Changed/Fixed/Removed/Deprecated/Security?",
+    yes="user-visible: a user or integrator could observe or depend on the difference",
+    no="internal only: refactoring, tests, CI/tooling, formatting, comments, version bumps, or developer-facing "
+    "notes with no user-observable effect",
+)
+_DUPLICATE_YES = "restates an existing entry: the same change reworded, recategorized, narrowed, or broadened"
+_DUPLICATE_NO = "describes a distinct change not covered by any existing entry"
+# User-visibility is evident from the stat plus the top of the diff; clipping keeps the
+# gate at a fraction of the changelog call it may save (jev bills the state's tokens).
+_WORTHINESS_HEAD_CHARS = 12_000
+_WORTHINESS_TAIL_CHARS = 3_000
 
 _REVISE_BLOCK_RE = re.compile(r"<revise\b[^>]*>(.*?)(?:</revise>|$)", re.IGNORECASE | re.DOTALL)
 _REVISION_LINE_RE = re.compile(r"^\s*(OLD|NEW)\s*:(.*)$", re.IGNORECASE)
@@ -158,52 +177,63 @@ async def generate_changelog_updates(
     config: CommitConfig,
     observations: Sequence[FileObservation] | None = None,
 ) -> list[tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]]:
-    """Run the changelog model concurrently for every prepared boundary.
+    """Run the changelog model concurrently for every prepared boundary, returning de-duplicated entries.
 
     When map-phase ``observations`` are given, boundaries covered by them are
-    prompted with per-file change summaries instead of their raw diff.
+    prompted with per-file change summaries instead of their raw diff. Duplicate
+    detection (which may call the judge) happens here, inside the task that
+    overlaps commit-message generation, so :func:`apply_changelog_updates`
+    stays synchronous and off the critical path.
     """
 
-    return list(
-        await asyncio.gather(
-            *(
-                generate_changelog_entries(
-                    prep.boundary.changelog_path,
-                    _is_package_changelog(prep.boundary.changelog_path, prepared.repo_dir),
-                    prep.stat,
-                    prep.diff,
-                    prep.existing_entries,
-                    prep.authored_entries,
-                    prep.can_revise,
-                    config,
-                    observations=_observations_markdown(observations, prep.boundary.files),
-                )
-                for prep in prepared.preps
-            )
+    judge = Judge.from_config(config)
+
+    async def generate(prep: _BoundaryPrep) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
+        entries, revisions = await generate_changelog_entries(
+            prep.boundary.changelog_path,
+            _is_package_changelog(prep.boundary.changelog_path, prepared.repo_dir),
+            prep.stat,
+            prep.diff,
+            prep.existing_entries,
+            prep.authored_entries,
+            prep.can_revise,
+            config,
+            observations=_observations_markdown(observations, prep.boundary.files),
         )
-    )
+        staged_entries, worktree_entries, _ = _revised_entries(prep, revisions)
+        entries = await drop_duplicate_entries(entries, staged_entries, worktree_entries, judge=judge, config=config)
+        return entries, revisions
+
+    return list(await asyncio.gather(*(generate(prep) for prep in prepared.preps)))
+
+
+def _revised_entries(
+    prep: _BoundaryPrep, revisions: Sequence[ChangelogRevision]
+) -> tuple[dict[ChangelogCategory, list[str]], dict[ChangelogCategory, list[str]] | None, list[ChangelogRevision]]:
+    """Staged and worktree Unreleased entries after ``revisions``, plus the revisions actually applied."""
+    staged_entries = prep.unreleased.entries
+    worktree_entries = prep.worktree_unreleased.entries if prep.worktree_unreleased is not None else None
+    applied: list[ChangelogRevision] = []
+    if prep.can_revise:
+        assert prep.head_unreleased is not None
+        revisable = {entry.casefold() for values in prep.head_unreleased.entries.values() for entry in values}
+        staged_entries, applied = apply_revisions(staged_entries, revisions, revisable)
+        if worktree_entries is not None:
+            worktree_entries, _ = apply_revisions(worktree_entries, revisions, revisable)
+    return staged_entries, worktree_entries, applied
 
 
 def apply_changelog_updates(
     prepared: PreparedChangelogFlow,
     generated: Sequence[tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]],
 ) -> list[ChangelogBoundary]:
-    """Write generated entries into worktree changelogs and stage exact blobs."""
+    """Write generated (already de-duplicated) entries into worktree changelogs and stage exact blobs."""
 
     repo_dir = prepared.repo_dir
     updated: list[ChangelogBoundary] = []
     untracked_to_stage: list[str] = []
     for prep, (entries, revisions) in zip(prepared.preps, generated, strict=True):
-        staged_entries = prep.unreleased.entries
-        worktree_entries = prep.worktree_unreleased.entries if prep.worktree_unreleased is not None else None
-        applied: list[ChangelogRevision] = []
-        if prep.can_revise:
-            assert prep.head_unreleased is not None
-            revisable = {entry.casefold() for values in prep.head_unreleased.entries.values() for entry in values}
-            staged_entries, applied = apply_revisions(staged_entries, revisions, revisable)
-            if worktree_entries is not None:
-                worktree_entries, _ = apply_revisions(worktree_entries, revisions, revisable)
-        entries = _drop_duplicate_entries(entries, staged_entries, worktree_entries)
+        staged_entries, worktree_entries, applied = _revised_entries(prep, revisions)
         if not entries and not applied:
             continue
 
@@ -272,6 +302,20 @@ class _ComposeBoundaryState:
     worktree_content: str
     last_written_worktree: str
     staged_index_oid: str
+
+
+GroupEntries = dict[Path, tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]]
+"""Per-changelog generated entries and revisions for one compose group."""
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundaryContext:
+    """One boundary's Unreleased state as presented to the model."""
+
+    parent_unreleased: UnreleasedSection
+    existing_map: dict[ChangelogCategory, list[str]]
+    existing_entries: str | None
+    can_revise: bool
 
 
 @dataclass(slots=True)
@@ -379,6 +423,75 @@ class ChangelogWeaver:
                     cwd=repo_dir,
                 ).stdout
 
+    async def generate_groups(
+        self, groups: Sequence[tuple[Sequence[str], str, str]], repo_dir: str | os.PathLike[str]
+    ) -> list[GroupEntries]:
+        """Generate every group's changelog entries concurrently, ahead of the serial weave loop.
+
+        ``groups`` holds each group's ``(files, diff, stat)``. Generation runs
+        against the chain state as it stands now, so a later group's model does
+        not see an earlier group's new entries; :meth:`weave_group` reconciles
+        each result against the chain as it has accumulated by then — duplicate
+        detection drops cross-group repeats (judged in the uncertain band) and
+        revisions that no longer match are skipped. This turns N serial
+        changelog calls (the bulk of compose wall time) into one parallel wave.
+        """
+
+        changelog_paths = [state.changelog_path for state in self.boundaries]
+        states = {state.changelog_path: state for state in self.boundaries}
+        matched_per_group = [detect_boundaries(files, changelog_paths, repo_dir) for files, _, _ in groups]
+        prompt_diffs = [self._prompt_diff(diff) for _, diff, _ in groups]
+        work: list[tuple[int, Path]] = []
+        tasks = []
+        for index, ((_, _, stat), matched) in enumerate(zip(groups, matched_per_group, strict=True)):
+            for boundary in matched:
+                context = self._boundary_context(states[boundary.changelog_path])
+                if context is None:
+                    continue
+                work.append((index, boundary.changelog_path))
+                tasks.append(self._generate(states[boundary.changelog_path], context, stat, prompt_diffs[index]))
+        results = await asyncio.gather(*tasks)
+        generated: list[GroupEntries] = [{} for _ in groups]
+        for (index, path), result in zip(work, results, strict=True):
+            generated[index][path] = result
+        return generated
+
+    async def _generate(
+        self, state: _ComposeBoundaryState, context: _BoundaryContext, stat: str, group_diff: str
+    ) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
+        return await generate_changelog_entries(
+            state.changelog_path,
+            state.is_package,
+            stat,
+            group_diff,
+            context.existing_entries,
+            _format_entry_map(state.authored),
+            context.can_revise,
+            self.config,
+        )
+
+    def _boundary_context(self, state: _ComposeBoundaryState) -> _BoundaryContext | None:
+        """The boundary's current Unreleased state as the model should see it, or None if unparseable."""
+        try:
+            parent_unreleased = parse_unreleased_section(state.chain_content, state.changelog_path)
+        except ValidationFailure:
+            return None
+        authored_casefolds = {entry.casefold() for values in state.authored.values() for entry in values}
+        existing_map: dict[ChangelogCategory, list[str]] = {}
+        for category, values in parent_unreleased.entries.items():
+            existing = [entry for entry in values if entry.casefold() not in authored_casefolds]
+            if existing:
+                existing_map[category] = existing
+        existing_entries = _format_entry_map(existing_map)
+        can_revise = bool(self.config.changelog_revise) and bool(existing_entries)
+        return _BoundaryContext(parent_unreleased, existing_map, existing_entries, can_revise)
+
+    def _prompt_diff(self, diff: str) -> str:
+        group_diff = scrub_diff_for_prompt(diff)
+        if len(group_diff) > self.config.max_diff_length:
+            group_diff = smart_truncate_diff(group_diff, self.config.max_diff_length, self.config)
+        return group_diff
+
     async def weave_group(
         self,
         files: Sequence[str],
@@ -386,8 +499,13 @@ class ChangelogWeaver:
         stat: str,
         repo_dir: str | os.PathLike[str],
         index_file: str | os.PathLike[str],
+        generated: GroupEntries | None = None,
     ) -> None:
-        """Generate, reconcile, and stage changelog entries for one compose group."""
+        """Reconcile and stage changelog entries for one compose group.
+
+        ``generated`` supplies the group's entries from :meth:`generate_groups`;
+        a boundary missing from it is generated here, serially.
+        """
 
         matched = detect_boundaries(
             files,
@@ -395,36 +513,21 @@ class ChangelogWeaver:
             repo_dir,
         )
         states = {state.changelog_path: state for state in self.boundaries}
-        group_diff = scrub_diff_for_prompt(diff)
-        if len(group_diff) > self.config.max_diff_length:
-            group_diff = smart_truncate_diff(group_diff, self.config.max_diff_length, self.config)
+        group_diff = self._prompt_diff(diff)
         for boundary in matched:
             state = states[boundary.changelog_path]
-            try:
-                parent_unreleased = parse_unreleased_section(state.chain_content, state.changelog_path)
-            except ValidationFailure:
+            context = self._boundary_context(state)
+            if context is None:
                 continue
-
-            authored_casefolds = {entry.casefold() for values in state.authored.values() for entry in values}
-            existing_map: dict[ChangelogCategory, list[str]] = {}
-            for category, values in parent_unreleased.entries.items():
-                existing = [entry for entry in values if entry.casefold() not in authored_casefolds]
-                if existing:
-                    existing_map[category] = existing
-            existing_entries = _format_entry_map(existing_map)
-            authored_entries = _format_entry_map(state.authored)
-            can_revise = bool(self.config.changelog_revise) and bool(existing_entries)
-
-            entries, revisions = await generate_changelog_entries(
-                state.changelog_path,
-                state.is_package,
-                stat,
-                group_diff,
-                existing_entries,
-                authored_entries,
-                can_revise,
-                self.config,
+            parent_unreleased, existing_map, can_revise = (
+                context.parent_unreleased,
+                context.existing_map,
+                context.can_revise,
             )
+            if generated is not None and boundary.changelog_path in generated:
+                entries, revisions = generated[boundary.changelog_path]
+            else:
+                entries, revisions = await self._generate(state, context, stat, group_diff)
             revisable = {entry.casefold() for values in existing_map.values() for entry in values}
             if can_revise:
                 revised_map, applied = apply_revisions(
@@ -449,7 +552,9 @@ class ChangelogWeaver:
             else:
                 shadow_revised_map = {category: list(values) for category, values in shadow_unreleased.entries.items()}
 
-            entries = _drop_duplicate_entries(entries, revised_map, shadow_revised_map)
+            entries = await drop_duplicate_entries(
+                entries, revised_map, shadow_revised_map, judge=Judge.from_config(self.config), config=self.config
+            )
             if not entries and not applied:
                 continue
 
@@ -662,9 +767,22 @@ async def generate_changelog_entries(
     """Ask the configured model for Keep a Changelog entries and revision operations.
 
     ``observations`` (per-file change-summary markdown) replaces the raw diff
-    in the prompt when provided.
+    in the prompt when provided. With a judge configured and a change of at
+    least :attr:`CommitConfig.changelog_gate_min_tokens`, the model is only
+    called when the change is judged user-visible at
+    :attr:`CommitConfig.changelog_gate_threshold` or above.
     """
 
+    judge = Judge.from_config(config)
+    threshold = float(config.changelog_gate_threshold)
+    changes = observations or diff
+    if judge is not None and threshold > 0 and len(changes) // 4 >= int(config.changelog_gate_min_tokens):
+        probability = await judge_changelog_worthiness(judge, changelog_path, stat, changes)
+        if probability is not None and probability < threshold:
+            style.status(
+                f"{style.dim('›')} {style.dim(f'changelog: {os.fspath(changelog_path)} skipped, change judged not user-visible (p={probability:.2f})')}"
+            )
+            return {}, []
     prompt = render_changelog_prompt(
         os.fspath(changelog_path),
         is_package_changelog,
@@ -696,6 +814,26 @@ async def generate_changelog_entries(
     entries = payload.get("entries", payload) if isinstance(payload, dict) else {}
     revisions = parse_changelog_revisions(response.text_content or "") if can_revise else []
     return _coerce_entries(entries if isinstance(entries, Mapping) else {}), revisions
+
+
+async def judge_changelog_worthiness(
+    judge: Judge, changelog_path: str | os.PathLike[str], stat: str, changes: str
+) -> float | None:
+    """Probability that ``changes`` (a diff or observation markdown) deserve a changelog entry; None on failure."""
+
+    request = JudgmentRequest(
+        {
+            "changelog": os.fspath(changelog_path),
+            "stat": stat,
+            "changes": clip_text(changes, _WORTHINESS_HEAD_CHARS, _WORTHINESS_TAIL_CHARS),
+        },
+        {"worthy": _WORTHINESS_QUESTION},
+    )
+    (answers,) = await judge.judge_all("changelog-worthy", [request])
+    if answers is None:
+        return None
+    answer = answers["worthy"]
+    return answer.probability if isinstance(answer, NoulAnswer) else None
 
 
 def normalize_changelog_entry(entry: str) -> str | None:
@@ -851,41 +989,98 @@ def _report_applied_revisions(applied: Sequence[ChangelogRevision]) -> None:
             )
 
 
-def _drop_duplicate_entries(
+async def drop_duplicate_entries(
     entries: Mapping[ChangelogCategory, Sequence[str]],
     *existing: Mapping[ChangelogCategory, Sequence[str]] | None,
+    judge: Judge | None,
+    config: CommitConfig,
 ) -> dict[ChangelogCategory, list[str]]:
     """Drop generated entries that restate ones already in the Unreleased section.
 
-    Catches verbatim repeats and near-duplicates (most of the entry's content
-    words already appear in a single existing entry, e.g. a reworded or
-    recategorized copy of a hand-written line).
+    Verbatim (case-insensitive) repeats and empty entries are always dropped.
+    Content-stem overlap with a single existing entry decides the clear cases
+    locally: ≥70% is a duplicate, <15% is distinct. The band between is judged
+    when a judge is configured — one request per call, one yes/no question per
+    candidate against the full list of existing entries, dropping at
+    :attr:`CommitConfig.changelog_duplicate_threshold` — and kept otherwise.
     """
-    existing_words = [
-        _entry_words(entry)
-        for entry_map in existing
-        if entry_map is not None
-        for values in entry_map.values()
-        for entry in values
+    existing_entries = [
+        entry for entry_map in existing if entry_map is not None for values in entry_map.values() for entry in values
     ]
-
-    def is_duplicate(entry: str) -> bool:
-        words = _entry_words(entry)
-        if not words:
-            return True
-        return any(len(words & seen) / len(words) >= 0.7 for seen in existing_words)
-
+    verbatim = {entry.casefold() for entry in existing_entries}
+    candidates: list[tuple[ChangelogCategory, str]] = [
+        (category, value)
+        for category, values in entries.items()
+        for value in values
+        if value.casefold() not in verbatim and _entry_words(value)
+    ]
+    existing_keys = [_stem_keys(_entry_words(entry)) for entry in existing_entries]
+    duplicates: set[str] = set()
+    uncertain: list[str] = []
+    for _, value in candidates:
+        keys = _stem_keys(_entry_words(value))
+        overlap = max((len(keys & seen) / len(keys) for seen in existing_keys if keys), default=0.0)
+        if overlap >= 0.7:
+            duplicates.add(value)
+        elif overlap >= 0.15:
+            uncertain.append(value)
+    if judge is not None and uncertain:
+        judged = await _judge_duplicates(judge, existing_entries, uncertain, config)
+        if judged is not None:
+            duplicates |= judged
     deduped: dict[ChangelogCategory, list[str]] = {}
-    for category, values in entries.items():
-        fresh = [value for value in values if not is_duplicate(value)]
-        if fresh:
-            deduped[category] = fresh
+    for category, value in candidates:
+        if value not in duplicates:
+            deduped.setdefault(category, []).append(value)
     return deduped
+
+
+async def _judge_duplicates(
+    judge: Judge, existing_entries: Sequence[str], candidates: Sequence[str], config: CommitConfig
+) -> set[str] | None:
+    """Candidates judged to restate an existing entry, or None when the judgment failed."""
+    keys = {f"C{index}": value for index, value in enumerate(candidates, start=1)}
+    request = JudgmentRequest(
+        {
+            "existing_entries": "\n".join(existing_entries),
+            "candidates": "\n".join(f"{key}: {value}" for key, value in keys.items()),
+        },
+        {
+            key: Noul(
+                f"Does candidate {key} restate a change already covered by one of the existing entries, "
+                "rather than describing a distinct change?",
+                yes=_DUPLICATE_YES,
+                no=_DUPLICATE_NO,
+            )
+            for key in keys
+        },
+    )
+    (answers,) = await judge.judge_all("changelog-duplicate", [request])
+    if answers is None:
+        return None
+    threshold = float(config.changelog_duplicate_threshold)
+    return {
+        keys[key]
+        for key, answer in answers.items()
+        if isinstance(answer, NoulAnswer) and answer.probability >= threshold
+    }
 
 
 _ENTRY_STOPWORDS = frozenset(
     "the and for was were now not that this with from are has had have been its when then than into also".split()
 )
+_BOILERPLATE_WORDS = frozenset(
+    "added add fixed fix changed change removed remove updated update improved improve support new".split()
+)
+
+
+def _stem_keys(words: set[str]) -> set[str]:
+    """Four-letter stems of an entry's content words, minus the verbs nearly every bullet shares.
+
+    Two entries about the same change share such stems (``retry``/``retries`` both give
+    ``retr``) while the shared verbs (``added``, ``fixed``) never count as evidence.
+    """
+    return {word[:4] for word in words if word not in _BOILERPLATE_WORDS}
 
 
 def _entry_words(entry: str) -> set[str]:
@@ -998,12 +1193,14 @@ __all__ = [
     "UnreleasedSection",
     "apply_changelog_updates",
     "apply_revisions",
+    "drop_duplicate_entries",
     "detect_boundaries",
     "generate_changelog_entries",
     "generate_changelog_updates",
     "normalize_changelog_entry",
     "parse_changelog_revisions",
     "parse_unreleased_section",
+    "judge_changelog_worthiness",
     "prepare_changelog_flow",
     "run_changelog_flow",
     "stage_changelog_blob",

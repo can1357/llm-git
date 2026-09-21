@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from argparse import Namespace
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,8 +13,15 @@ from lgit.changelog import ChangelogWeaver, stage_changelog_blob
 from lgit.compose import ComposeExecutableGroup, ComposeExecutablePlan, ComposeIntentGroup
 from lgit.config import CommitConfig
 from lgit.errors import GitError, NoChanges, ValidationFailure
+from lgit.judgment import Answers, Choice, ChoiceAnswer, Judge, JudgmentRequest
+from lgit.mechanical import MECHANICAL_MARKER, HunkJudgments, HunkVerdict
 from lgit.models import Scope
-from lgit.patch import build_compose_snapshot, pin_snapshot_staged_state
+from lgit.patch import (
+    build_compose_snapshot,
+    create_executable_group_patch,
+    pin_snapshot_staged_state,
+    render_snapshot_diff,
+)
 
 _EMPTY_CHANGELOG = "# Changelog\n\n## [Unreleased]\n"
 
@@ -1076,45 +1083,46 @@ def test_changelog_weaver_skips_changelog_absent_from_target(
     assert exclude == []
 
 
-def test_execute_compose_weaves_and_revises_changelog_per_group(
+def test_execute_compose_generates_group_changelogs_concurrently_and_weaves_per_group(
     empty_repo: Path,
     run_git: Callable[..., object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Every group's entries are generated in one parallel wave (each against the round's
+    seeded chain, so none sees a sibling's new entry) and reconciled per commit: a repeat
+    of a sibling's entry is dropped at weave time, a distinct one is kept."""
     snapshot, plan, config, args, base_state, weaver = _prepare_two_group_weave(empty_repo, run_git)
-    responses = iter(
-        (
-            SimpleNamespace(
-                output={"entries": {"Added": ["Added alpha support"]}},
-                text_content="# Added\n- Added alpha support",
-            ),
-            SimpleNamespace(
-                output={"entries": {}},
-                text_content=(
-                    "<revise>\n"
-                    "OLD: - Added alpha support\n"
-                    "NEW: - Added alpha support with automatic retry\n"
-                    "</revise>\n"
-                    "<exception>consolidated earlier entry</exception>"
-                ),
-            ),
-        )
-    )
+    started: list[str] = []
+    release = asyncio.Event()
 
-    async def fake_run_oneshot(*args: object, **kwargs: object) -> SimpleNamespace:
-        return next(responses)
+    async def fake_run_oneshot(config: object, spec: object, **kwargs: object) -> SimpleNamespace:
+        user_prompt = str(getattr(spec, "user_prompt", ""))
+        group = "alpha" if "alpha = 2" in user_prompt else "beta"
+        started.append(group)
+        if len(started) == 2:
+            release.set()
+        await asyncio.wait_for(release.wait(), timeout=5)  # both requests in flight before either answers
+        assert "Added alpha support" not in user_prompt  # neither prompt saw the sibling's new entry
+        if group == "alpha":
+            return SimpleNamespace(
+                output={"entries": {"Added": ["Added alpha support"]}}, text_content="# Added\n- Added alpha support"
+            )
+        return SimpleNamespace(
+            output={"entries": {"Added": ["Added alpha support", "Added beta parsing"]}},
+            text_content="# Added\n- Added alpha support\n- Added beta parsing",
+        )
 
     monkeypatch.setattr(compose, "_prepare_group_messages", _prepared_two_group_messages)
     monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)
 
     hashes = asyncio.run(compose.execute_compose(snapshot, plan, config, args, base_state, weaver))
 
-    assert len(hashes) == 2
+    assert len(hashes) == 2 and sorted(started) == ["alpha", "beta"]
     first = run_git(empty_repo, "show", f"{hashes[0]}:CHANGELOG.md").stdout
     final = run_git(empty_repo, "show", f"{hashes[1]}:CHANGELOG.md").stdout
-    assert "- Added alpha support\n" in first
-    assert "- Added alpha support\n" not in final
-    assert final.count("- Added alpha support with automatic retry") == 1
+    assert first.count("- Added alpha support\n") == 1 and "beta" not in first
+    assert final.count("- Added alpha support\n") == 1  # the sibling's repeat was dropped at weave time
+    assert final.count("- Added beta parsing\n") == 1
     assert (empty_repo / "CHANGELOG.md").read_text(encoding="utf-8") == final
     assert run_git(empty_repo, "diff", "--cached", "--", "CHANGELOG.md").stdout == ""
 
@@ -1226,3 +1234,123 @@ def test_run_compose_mode_rejects_changelog_only_changeset(
 
     assert git.get_head_hash(empty_repo) == original_head
     assert run_git(empty_repo, "diff", "--cached", "--name-only").stdout.split() == ["CHANGELOG.md"]
+
+
+class _ChoiceJudge(Judge):
+    """Answers choice questions from a hunk-id→(choice, probability) table, recording requests."""
+
+    def __init__(self, table: dict[str, tuple[str, float]]) -> None:
+        super().__init__(base_url="https://judge.test", model="fake", api_key="k")
+        self.table = table
+        self.requests: list[JudgmentRequest] = []
+
+    async def judge_all(self, operation: str, requests: Sequence[JudgmentRequest]) -> list[Answers | None]:
+        self.requests.extend(requests)
+        out: list[Answers | None] = []
+        for request in requests:
+            answers: Answers = {}
+            for hunk_id, question in request.questions.items():
+                assert isinstance(question, Choice)
+                choice, probability = self.table[hunk_id]
+                rest = {label: (1 - probability) / max(1, len(question.criteria) - 1) for label in question.criteria}
+                rest[choice] = probability
+                answers[hunk_id] = ChoiceAnswer(choice, rest, probability)
+            out.append(answers)
+        return out
+
+
+def _two_group_plan(snapshot) -> tuple[ComposeIntentGroup, ...]:
+    file_ids = tuple(file.file_id for file in snapshot.files)
+    return (
+        ComposeIntentGroup("G1", "feat", "lib", file_ids, "renamed alpha"),
+        ComposeIntentGroup("G2", "test", None, file_ids, "asserted in test_it", dependencies=("G1",)),
+    )
+
+
+def test_bind_with_judge_assigns_confident_choices_and_falls_back_for_the_rest() -> None:
+    snapshot = _build_test_snapshot()
+    plan = _two_group_plan(snapshot)
+    judge = _ChoiceJudge({"F001-H001": ("G1", 0.95), "F001-H002": ("G2", 0.4), "F002-H001": ("G2", 0.9)})
+
+    executable = asyncio.run(compose._bind_compose_plan(snapshot, plan, CommitConfig(), None, judge))
+
+    by_group = {group.group_id: set(group.hunk_ids) for group in executable.groups}
+    # F001-H002 was below the confidence floor: deterministic fallback picks the earliest group in order.
+    assert by_group == {"G1": {"F001-H001", "F001-H002"}, "G2": {"F002-H001"}}
+    assert [request.state["path"] for request in judge.requests] == ["src/lib.rs", "tests/lib.rs"]
+    state = judge.requests[0].state
+    assert "G1: feat(lib): renamed alpha" in state["planned_commits"]
+    assert "### F001-H001" in state["diff"] and "+fn alpha_changed()" in state["diff"]
+    question = judge.requests[0].questions["F001-H001"]
+    assert isinstance(question, Choice) and set(question.criteria) == {"G1", "G2"}
+
+
+def test_bind_with_judge_ignores_choices_outside_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = _build_test_snapshot()
+    plan = _two_group_plan(snapshot)
+    judge = _ChoiceJudge({"F001-H001": ("G1", 0.9), "F001-H002": ("G1", 0.9), "F002-H001": ("G1", 0.9)})
+    monkeypatch.setattr(compose, "_request_binding", None)  # the model path must never run with a judge
+
+    executable = asyncio.run(compose._bind_compose_plan(snapshot, plan, CommitConfig(), None, judge))
+
+    assert {group.group_id for group in executable.groups} == {"G1"}
+    assert set(executable.groups[0].hunk_ids) == {"F001-H001", "F001-H002", "F002-H001"}
+
+
+def test_render_snapshot_summary_hides_mechanical_hunks_with_a_note() -> None:
+    snapshot = _build_test_snapshot()
+    judgments = HunkJudgments(frozenset({"F001-H002", "F002-H001"}), {"F001-H001": "feat"})
+    summary = compose._render_snapshot_summary(snapshot, [], judgments)
+
+    assert "- F001-H001 [feat] old:" in summary
+    assert "F001-H002" not in summary
+    assert "... 1 mechanical follow-through hunks not listed" in summary
+    assert "all 1 hunks are mechanical follow-through" in summary
+
+
+def test_group_patch_analysis_diff_prunes_mechanical_but_stageable_diff_is_intact() -> None:
+    snapshot = _build_test_snapshot()
+    group = ComposeExecutableGroup(
+        group_id="G1",
+        commit_type="feat",
+        scope=None,
+        file_ids=("F001",),
+        hunk_ids=("F001-H001", "F001-H002"),
+        rationale="renamed",
+    )
+    judgments = HunkJudgments(frozenset({"F001-H002"}), {"F001-H001": "refactor"})
+    patch = create_executable_group_patch(snapshot, group, judgments)
+
+    assert "+fn beta_changed()" in patch.diff and "[judged:" not in patch.diff
+    assert "+fn beta_changed()" not in patch.analysis_diff
+    assert "@@ -1,3 +1,3 @@ [judged: refactor]\n-fn alpha() {" in patch.analysis_diff
+    assert MECHANICAL_MARKER in patch.analysis_diff
+    assert create_executable_group_patch(snapshot, group).analysis_diff == patch.diff
+
+
+def test_classify_hunks_applies_thresholds_and_all_mechanical_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = _build_test_snapshot()
+    config = CommitConfig(judgment_api_key="k", mechanical_prune_min_tokens=0)
+    judge = Judge(base_url="https://judge.test", model="fake", api_key="k")
+
+    async def all_mechanical(_judge, refs, _config):
+        return {ref.key: HunkVerdict(0.99, "refactor", 0.9) for _, hunks in refs for ref in hunks}
+
+    async def mixed(_judge, refs, _config):
+        return {
+            "F001-H001": HunkVerdict(0.99, "refactor", 0.9),
+            "F001-H002": HunkVerdict(0.1, "feat", 0.95),
+            "F002-H001": HunkVerdict(0.5, "test", 0.4),
+        }
+
+    monkeypatch.setattr(compose, "judge_hunks", all_mechanical)
+    assert asyncio.run(compose.classify_hunks(snapshot, judge, config)).mechanical == frozenset()
+    monkeypatch.setattr(compose, "judge_hunks", mixed)
+    judgments = asyncio.run(compose.classify_hunks(snapshot, judge, config))
+    # Mechanical hunks carry no kind hint; low-confidence kinds are dropped.
+    assert judgments == HunkJudgments(frozenset({"F001-H001"}), {"F001-H002": "feat"})
+    assert not asyncio.run(compose.classify_hunks(snapshot, None, config))
+    assert render_snapshot_diff(snapshot, HunkJudgments.EMPTY) == snapshot.diff
+    pruned = render_snapshot_diff(snapshot, judgments)
+    assert "+fn alpha_changed()" not in pruned
+    assert "@@ -12,3 +12,3 @@ [judged: feat]\n-fn beta() {" in pruned

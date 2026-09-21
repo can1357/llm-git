@@ -12,6 +12,8 @@ For each `<file>` in `<files>`:
 5. Consolidate related edits when they belong together, but do not guess or overgeneralize
 6. Note user-visible behavior changes (new capabilities, changed defaults, fixes, removals) explicitly and factually
 7. Do not mention commit type, scope, changelog, or any reduce-phase classification
+8. Hunks shown as `[mechanical after-effect omitted: ...]` are follow-through edits (imports, call sites, formatting); do not report them, and emit a bare header for a file that has nothing else
+9. A hunk header ending in `[judged: <type>]` is a per-hunk type hint; use it to prioritise what to observe, never as an observation itself
 </instructions>
 
 <scope>

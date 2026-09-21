@@ -41,6 +41,8 @@ Highest-signal 0-6 only. Each:
 
 3+ similar changes → one detail. Exclude: import changes, whitespace, formatting, trivial renames, debug prints, comment-only changes, file moves without meaningful modification.
 
+Hunks shown as `[mechanical after-effect omitted: ...]` were already judged to be follow-through edits (imports, call sites, exports, formatting, generated output). Count their files for type and scope; never describe them. A hunk header ending in `[judged: <type>]` carries a per-hunk type hint from a cheap classifier: a useful prior for the commit type and for which hunks matter, but the diff itself decides.
+
 ## 4. Changelog Metadata (user-visible only)
 
 - New public API, feature, capability → Added

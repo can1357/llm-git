@@ -52,11 +52,17 @@ def lgit_run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect HOME so tests never read or write real ``~/.llm-git`` prompts or git config."""
+    """Redirect HOME so tests never read or write real ``~/.llm-git`` prompts or git config.
+
+    Also disables judgments (and drops any ambient TypeSafe key) so no test — in
+    process or via :func:`lgit_run` — reaches the live judgment API.
+    """
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LLM_GIT_JUDGMENT_DISABLED", "1")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     return home
 
 

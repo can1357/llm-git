@@ -157,6 +157,19 @@ auto_fast_threshold_lines = 200           # Auto-use fast mode for small diffs; 
 map_reduce_enabled = true                 # Parallel analysis for large commits
 disable_git_background_features = true    # Disables fsmonitor/untrackedCache for lgit subprocesses
 
+# Typed judgments (TypeSafe jev, ~$0.04 per million input tokens, ~1s per round trip).
+# With a key: mechanical follow-through hunks (imports, call sites, formatting, lockfiles)
+# are pruned from analysis prompts and the rest get a per-hunk type hint; compose binds
+# hunks to groups by judgment instead of the analysis model; changelog generation is
+# skipped for changes judged not user-visible and paraphrased duplicate entries are
+# dropped. Without a key every flow behaves as before.
+judgment_api_key = ""                     # Or TYPESAFE_API_KEY env var; `!cmd` runs a command
+judgment_model = "jev-latest"
+mechanical_hunk_threshold = 0.7           # Prune hunks judged mechanical with >= this probability
+mechanical_prune_min_tokens = 5000        # Skip pruning below this diff size (round trip not worth it)
+mechanical_prune_min_model_rate = 1.0     # ...and unless the analysis model bills >= this $/M (judging costs ~$0.08/M of diff)
+changelog_gate_threshold = 0.3            # Skip the changelog model below this user-visibility; 0 disables
+
 # Commit signing
 gpg_sign = false                          # GPG sign commits by default (-S)
 signoff = false                           # Add Signed-off-by trailer by default (-s)
@@ -185,6 +198,12 @@ api_key = "sk-..."
 analysis_model = "gpt-4o"
 summary_model = "gpt-4o-mini"
 ```
+
+**Judgments (optional, any provider above):**
+```toml
+judgment_api_key = "!cat ~/.secrets/typesafe"   # key from https://console.typesafe.ai/
+```
+Set `LLM_GIT_JUDGMENT_DISABLED=1` to switch judgments off without removing the key.
 
 The client asks all providers for markdown/plain-text responses and parses the same response format across OpenRouter, LiteLLM, Anthropic, and OpenAI endpoints.
 

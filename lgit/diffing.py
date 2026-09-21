@@ -295,6 +295,48 @@ def parse_diff(diff: str) -> list[FileDiff]:
     return file_diffs
 
 
+@dataclass(frozen=True, slots=True)
+class Hunk:
+    """One ``@@`` hunk of a file section: its header line and the body lines after it."""
+
+    header: str
+    body: str
+    additions: int
+    deletions: int
+
+    @property
+    def text(self) -> str:
+        """The hunk as it appears in the diff (header plus body, no trailing newline)."""
+        return f"{self.header}\n{self.body}" if self.body else self.header
+
+
+def split_hunks(content: str) -> list[Hunk]:
+    """Split a :attr:`FileDiff.content` section into its hunks; lines before the first ``@@`` are dropped."""
+    hunks: list[Hunk] = []
+    header: str | None = None
+    body: list[str] = []
+    additions = deletions = 0
+
+    def flush() -> None:
+        if header is not None:
+            hunks.append(Hunk(header, "\n".join(body), additions, deletions))
+
+    for line in content.splitlines():
+        if line.startswith("@@"):
+            flush()
+            header, body, additions, deletions = line, [], 0, 0
+            continue
+        if header is None:
+            continue
+        body.append(line)
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    flush()
+    return hunks
+
+
 def reconstruct_diff(files: list[FileDiff] | tuple[FileDiff, ...]) -> str:
     """Reconstruct a unified diff from parsed file objects."""
 

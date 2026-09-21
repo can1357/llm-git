@@ -37,8 +37,10 @@ from .diffing import (
     truncate_diff_by_lines,
 )
 from .errors import LgitError, NoChanges, ValidationFailure
+from .judgment import Judge
 from .map_reduce import FileObservation, should_use_map_reduce
 from .markdown_output import fallback_summary
+from .mechanical import prune_mechanical_hunks
 from .models import ConventionalAnalysis, ConventionalCommit, Mode, format_model_chain, resolve_model_name
 from .normalization import post_process_commit_message
 from .tokens import create_token_counter
@@ -541,6 +543,7 @@ async def _generate_fast_workflow(
     with profile.section("strip_whitespace_only", collector):
         diff = strip_whitespace_only_files(diff) or diff
         diff = scrub_diff_for_prompt(diff)
+    diff = await _prune_mechanical(diff, config, collector)
     with profile.section("truncate_diff_by_lines", collector):
         diff = truncate_diff_by_lines(diff, 10_000, config)
     with profile.section("extract_scope_candidates", collector):
@@ -571,6 +574,7 @@ async def _generate_standard_workflow(
     with profile.section("strip_whitespace_only", collector):
         diff = strip_whitespace_only_files(diff) or diff
         diff = scrub_diff_for_prompt(diff)
+    diff = await _prune_mechanical(diff, config, collector)
     with profile.section("extract_scope_candidates", collector):
         scope_candidates, _wide = (
             extract_scope_candidates(numstat, args.target, args.dir, config) if numstat.strip() else ("(none)", False)
@@ -611,6 +615,17 @@ async def _generate_standard_workflow(
         config, stat, analysis_diff, scope_candidates, user_context, args, collector, on_observations
     )
     return await _message_from_analysis(analysis, config, stat, user_context, args, collector)
+
+
+async def _prune_mechanical(diff: str, config: CommitConfig, collector: profile.TimingCollector | None) -> str:
+    """Drop judged-mechanical hunks from the prompt-bound diff, reporting what was pruned."""
+    async with profile.section("prune_mechanical_hunks", collector):
+        pruned = await prune_mechanical_hunks(diff, Judge.from_config(config), config)
+    if pruned.pruned:
+        style.status(
+            f"{style.dim('›')} {style.dim(f'Pruned {pruned.omitted_hunks}/{pruned.total_hunks} mechanical hunks ({pruned.omitted_lines} lines) from the analysis diff')}"
+        )
+    return pruned.diff
 
 
 async def _generate_fast_message(

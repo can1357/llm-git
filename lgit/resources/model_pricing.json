@@ -11,6 +11,7 @@
     { "match": "glm-4.7-flash", "input": 0.07, "output": 0.4 },
     { "match": "glm-4.7", "input": 0.6, "output": 2.2 },
     { "match": "glm-4.6", "input": 0.6, "output": 2.2 },
-    { "match": "glm-4.5-air", "input": 0.2, "output": 1.1 }
+    { "match": "glm-4.5-air", "input": 0.2, "output": 1.1 },
+    { "match": "jev", "input": 0.042, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0 }
   ]
 }

@@ -15,8 +15,18 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from . import api, diffing, git, map_reduce, style, templates, tokens
-from .changelog import ChangelogWeaver
+from .changelog import ChangelogWeaver, GroupEntries
 from .errors import GitError, NoChanges, ValidationFailure
+from .judgment import (
+    JUDGMENT_STATE_CHAR_BUDGET,
+    Choice,
+    ChoiceAnswer,
+    Judge,
+    JudgmentRequest,
+    chunk_by_chars,
+    clip_text,
+)
+from .mechanical import HunkJudgments, HunkRef, judge_hunks, should_prune
 from .models import (
     CommitSummary,
     CommitType,
@@ -31,6 +41,7 @@ from .patch import (
     create_executable_group_patch,
     force_stage_file_from_base_in_index,
     pin_snapshot_staged_state,
+    render_snapshot_diff,
     stage_executable_group_in_index,
 )
 from .validation import validate_commit_message
@@ -73,6 +84,9 @@ COMPOSE_MONOLITH_FALLBACK_WORKSTREAM_THRESHOLD = 3
 COMPOSE_GRAB_BAG_WORKSTREAM_THRESHOLD = 5
 MAX_BIND_FILES_PER_REQUEST = 18
 MAX_BIND_HUNKS_PER_REQUEST = 120
+# A judged hunk→group choice below this probability is left to the deterministic
+# fallback (earliest candidate group in dependency order) instead of trusted.
+COMPOSE_BIND_CONFIDENCE_FLOOR = 0.5
 _DEPENDENCY_MANIFESTS = {
     "Cargo.toml",
     "Cargo.lock",
@@ -354,8 +368,19 @@ async def run_compose_round(
     _save_debug_artifact(args, f"compose_round_{round_number}_snapshot.json", _snapshot_to_jsonable(snapshot))
 
     token_counter = _create_token_counter(config)
+    judge = Judge.from_config(config)
+    judgments = await classify_hunks(snapshot, judge, config)
+    if judgments:
+        _save_debug_artifact(
+            args,
+            f"compose_round_{round_number}_hunk_judgments.json",
+            {"mechanical": sorted(judgments.mechanical), "kinds": dict(judgments.kinds)},
+        )
+        style.status(
+            f"{style.dim('›')} {style.dim(f'{len(judgments.mechanical)}/{len(snapshot.hunks)} hunks judged mechanical follow-through')}"
+        )
     observations = []
-    planning_diff = diffing.scrub_diff_for_prompt(snapshot.diff)
+    planning_diff = diffing.scrub_diff_for_prompt(render_snapshot_diff(snapshot, judgments))
     if not _is_large_compose_snapshot(snapshot) and _should_use_map_reduce(planning_diff, config, token_counter):
         observations = await map_reduce.observe_diff_files(
             planning_diff, config.effective_map_model, config, token_counter
@@ -371,7 +396,15 @@ async def run_compose_round(
     model = config.analysis_model
     plan = _load_cached_plan(repo_dir, snapshot, max_commits, model)
     if plan is None:
-        plan = await plan_compose_snapshot(snapshot, config, args, max_commits=max_commits, observations=observations)
+        plan = await plan_compose_snapshot(
+            snapshot,
+            config,
+            args,
+            max_commits=max_commits,
+            observations=observations,
+            judgments=judgments,
+            judge=judge,
+        )
         _save_cached_plan(repo_dir, snapshot, max_commits, model, plan)
     _save_debug_artifact(args, f"compose_round_{round_number}_executable_plan.json", _plan_to_jsonable(plan))
 
@@ -381,7 +414,29 @@ async def run_compose_round(
         preview_message = f"{style.icons.SUCCESS} Preview complete (use --compose without --compose-preview to execute)"
         print(f"\n{style.success(preview_message)}")
         return []
-    return await execute_compose(snapshot, plan, config, args, base_state, weaver)
+    return await execute_compose(snapshot, plan, config, args, base_state, weaver, judgments)
+
+
+async def classify_hunks(snapshot: ComposeSnapshot, judge: Judge | None, config: CommitConfig) -> HunkJudgments:
+    """Judge the snapshot's hunks (mechanical + kind); empty without a judge, below the size floor, or all mechanical.
+
+    Judged once per round: the same verdicts prune the observe-phase diff, hide
+    follow-through hunks from the planner (and tag the rest), and shape each
+    group's analysis diff.
+    """
+    if judge is None or not should_prune(snapshot.diff, config):
+        return HunkJudgments.EMPTY
+    refs = [
+        (file.path, [HunkRef(hunk.hunk_id, hunk.raw_patch.rstrip("\n")) for hunk in hunks])
+        for file in snapshot.files
+        if not file.is_binary and not file.synthetic_only
+        for hunks in [snapshot.hunks_for_file(file.file_id)]
+    ]
+    total = sum(len(hunks) for _, hunks in refs)
+    if total < 2:
+        return HunkJudgments.EMPTY
+    verdicts = await judge_hunks(judge, refs, config)
+    return HunkJudgments.from_verdicts(verdicts, total, float(config.mechanical_hunk_threshold))
 
 
 async def plan_compose_snapshot(
@@ -391,12 +446,14 @@ async def plan_compose_snapshot(
     *,
     max_commits: int = 20,
     observations: Sequence[Any] = (),
+    judgments: HunkJudgments = HunkJudgments.EMPTY,
+    judge: Judge | None = None,
 ) -> ComposeExecutablePlan:
     """Build or request an executable compose plan for a pinned snapshot."""
     debug_dir = args.debug_output if args is not None else None
-    intent_plan = await _analyze_compose_intent(snapshot, observations, config, max_commits, debug_dir)
+    intent_plan = await _analyze_compose_intent(snapshot, observations, config, max_commits, debug_dir, judgments)
     _save_debug_artifact(args, "compose_intent_plan.json", _intent_plan_to_jsonable(intent_plan))
-    return await _bind_compose_plan(snapshot, intent_plan, config, debug_dir)
+    return await _bind_compose_plan(snapshot, intent_plan, config, debug_dir, judge)
 
 
 async def execute_compose(
@@ -406,6 +463,7 @@ async def execute_compose(
     args: _ComposeArgs,
     base_state: ComposeBaseState,
     weaver: ChangelogWeaver | None = None,
+    judgments: HunkJudgments = HunkJudgments.EMPTY,
 ) -> list[str]:
     """Create compose commits from a temp index, then checked-update the real ref."""
     if args.compose_preview:
@@ -413,13 +471,28 @@ async def execute_compose(
 
     repo_dir = args.dir
     ordered_groups = [plan.groups[idx] for idx in plan.dependency_order]
-    group_patches = [create_executable_group_patch(snapshot, group) for group in ordered_groups]
-    prepared_messages = await _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args)
-
+    group_patches = [create_executable_group_patch(snapshot, group, judgments) for group in ordered_groups]
+    group_paths = [
+        [file.path for file_id in group.file_ids for file in [snapshot.file_by_id(file_id)] if file is not None]
+        for group in ordered_groups
+    ]
     with git.TempGitIndex(repo_dir) as index:
         git.read_tree_into_index(index.path, base_state.head_hash, repo_dir)
+        # Changelog entries for every group are generated in the same parallel wave as the
+        # messages (against the chain state seeded for this round); the commit loop only
+        # reconciles them against the chain as it accumulates.
+        generated_entries: list[GroupEntries] = [{} for _ in group_patches]
         if weaver:
             weaver.seed_temp_index(repo_dir, index.path)
+            prepared_messages, generated_entries = await asyncio.gather(
+                _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args),
+                weaver.generate_groups(
+                    [(paths, patch.diff, patch.stat) for paths, patch in zip(group_paths, group_patches, strict=True)],
+                    repo_dir,
+                ),
+            )
+        else:
+            prepared_messages = await _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args)
         parent_hash = base_state.head_hash
         commit_hashes: list[str] = []
         for position, group in enumerate(ordered_groups):
@@ -436,13 +509,9 @@ async def execute_compose(
                 continue
             if weaver:
                 patch = group_patches[position]
-                group_paths = [
-                    file.path
-                    for file_id in group.file_ids
-                    for file in [snapshot.file_by_id(file_id)]
-                    if file is not None
-                ]
-                await weaver.weave_group(group_paths, patch.diff, patch.stat, repo_dir, index.path)
+                await weaver.weave_group(
+                    group_paths[position], patch.diff, patch.stat, repo_dir, index.path, generated_entries[position]
+                )
             message = prepared_messages[position]
             tree = git.write_index_tree(index.path, repo_dir)
             sign = bool(args.sign or config.gpg_sign)
@@ -481,13 +550,14 @@ async def _analyze_compose_intent(
     config: CommitConfig,
     max_commits: int,
     debug_dir: str | os.PathLike[str] | None,
+    judgments: HunkJudgments = HunkJudgments.EMPTY,
 ) -> tuple[ComposeIntentGroup, ...]:
     planning_index = _build_planning_index(snapshot)
     types_description = api.format_types_description(config)
     parts = templates.render_compose_intent_prompt(
         max_commits=max_commits,
         stat=_render_planning_stat(planning_index),
-        snapshot_summary=_render_planning_snapshot_summary(snapshot, observations, planning_index),
+        snapshot_summary=_render_planning_snapshot_summary(snapshot, observations, planning_index, judgments),
         planning_targets=_render_planning_targets(planning_index, snapshot),
         planning_notes=_render_planning_notes(planning_index),
         split_bias=_render_split_bias(planning_index),
@@ -525,39 +595,118 @@ async def _bind_compose_plan(
     intent_plan: Sequence[ComposeIntentGroup],
     config: CommitConfig,
     debug_dir: str | os.PathLike[str] | None,
+    judge: Judge | None = None,
 ) -> ComposeExecutablePlan:
     assigned_by_group, ambiguous_files = _auto_assign_hunks(snapshot, intent_plan)
     unresolved: list[str] = []
     if ambiguous_files:
-        for batch_idx, batch in enumerate(_chunk_ambiguous_files(ambiguous_files), start=1):
-            debug_name = "compose_bind" if len(ambiguous_files) == len(batch) else f"compose_bind_{batch_idx:03d}"
-            assignments = await _request_binding(snapshot, intent_plan, batch, config, debug_dir, debug_name)
-            evaluation = _evaluate_binding(
-                assignments, _ambiguous_hunk_context(batch), {group.group_id for group in intent_plan}, snapshot
+        if judge is not None:
+            unresolved = await _bind_with_judge(snapshot, intent_plan, ambiguous_files, judge, assigned_by_group)
+        else:
+            unresolved = await _bind_with_model(
+                snapshot, intent_plan, ambiguous_files, config, debug_dir, assigned_by_group
             )
-            for group_id, hunk_ids in evaluation.assigned.items():
-                assigned_by_group[group_id].update(hunk_ids)
-            unresolved.extend(evaluation.unresolved)
     if unresolved:
         group_rank = {
             intent_plan[idx].group_id: position for position, idx in enumerate(compute_dependency_order(intent_plan))
         }
-        repair_batches = _chunk_ambiguous_files(_filter_ambiguous_files(ambiguous_files, unresolved))
-        repair_unresolved: list[str] = []
-        for batch_idx, batch in enumerate(repair_batches, start=1):
-            debug_name = "compose_bind_repair" if len(repair_batches) == 1 else f"compose_bind_repair_{batch_idx:03d}"
-            assignments = await _request_binding(snapshot, intent_plan, batch, config, debug_dir, debug_name)
-            repair = _evaluate_binding(
-                assignments, _ambiguous_hunk_context(batch), {group.group_id for group in intent_plan}, snapshot
-            )
-            for group_id, hunk_ids in repair.assigned.items():
-                assigned_by_group[group_id].update(hunk_ids)
-            repair_unresolved.extend(repair.unresolved)
-        if repair_unresolved:
-            _assign_unresolved_hunks(repair_unresolved, assigned_by_group, ambiguous_files, group_rank)
+        _assign_unresolved_hunks(unresolved, assigned_by_group, ambiguous_files, group_rank)
     plan = _finalize_executable_plan(snapshot, intent_plan, assigned_by_group)
     _validate_executable_plan(snapshot, plan)
     return plan
+
+
+async def _bind_with_model(
+    snapshot: ComposeSnapshot,
+    intent_plan: Sequence[ComposeIntentGroup],
+    ambiguous_files: Sequence[Mapping[str, Any]],
+    config: CommitConfig,
+    debug_dir: str | os.PathLike[str] | None,
+    assigned_by_group: dict[str, set[str]],
+) -> list[str]:
+    """Bind ambiguous hunks with the analysis model in batches, retrying leftovers once; returns still-unbound ids."""
+    valid_group_ids = {group.group_id for group in intent_plan}
+
+    async def bind_batches(files: Sequence[Mapping[str, Any]], prefix: str) -> list[str]:
+        leftover: list[str] = []
+        batches = _chunk_ambiguous_files(files)
+        for batch_idx, batch in enumerate(batches, start=1):
+            debug_name = prefix if len(batches) == 1 else f"{prefix}_{batch_idx:03d}"
+            assignments = await _request_binding(snapshot, intent_plan, batch, config, debug_dir, debug_name)
+            evaluation = _evaluate_binding(assignments, _ambiguous_hunk_context(batch), valid_group_ids, snapshot)
+            for group_id, hunk_ids in evaluation.assigned.items():
+                assigned_by_group[group_id].update(hunk_ids)
+            leftover.extend(evaluation.unresolved)
+        return leftover
+
+    unresolved = await bind_batches(ambiguous_files, "compose_bind")
+    if unresolved:
+        unresolved = await bind_batches(_filter_ambiguous_files(ambiguous_files, unresolved), "compose_bind_repair")
+    return unresolved
+
+
+async def _bind_with_judge(
+    snapshot: ComposeSnapshot,
+    intent_plan: Sequence[ComposeIntentGroup],
+    ambiguous_files: Sequence[Mapping[str, Any]],
+    judge: Judge,
+    assigned_by_group: dict[str, set[str]],
+) -> list[str]:
+    """Bind every ambiguous hunk with one judged choice among its file's candidate groups.
+
+    All files are judged concurrently; a choice below
+    :data:`COMPOSE_BIND_CONFIDENCE_FLOOR` (or a failed request) is returned as
+    unresolved for the deterministic fallback. Judgments are deterministic, so
+    there is no repair round.
+    """
+    groups_by_id = {group.group_id: group for group in intent_plan}
+    requests: list[JudgmentRequest] = []
+    for item in ambiguous_files:
+        candidates = [group_id for group_id in item["candidate_group_ids"] if group_id in groups_by_id]
+        hunks = [hunk for hunk_id in item["hunk_ids"] if (hunk := snapshot.hunk_by_id(hunk_id)) is not None]
+        if len(candidates) < 2 or not hunks:
+            continue
+        criteria = {group_id: _binding_criterion(groups_by_id[group_id]) for group_id in candidates}
+        for chunk in chunk_by_chars(hunks, lambda hunk: len(clip_text(hunk.raw_patch)), JUDGMENT_STATE_CHAR_BUDGET):
+            state = {
+                "path": item["path"],
+                "planned_commits": "\n".join(f"{group_id}: {text}" for group_id, text in criteria.items()),
+                "diff": "\n".join(
+                    f"### {hunk.hunk_id}\n{clip_text(hunk.raw_patch.rstrip('\n')) or hunk.snippet}" for hunk in chunk
+                ),
+            }
+            questions = {
+                hunk.hunk_id: Choice(
+                    f"Which planned commit does hunk {hunk.hunk_id} belong to? Mechanical follow-through "
+                    "(imports, exports, call sites, fixtures) belongs with the commit that caused it.",
+                    criteria,
+                )
+                for hunk in chunk
+            }
+            requests.append(JudgmentRequest(state, questions))
+    assignments: dict[str, list[str]] = defaultdict(list)
+    for answers in await judge.judge_all("compose-bind", requests):
+        if answers is None:
+            continue
+        for hunk_id, answer in answers.items():
+            if not isinstance(answer, ChoiceAnswer):
+                continue
+            if answer.probabilities.get(answer.choice, 0.0) >= COMPOSE_BIND_CONFIDENCE_FLOOR:
+                assignments[answer.choice].append(hunk_id)
+    evaluation = _evaluate_binding(
+        [{"group_id": group_id, "hunk_ids": hunk_ids} for group_id, hunk_ids in assignments.items()],
+        _ambiguous_hunk_context(ambiguous_files),
+        set(groups_by_id),
+        snapshot,
+    )
+    for group_id, hunk_ids in evaluation.assigned.items():
+        assigned_by_group[group_id].update(hunk_ids)
+    return evaluation.unresolved
+
+
+def _binding_criterion(group: ComposeIntentGroup) -> str:
+    scope = f"({group.scope})" if group.scope else ""
+    return f"{group.commit_type}{scope}: {group.rationale}"
 
 
 def _fallback_intent_groups(
@@ -695,10 +844,31 @@ def _sample_positions(count: int, max_samples: int) -> list[int]:
     return out
 
 
-def _sampled_hunk_ids_for_summary(file: Any, budget: SnapshotSummaryBudget) -> list[str]:
+def _sampled_hunk_ids_for_summary(file: Any, budget: SnapshotSummaryBudget, judgments: HunkJudgments) -> list[str]:
+    candidates = [hunk_id for hunk_id in file.hunk_ids if hunk_id not in judgments.mechanical]
     if budget.max_hunks_per_file is None:
-        return list(file.hunk_ids)
-    return [file.hunk_ids[idx] for idx in _sample_positions(len(file.hunk_ids), budget.max_hunks_per_file)]
+        return candidates
+    return [candidates[idx] for idx in _sample_positions(len(candidates), budget.max_hunks_per_file)]
+
+
+def _render_hunk_line(hunk: Any, judgments: HunkJudgments) -> str:
+    kind = judgments.kinds.get(hunk.hunk_id)
+    hint = f" [{kind}]" if kind else ""
+    if hunk.synthetic:
+        return f"  - {hunk.hunk_id}{hint} :: {hunk.snippet}"
+    return (
+        f"  - {hunk.hunk_id}{hint} old:{_format_line_range(hunk.old_start, hunk.old_count)} "
+        f"new:{_format_line_range(hunk.new_start, hunk.new_count)} :: {hunk.snippet}"
+    )
+
+
+def _mechanical_note(hunk_ids: Sequence[str], judgments: HunkJudgments) -> str | None:
+    count = sum(1 for hunk_id in hunk_ids if hunk_id in judgments.mechanical)
+    if count == 0:
+        return None
+    if count == len(hunk_ids):
+        return f"  all {count} hunks are mechanical follow-through (imports, call sites, formatting); group with their cause"
+    return f"  ... {count} mechanical follow-through hunks not listed"
 
 
 def _format_line_range(start: int, count: int) -> str:
@@ -709,7 +879,9 @@ def _format_line_range(start: int, count: int) -> str:
     return f"{start}-{start + count - 1}"
 
 
-def _render_snapshot_summary(snapshot: ComposeSnapshot, observations: Sequence[Any]) -> str:
+def _render_snapshot_summary(
+    snapshot: ComposeSnapshot, observations: Sequence[Any], judgments: HunkJudgments = HunkJudgments.EMPTY
+) -> str:
     budget = _snapshot_summary_budget(snapshot)
     observations_by_file = {
         str(getattr(item, "file", "")): list(getattr(item, "observations", ()))[: budget.max_observations_per_file]
@@ -724,18 +896,14 @@ def _render_snapshot_summary(snapshot: ComposeSnapshot, observations: Sequence[A
         out.append(f"- {file.file_id} {file.summary}")
         for observation in observations_by_file.get(file.path, ()):
             out.append(f"  observation: {observation}")
-        rendered = _sampled_hunk_ids_for_summary(file, budget)
+        rendered = _sampled_hunk_ids_for_summary(file, budget, judgments)
         for hunk_id in rendered:
             hunk = snapshot.hunk_by_id(hunk_id)
-            if hunk is None:
-                continue
-            if hunk.synthetic:
-                out.append(f"  - {hunk.hunk_id} :: {hunk.snippet}")
-            else:
-                out.append(
-                    f"  - {hunk.hunk_id} old:{_format_line_range(hunk.old_start, hunk.old_count)} new:{_format_line_range(hunk.new_start, hunk.new_count)} :: {hunk.snippet}"
-                )
-        omitted = len(file.hunk_ids) - len(rendered)
+            if hunk is not None:
+                out.append(_render_hunk_line(hunk, judgments))
+        if note := _mechanical_note(file.hunk_ids, judgments):
+            out.append(note)
+        omitted = sum(1 for hunk_id in file.hunk_ids if hunk_id not in judgments.mechanical) - len(rendered)
         if omitted > 0:
             out.append(f"  ... {omitted} more hunks omitted from {file.file_id}")
     return "\n".join(out)
@@ -866,10 +1034,13 @@ def _render_planning_stat(index: PlanningIndex) -> str:
 
 
 def _render_planning_snapshot_summary(
-    snapshot: ComposeSnapshot, observations: Sequence[Any], index: PlanningIndex
+    snapshot: ComposeSnapshot,
+    observations: Sequence[Any],
+    index: PlanningIndex,
+    judgments: HunkJudgments = HunkJudgments.EMPTY,
 ) -> str:
     if index.mode is PlanningMode.FILE:
-        return _render_snapshot_summary(snapshot, observations)
+        return _render_snapshot_summary(snapshot, observations, judgments)
     observations_by_file = {
         str(getattr(item, "file", "")): list(getattr(item, "observations", ()))[:1] for item in observations
     }
@@ -900,16 +1071,19 @@ def _render_planning_snapshot_summary(
                     break
             if rendered_obs >= 2:
                 break
-        for hunk_id in _sample_hunk_ids_for_target(target, snapshot):
+        for hunk_id in _sample_hunk_ids_for_target(target, snapshot, judgments):
             hunk = snapshot.hunk_by_id(hunk_id)
-            if hunk is None:
-                continue
-            if hunk.synthetic:
-                out.append(f"  - {hunk.hunk_id} :: {hunk.snippet}")
-            else:
-                out.append(
-                    f"  - {hunk.hunk_id} old:{_format_line_range(hunk.old_start, hunk.old_count)} new:{_format_line_range(hunk.new_start, hunk.new_count)} :: {hunk.snippet}"
-                )
+            if hunk is not None:
+                out.append(_render_hunk_line(hunk, judgments))
+        target_hunk_ids = [
+            hunk_id
+            for file_id in target.file_ids
+            for file in [snapshot.file_by_id(file_id)]
+            if file is not None
+            for hunk_id in file.hunk_ids
+        ]
+        if note := _mechanical_note(target_hunk_ids, judgments):
+            out.append(note)
     return "\n".join(out)
 
 
@@ -917,13 +1091,16 @@ def _sample_file_ids_for_target(target: PlanningTarget) -> list[str]:
     return [target.file_ids[idx] for idx in _sample_positions(len(target.file_ids), 4)]
 
 
-def _sample_hunk_ids_for_target(target: PlanningTarget, snapshot: ComposeSnapshot) -> list[str]:
+def _sample_hunk_ids_for_target(
+    target: PlanningTarget, snapshot: ComposeSnapshot, judgments: HunkJudgments = HunkJudgments.EMPTY
+) -> list[str]:
     hunk_ids = [
         hunk_id
         for file_id in target.file_ids
         for file in [snapshot.file_by_id(file_id)]
         if file is not None
         for hunk_id in file.hunk_ids
+        if hunk_id not in judgments.mechanical
     ]
     return [hunk_ids[idx] for idx in _sample_positions(len(hunk_ids), 4)]
 
@@ -1826,7 +2003,14 @@ async def _prepare_group_messages(
     async def prepare(idx: int, group: ComposeExecutableGroup, patch: Any) -> str:
         async with semaphore:
             return await _generate_group_message(
-                snapshot, group, patch.stat, patch.diff, config, args, counter, f"compose-{idx + 1}"
+                snapshot,
+                group,
+                patch.stat,
+                patch.analysis_diff or patch.diff,
+                config,
+                args,
+                counter,
+                f"compose-{idx + 1}",
             )
 
     return list(

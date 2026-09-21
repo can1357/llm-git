@@ -26,6 +26,8 @@ DEFAULT_API_BASE_URL = "http://localhost:4000"
 DEFAULT_ANALYSIS_MODEL = "claude-opus-4.8"
 DEFAULT_SUMMARY_MODEL = "claude-haiku-4-5"
 DEFAULT_CONFIG_SUBPATH = Path(".config/llm-git/config.toml")
+DEFAULT_JUDGMENT_BASE_URL = "https://api.typesafe.ai"
+DEFAULT_JUDGMENT_MODEL = "jev-latest"
 
 DEFAULT_EXCLUDED_FILES = [
     "Cargo.lock",
@@ -117,6 +119,41 @@ class CommitConfig:
     cache_dir: str | None = None
     # Optional directory of <family>.md prompt overrides; empty = packaged prompts only.
     prompts_dir: str = ""
+    # Typed judgments (TypeSafe jev): hunk-level mechanical-change detection and compose
+    # hunk binding. Disabled when no key is configured; `TYPESAFE_API_KEY` is the env fallback.
+    judgment_enabled: bool = True
+    judgment_api_key: str | None = None
+    judgment_base_url: str = DEFAULT_JUDGMENT_BASE_URL
+    judgment_model: str = DEFAULT_JUDGMENT_MODEL
+    # Hunks judged mechanical with at least this probability are pruned from LLM-bound diffs.
+    # Imports, re-exports, and signature pass-through score 0.75-0.9; behaviour changes score
+    # under 0.3; self-contained fixture edits land around 0.5-0.7, so 0.7 keeps them: a kept
+    # mechanical hunk only costs tokens, a pruned intent hunk costs the message.
+    mechanical_hunk_threshold: float = 0.7
+    # Diffs estimated below this many tokens skip pruning. The judgment round trip is a
+    # flat ~1s and bills ~1/6 of a flash-tier model's input rate on the whole diff, so it
+    # only pays once the diff is large enough that a 20-40% cut saves real model time.
+    mechanical_prune_min_tokens: int = 5000
+    # Pruning also requires the analysis model's input rate (USD per million, from the
+    # bundled rate table; unknown models count as expensive) to be at least this. Judging
+    # bills ~2x the diff at $0.042/M, so a $0.25/M flash model loses money on it while a
+    # $1+/M model saves. Measured A/B on flash-lite: cost +10-25%, latency +1s, quality even.
+    mechanical_prune_min_model_rate: float = 1.0
+    # Also ask the judge each kept hunk's commit type and hint it on the hunk header
+    # (`[judged: fix]`). Costs ~87 judgment tokens per hunk (~40% of the judgment bill).
+    mechanical_kind_hints: bool = True
+    # Changelog generation is skipped when the change is judged user-visible with a
+    # probability below this (0 disables the gate). Releases/tests score ~0.1, refactors
+    # ~0.75, features/fixes ~0.9+, so 0.3 only skips plainly internal changes.
+    changelog_gate_threshold: float = 0.3
+    # The gate is a serial ~0.8s round trip on the changelog path. For fast-mode commits
+    # (<= auto_fast_threshold_lines, roughly <= 8k diff tokens) that path is the critical
+    # path and the changelog call it might save costs ~$0.001, so no gate; on the standard
+    # path analysis + summary hide it and the call it saves is several times dearer.
+    changelog_gate_min_tokens: int = 8000
+    # Generated changelog entries judged to restate an existing Unreleased entry with at
+    # least this probability are dropped.
+    changelog_duplicate_threshold: float = 0.6
 
     @classmethod
     def load(cls, path: str | os.PathLike[str] | None = None) -> Self:
@@ -186,6 +223,8 @@ class CommitConfig:
         self._normalize_models()
         if self.api_key is not None:
             self.api_key = _resolve_config_value(self.api_key)
+        if self.judgment_api_key is not None:
+            self.judgment_api_key = _resolve_config_value(self.judgment_api_key) or None
         self._apply_prompts_dir()
 
     def _normalize_models(self) -> None:
@@ -243,6 +282,17 @@ def _apply_env_overrides(config: CommitConfig) -> None:
     if "LLM_GIT_CACHE_DIR" in os.environ:
         value = os.environ["LLM_GIT_CACHE_DIR"].strip()
         config.cache_dir = value or None
+    if value := os.environ.get("LLM_GIT_JUDGMENT_DISABLED"):
+        parsed = _parse_env_bool(value)
+        if parsed is not None:
+            config.judgment_enabled = not parsed
+    # TypeSafe's own variables are fallbacks only: an explicit config value wins.
+    if config.judgment_api_key is None and (value := os.environ.get("TYPESAFE_API_KEY", "").strip()):
+        config.judgment_api_key = value
+    if config.judgment_base_url == DEFAULT_JUDGMENT_BASE_URL and (
+        value := os.environ.get("TYPESAFE_BASE_URL", "").strip()
+    ):
+        config.judgment_base_url = value
 
 
 def _parse_env_bool(value: str) -> bool | None:
@@ -433,6 +483,17 @@ _FIELD_COERCERS = {
     "cache_ttl_days": _to_int,
     "cache_dir": _to_optional_str,
     "prompts_dir": _to_str,
+    "judgment_enabled": _to_bool,
+    "judgment_api_key": _to_optional_str,
+    "judgment_base_url": _to_str,
+    "judgment_model": _to_str,
+    "mechanical_hunk_threshold": _to_float,
+    "mechanical_prune_min_tokens": _to_int,
+    "mechanical_prune_min_model_rate": _to_float,
+    "mechanical_kind_hints": _to_bool,
+    "changelog_gate_threshold": _to_float,
+    "changelog_gate_min_tokens": _to_int,
+    "changelog_duplicate_threshold": _to_float,
 }
 
 __all__ = [
@@ -441,6 +502,8 @@ __all__ = [
     "DEFAULT_ANALYSIS_MODEL",
     "DEFAULT_SUMMARY_MODEL",
     "DEFAULT_EXCLUDED_FILES",
+    "DEFAULT_JUDGMENT_BASE_URL",
+    "DEFAULT_JUDGMENT_MODEL",
     "DEFAULT_LOW_PRIORITY_EXTENSIONS",
     "default_config_path",
 ]

@@ -10,6 +10,7 @@ from enum import StrEnum
 
 from .errors import GitError, ValidationFailure
 from .git import run_git, run_git_bytes
+from .mechanical import HunkJudgments, PrunableHunk, render_pruned_diff
 from .models import ComposeFile, ComposeHunk, ComposeSnapshot, StagedPin, StagedPinKind
 
 
@@ -86,6 +87,9 @@ class ComposeGroupPatch:
 
     diff: str
     stat: str
+    # Prompt-side copy of ``diff``: judged-mechanical hunks replaced by markers, kind hints
+    # on hunk headers; equals ``diff`` without judgments. Never used for staging.
+    analysis_diff: str = ""
     apply_patches: tuple[_FilePatch, ...] = ()
     fallback_files: tuple[str, ...] = ()
     index_blobs: tuple[_IndexBlob, ...] = ()
@@ -270,10 +274,40 @@ def _tree_blob_entries(tree: str, paths: Sequence[str], dir: str | os.PathLike[s
     return entries
 
 
-def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> ComposeGroupPatch:
-    """Create the exact patch/stat and staging actions for a planned group."""
+def render_snapshot_diff(snapshot: ComposeSnapshot, judgments: HunkJudgments) -> str:
+    """The snapshot diff for prompts: mechanical hunks replaced by markers, kinds hinted on hunk headers."""
+    if not judgments:
+        return snapshot.diff
+    hunks_by_file: dict[str, list[ComposeHunk]] = defaultdict(list)
+    for hunk in snapshot.hunks:
+        if not hunk.synthetic:
+            hunks_by_file[hunk.file_id].append(hunk)
+    return render_pruned_diff(
+        [
+            (
+                file.patch_header.rstrip("\n"),
+                [
+                    judgments.hunk(hunk.hunk_id, hunk.raw_patch.rstrip("\n"), *_count_hunk_changes([hunk]))
+                    for hunk in hunks_by_file.get(file.file_id, ())
+                ],
+            )
+            for file in snapshot.files
+        ]
+    ).diff
+
+
+def create_executable_group_patch(
+    snapshot: ComposeSnapshot, group: object, judgments: HunkJudgments = HunkJudgments.EMPTY
+) -> ComposeGroupPatch:
+    """Create the exact patch/stat and staging actions for a planned group.
+
+    ``judgments`` shape the prompt-bound :attr:`ComposeGroupPatch.analysis_diff`
+    (mechanical hunks become markers, kinds become hints); the stageable ``diff``
+    is never touched.
+    """
     selected_by_file = _selected_hunks_by_file(snapshot, group)
     diff_parts: list[str] = []
+    prunable: list[tuple[str, list[PrunableHunk]]] = []
     stat_parts: list[str] = []
     apply_patches: list[_FilePatch] = []
     fallback_files: list[str] = []
@@ -291,6 +325,7 @@ def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> C
             removed_paths.append(file.old_path)
             fallback_files.append(file.path)
             diff_parts.append(file.full_patch)
+            prunable.append((file.full_patch.rstrip("\n"), []))
             stat_parts.append(_stat_line(file.path, file.additions, file.deletions, file.is_binary))
             continue
         if file.synthetic_only or file.is_binary:
@@ -304,12 +339,22 @@ def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> C
             else:
                 fallback_files.append(file.path)
             diff_parts.append(file.full_patch)
+            prunable.append((file.full_patch.rstrip("\n"), []))
             stat_parts.append(_stat_line(file.path, file.additions, file.deletions, file.is_binary))
             continue
 
         file_patch = _create_patch_for_file(file, ordered_hunks)
         additions, deletions = _count_hunk_changes(ordered_hunks)
         diff_parts.append(file_patch)
+        prunable.append(
+            (
+                file.patch_header.rstrip("\n"),
+                [
+                    judgments.hunk(hunk.hunk_id, hunk.raw_patch.rstrip("\n"), *_count_hunk_changes([hunk]))
+                    for hunk in ordered_hunks
+                ],
+            )
+        )
         if _new_file_mode(file):
             if _selected_hunks_cover_file(file, selected_for_file):
                 index_blobs.append(_new_file_index_blob(file, ordered_hunks))
@@ -321,9 +366,11 @@ def create_executable_group_patch(snapshot: ComposeSnapshot, group: object) -> C
             apply_patches.append(_FilePatch(file.path, file_patch))
         stat_parts.append(_stat_line(file.path, additions, deletions, False))
 
+    diff = "".join(diff_parts)
     return ComposeGroupPatch(
-        diff="".join(diff_parts),
+        diff=diff,
         stat="".join(stat_parts),
+        analysis_diff=render_pruned_diff(prunable).diff if judgments else diff,
         apply_patches=tuple(apply_patches),
         fallback_files=tuple(sorted(set(fallback_files))),
         index_blobs=tuple(index_blobs),

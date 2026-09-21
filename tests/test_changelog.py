@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 
+import pytest
+from lgit import api, changelog
 from lgit.api import _extract_json_from_content
 from lgit.changelog import (
     ChangelogRevision,
     UnreleasedSection,
-    _drop_duplicate_entries,
     _entries_added_since,
     _format_existing_entries,
     _head_unreleased,
     _parse_jsonish,
     _staged_changelog_content,
     apply_revisions,
+    drop_duplicate_entries,
+    generate_changelog_entries,
     parse_changelog_revisions,
     parse_unreleased_section,
     run_changelog_flow,
@@ -24,6 +28,7 @@ from lgit.changelog import (
     write_entries,
 )
 from lgit.config import CommitConfig
+from lgit.judgment import Answers, Judge, JudgmentRequest, NoulAnswer
 from lgit.map_reduce import FileObservation
 from lgit.markdown_output import parse_changelog_response
 from lgit.models import ChangelogCategory
@@ -351,7 +356,7 @@ def test_drop_duplicate_entries_filters_case_insensitively() -> None:
         ChangelogCategory.FIXED: ["- Added retry logic."],
     }
 
-    assert _drop_duplicate_entries(entries, section.entries, None) == {ChangelogCategory.ADDED: ["- Added new thing."]}
+    assert _dedup(entries, section.entries) == {ChangelogCategory.ADDED: ["- Added new thing."]}
 
 
 def test_drop_duplicate_entries_catches_reworded_recategorized_copies() -> None:
@@ -366,9 +371,97 @@ def test_drop_duplicate_entries_catches_reworded_recategorized_copies() -> None:
         ],
     }
 
-    assert _drop_duplicate_entries(entries, section.entries, None) == {
-        ChangelogCategory.FIXED: ["- Fixed crash when parsing empty diffs"]
+    assert _dedup(entries, section.entries) == {ChangelogCategory.FIXED: ["- Fixed crash when parsing empty diffs"]}
+
+
+class _NoulJudge(Judge):
+    """Answers every yes/no question from a key→probability table, recording requests."""
+
+    def __init__(self, table: dict[str, float]) -> None:
+        super().__init__(base_url="https://judge.test", model="fake", api_key="k")
+        self.table = table
+        self.requests: list[JudgmentRequest] = []
+
+    async def judge_all(self, operation: str, requests: Sequence[JudgmentRequest]) -> list[Answers | None]:
+        self.requests.extend(requests)
+        if self.table.get("__fail__"):
+            return [None for _ in requests]
+        return [{key: NoulAnswer(self.table.get(key, 0.0)) for key in request.questions} for request in requests]
+
+
+def _dedup(entries, *existing, judge: Judge | None = None):
+    return asyncio.run(drop_duplicate_entries(entries, *existing, judge=judge, config=CommitConfig()))
+
+
+def test_drop_duplicate_entries_judges_rewordings_and_skips_verbatim_repeats() -> None:
+    section = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Added retry logic.\n")
+    entries = {
+        ChangelogCategory.ADDED: ["- added retry logic.", "- Retries failed requests automatically", "- Added colours"],
     }
+    judge = _NoulJudge({"C1": 0.9, "C2": 0.1})
+
+    assert _dedup(entries, section.entries, judge=judge) == {ChangelogCategory.ADDED: ["- Added colours"]}
+    # The verbatim repeat never reaches the judge, nor does "Added colours" (no content stem in
+    # common with any existing entry); only the reworded retry line is judged.
+    (request,) = judge.requests
+    assert list(request.questions) == ["C1"]
+    assert "C1: - Retries failed requests automatically" in request.state["candidates"]
+    assert request.state["existing_entries"] == "- Added retry logic."
+
+
+def test_drop_duplicate_entries_falls_back_to_overlap_when_judgment_fails() -> None:
+    section = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Added retry logic.\n")
+    entries = {ChangelogCategory.FIXED: ["- Added retry logic", "- Fixed crash"]}
+
+    assert _dedup(entries, section.entries, judge=_NoulJudge({"__fail__": 1})) == {
+        ChangelogCategory.FIXED: ["- Fixed crash"]
+    }
+    # Nothing existing → nothing to judge, no request made.
+    judge = _NoulJudge({})
+    assert _dedup(entries, {}, judge=judge) == entries and judge.requests == []
+
+
+def test_generate_changelog_entries_skips_model_when_judged_not_user_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_run_oneshot(*args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append("model")
+        return SimpleNamespace(output={"entries": {"Added": ["- Added thing"]}}, text_content="")
+
+    monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)
+    config = CommitConfig(judgment_api_key="k", changelog_gate_min_tokens=0)
+    judge = _NoulJudge({"worthy": 0.1})
+    monkeypatch.setattr(changelog.Judge, "from_config", classmethod(lambda cls, _config: judge))
+
+    result = asyncio.run(
+        generate_changelog_entries("CHANGELOG.md", False, " a.py | 1 +\n", "diff", None, None, False, config)
+    )
+    assert result == ({}, []) and calls == []
+    assert judge.requests[0].state["stat"] == " a.py | 1 +\n"
+
+    judge.table["worthy"] = 0.95
+    result = asyncio.run(
+        generate_changelog_entries("CHANGELOG.md", False, " a.py | 1 +\n", "diff", None, None, False, config)
+    )
+    assert calls == ["model"] and result[0] == {ChangelogCategory.ADDED: ["- Added thing"]}
+
+    # Gate disabled: the model always runs.
+    judge.table["worthy"] = 0.0
+    asyncio.run(
+        generate_changelog_entries(
+            "CHANGELOG.md", False, "", "diff", None, None, False, replace(config, changelog_gate_threshold=0)
+        )
+    )
+    assert calls == ["model", "model"]
+
+    # Below the size floor the gate never runs: the round trip costs more than the call it could save.
+    judge.requests.clear()
+    asyncio.run(
+        generate_changelog_entries(
+            "CHANGELOG.md", False, "", "diff", None, None, False, replace(config, changelog_gate_min_tokens=2000)
+        )
+    )
+    assert calls == ["model", "model", "model"] and judge.requests == []
 
 
 def test_head_unreleased_missing_file_marks_all_entries_authored(repo: Path) -> None:
