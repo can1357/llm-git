@@ -207,19 +207,19 @@ def strip_type_prefix(summary: str, commit_type: str | None = None, scope: str |
 
 
 def summary_from_holistic_analysis(analysis: ConventionalAnalysis, config: CommitConfig, stat: str = "") -> str | None:
-    """Return a hard-limit-validated holistic summary from analysis, or None."""
-
-    del stat
+    """Reuse a compliant analysis summary, repairing tense; return None when a summary call is needed."""
     if not analysis.summary or not str(analysis.summary).strip():
         return None
-    summary = strip_type_prefix(
-        str(analysis.summary).strip(),
-        str(analysis.commit_type),
-        None if analysis.scope is None else str(analysis.scope),
-    ).rstrip(" .")
-    if not summary:
+    commit_type = str(analysis.commit_type)
+    scope = None if analysis.scope is None else str(analysis.scope)
+    draft = strip_type_prefix(str(analysis.summary).strip(), commit_type, scope).rstrip(" .")
+    summary, _ = _accept_summary(draft, commit_type, stat)
+    if summary is None:
         return None
-    return str(CommitSummary.from_raw(summary, max_length=config.summary_hard_limit))
+    prefix = f"{commit_type}({scope}): " if scope else f"{commit_type}: "
+    if len((prefix + summary).encode("utf-8")) > min(config.summary_soft_limit, config.summary_hard_limit):
+        return None
+    return summary
 
 
 async def generate_summary_from_analysis(

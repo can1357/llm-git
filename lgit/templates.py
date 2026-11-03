@@ -6,11 +6,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment
 
 from .errors import ConfigError
+
+if TYPE_CHECKING:
+    from .models import ChangelogContext
 
 USER_SEPARATOR_MARKER = "<!-- USER -->"
 PROMPT_CATEGORIES = (
@@ -23,6 +26,7 @@ PROMPT_CATEGORIES = (
     "summary-rewrite",
     "compose-intent",
     "compose-bind",
+    "synthesis",
 )
 
 _ENV = Environment(autoescape=False, keep_trailing_newline=True)
@@ -89,6 +93,25 @@ class FastPromptParams:
     types_description: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SynthesisParams:
+    """Parameters for shared commit-analysis and changelog-evidence generation."""
+
+    stat: str = ""
+    diff: str = ""
+    observations: str = ""
+    changed_files: tuple[str, ...] = ()
+    evidence_limits: str = ""
+    boundaries: tuple[ChangelogContext, ...] = ()
+    scope_candidates: str = ""
+    user_context: str | None = None
+    recent_commits: str | None = None
+    common_scopes: str | None = None
+    types_description: str | None = None
+    project_context: str | None = None
+    fast: bool = False
+
+
 _PROMPTS_DIR: Path | None = None
 
 
@@ -96,6 +119,15 @@ def set_prompts_dir(path: Path | None) -> None:
     """Set the explicit prompt-override directory (config ``prompts_dir``); ``None`` uses packaged prompts only."""
     global _PROMPTS_DIR
     _PROMPTS_DIR = path
+
+
+def has_prompt_override(category: str, prompts_dir: Path | None = None) -> bool:
+    """Return whether the active or explicitly supplied prompt directory overrides ``category``."""
+
+    if category not in PROMPT_CATEGORIES:
+        raise ConfigError(f"Unknown prompt category {category!r}")
+    directory = prompts_dir if prompts_dir is not None else _PROMPTS_DIR
+    return directory is not None and directory.joinpath(f"{category}.md").is_file()
 
 
 def split_prompt_template(template_content: str) -> tuple[str | None, str]:
@@ -256,6 +288,34 @@ def render_fast_prompt(params: FastPromptParams | None = None, **kwargs: Any) ->
     return render_prompt_parts("fast.md", template_content, context)
 
 
+def render_synthesis_prompt(
+    params: SynthesisParams | None = None,
+    *,
+    prompts_dir: Path | None = None,
+    **kwargs: Any,
+) -> PromptParts:
+    """Render shared commit-analysis and boundary-specific changelog generation."""
+
+    p = params if params is not None else SynthesisParams(**kwargs)
+    template_content = load_template_file("synthesis", prompts_dir=prompts_dir)
+    context = {
+        "stat": p.stat,
+        "diff": p.diff,
+        "observations": p.observations,
+        "changed_files": p.changed_files,
+        "evidence_limits": p.evidence_limits,
+        "boundaries": p.boundaries,
+        "scope_candidates": p.scope_candidates,
+        "user_context": p.user_context,
+        "recent_commits": p.recent_commits,
+        "common_scopes": p.common_scopes,
+        "types_description": p.types_description,
+        "project_context": p.project_context,
+        "fast": p.fast,
+    }
+    return render_prompt_parts("synthesis.md", template_content, context)
+
+
 def render_compose_intent_prompt(
     params: ComposeIntentPromptParams | None = None,
     **kwargs: Any,
@@ -286,12 +346,14 @@ def render_compose_bind_prompt(
     return render_prompt_parts("compose-bind.md", template_content, context)
 
 
-def load_template_file(category: str) -> str:
-    """Load a prompt from the configured ``prompts_dir`` override, else the packaged resource."""
+def load_template_file(category: str, *, prompts_dir: Path | None = None) -> str:
+    """Load a prompt from an explicit or configured override directory, else the packaged resource."""
+
     if category not in PROMPT_CATEGORIES:
         raise ConfigError(f"Unknown prompt category {category!r}")
-    if _PROMPTS_DIR is not None:
-        user_template = _PROMPTS_DIR.joinpath(f"{category}.md")
+    override_dir = prompts_dir if prompts_dir is not None else _PROMPTS_DIR
+    if override_dir is not None:
+        user_template = override_dir.joinpath(f"{category}.md")
         if user_template.exists():
             try:
                 return user_template.read_text(encoding="utf-8")
@@ -350,7 +412,9 @@ __all__ = [
     "ComposeIntentPromptParams",
     "ComposeBindPromptParams",
     "FastPromptParams",
+    "SynthesisParams",
     "set_prompts_dir",
+    "has_prompt_override",
     "split_prompt_template",
     "render_prompt_parts",
     "load_template_file",
@@ -361,6 +425,7 @@ __all__ = [
     "render_map_prompt",
     "render_reduce_prompt",
     "render_fast_prompt",
+    "render_synthesis_prompt",
     "render_compose_intent_prompt",
     "render_compose_bind_prompt",
 ]

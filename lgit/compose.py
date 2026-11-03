@@ -8,15 +8,17 @@ import os
 import warnings
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from . import api, diffing, git, map_reduce, style, templates, tokens
+import httpx
+
+from . import api, diffing, git, map_reduce, style, synthesis, templates, tokens
 from .changelog import ChangelogWeaver, GroupEntries
-from .errors import GitError, NoChanges, ValidationFailure
+from .errors import GitError, LgitError, NoChanges, ValidationFailure
 from .judgment import (
     JUDGMENT_STATE_CHAR_BUDGET,
     Choice,
@@ -31,11 +33,13 @@ from .models import (
     CommitSummary,
     CommitType,
     ComposeSnapshot,
+    ConventionalAnalysis,
     Scope,
     coerce_optional_scope,
 )
 from .normalization import format_commit_message, post_process_commit_message
 from .patch import (
+    ComposeGroupPatch,
     StageResult,
     build_compose_snapshot,
     create_executable_group_patch,
@@ -484,13 +488,21 @@ async def execute_compose(
         generated_entries: list[GroupEntries] = [{} for _ in group_patches]
         if weaver:
             weaver.seed_temp_index(repo_dir, index.path)
-            prepared_messages, generated_entries = await asyncio.gather(
-                _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args),
-                weaver.generate_groups(
-                    [(paths, patch.diff, patch.stat) for paths, patch in zip(group_paths, group_patches, strict=True)],
-                    repo_dir,
-                ),
-            )
+            if synthesis.can_synthesize(config):
+                prepared_messages, generated_entries = await _prepare_shared_groups(
+                    snapshot, ordered_groups, group_patches, group_paths, weaver, config, args
+                )
+            else:
+                prepared_messages, generated_entries = await asyncio.gather(
+                    _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args),
+                    weaver.generate_groups(
+                        [
+                            (paths, patch.diff, patch.stat)
+                            for paths, patch in zip(group_paths, group_patches, strict=True)
+                        ],
+                        repo_dir,
+                    ),
+                )
         else:
             prepared_messages = await _prepare_group_messages(snapshot, ordered_groups, group_patches, config, args)
         parent_hash = base_state.head_hash
@@ -1990,6 +2002,70 @@ def _object_mapping(value: Any) -> Mapping[str, Any]:
     return vars(value)
 
 
+async def _prepare_shared_groups(
+    snapshot: ComposeSnapshot,
+    groups: Sequence[ComposeExecutableGroup],
+    patches: Sequence[ComposeGroupPatch],
+    paths: Sequence[Sequence[str]],
+    weaver: ChangelogWeaver,
+    config: CommitConfig,
+    args: _ComposeArgs,
+) -> tuple[list[str], list[GroupEntries]]:
+    """Generate each fixed group's message and changelog in one call, without changing ownership."""
+    semaphore = asyncio.Semaphore(min(COMPOSE_MESSAGE_PARALLELISM, max(len(groups), 1)))
+    counter = _create_token_counter(config)
+
+    async def prepare(
+        idx: int, group: ComposeExecutableGroup, patch: ComposeGroupPatch, files: Sequence[str]
+    ) -> tuple[str, GroupEntries]:
+        async with semaphore:
+            boundaries = weaver.contexts_for_group(files, args.dir)
+            prefix = f"compose-{idx + 1}"
+            if boundaries:
+                try:
+                    evidence = await synthesis.generate_commit_evidence(
+                        config,
+                        patch.stat,
+                        patch.analysis_diff or patch.diff,
+                        boundaries,
+                        model_name=config.analysis_model,
+                        scope_candidates=group.rationale,
+                        user_context=group.rationale,
+                        debug_output=args.debug_output,
+                        debug_prefix=prefix,
+                    )
+                    entries = weaver.updates_for_group(evidence.changelogs, args.dir)
+                except (LgitError, httpx.HTTPError, ValueError, TypeError) as exc:
+                    warnings.warn(
+                        f"Joint message/changelog generation failed for {group.group_id}; "
+                        f"using separate generation: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    body, summary = await _parts_from_analysis(
+                        evidence.analysis, group, patch.stat, config, args, prefix
+                    )
+                    message = _format_group_message(snapshot, group, body, summary, patch.stat, config, args)
+                    return message, entries
+
+            message, changelogs = await asyncio.gather(
+                _generate_group_message(
+                    snapshot, group, patch.stat, patch.analysis_diff or patch.diff, config, args, counter, prefix
+                ),
+                weaver.generate_groups([(files, patch.diff, patch.stat)], args.dir),
+            )
+            return message, changelogs[0]
+
+    results = await asyncio.gather(
+        *(
+            prepare(idx, group, patch, files)
+            for idx, (group, patch, files) in enumerate(zip(groups, patches, paths, strict=True))
+        )
+    )
+    return [message for message, _ in results], [entries for _, entries in results]
+
+
 async def _prepare_group_messages(
     snapshot: ComposeSnapshot,
     groups: Sequence[ComposeExecutableGroup],
@@ -2031,6 +2107,18 @@ async def _generate_group_message(
     debug_prefix: str,
 ) -> str:
     body, summary = await _message_parts_from_api(group, stat, diff, config, args, counter, debug_prefix)
+    return _format_group_message(snapshot, group, body, summary, stat, config, args)
+
+
+def _format_group_message(
+    snapshot: ComposeSnapshot,
+    group: ComposeExecutableGroup,
+    body: Sequence[str],
+    summary: str | None,
+    stat: str,
+    config: CommitConfig,
+    args: _ComposeArgs,
+) -> str:
     if summary is None:
         summary = _fallback_summary(group, snapshot)
     commit = SimpleNamespace(
@@ -2084,15 +2172,35 @@ async def _message_parts_from_api(
             debug_output=args.debug_output,
             debug_prefix=debug_prefix,
         )
+    return await _parts_from_analysis(analysis, group, stat, config, args, debug_prefix)
+
+
+async def _parts_from_analysis(
+    analysis: ConventionalAnalysis,
+    group: ComposeExecutableGroup,
+    stat: str,
+    config: CommitConfig,
+    args: _ComposeArgs,
+    debug_prefix: str,
+) -> tuple[list[str], str | None]:
+    # The plan still owns the committed type/scope, including the summary's validation context.
+    analysis = replace(analysis, commit_type=group.commit_type, scope=group.scope)
     body = analysis.body_texts() or [group.rationale]
-    summary = await api.generate_summary_from_analysis(
-        config=config,
-        analysis=analysis,
-        stat=stat,
-        user_context=group.rationale,
-        debug_output=args.debug_output,
-        debug_prefix=debug_prefix,
+    prompts_dir = Path(config.prompts_dir).expanduser() if config.prompts_dir else None
+    summary = (
+        None
+        if templates.has_prompt_override("summary", prompts_dir)
+        else api.summary_from_holistic_analysis(analysis, config, stat)
     )
+    if summary is None:
+        summary = await api.generate_summary_from_analysis(
+            config=config,
+            analysis=analysis,
+            stat=stat,
+            user_context=group.rationale,
+            debug_output=args.debug_output,
+            debug_prefix=debug_prefix,
+        )
     return body, summary
 
 

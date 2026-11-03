@@ -18,14 +18,22 @@ from typing import Any
 
 import httpx
 
-from . import cache, git, pricing, profile, repo, style
+from . import cache, git, pricing, profile, repo, style, synthesis
 from .analysis import ScopeAnalyzer, extract_scope_candidates
-from .api import generate_analysis_with_map_reduce, generate_fast_commit, generate_summary_from_analysis
+from .api import (
+    generate_analysis_with_map_reduce,
+    generate_fast_commit,
+    generate_summary_from_analysis,
+    summary_from_holistic_analysis,
+)
 from .changelog import (
+    ChangelogBoundary,
     PreparedChangelogFlow,
     apply_changelog_updates,
     generate_changelog_updates,
     prepare_changelog_flow,
+    prepare_synthesized_updates,
+    prepared_changelog_contexts,
     run_changelog_flow,
 )
 from .config import CommitConfig
@@ -41,7 +49,15 @@ from .judgment import Judge
 from .map_reduce import FileObservation, should_use_map_reduce
 from .markdown_output import fallback_summary
 from .mechanical import prune_mechanical_hunks
-from .models import ConventionalAnalysis, ConventionalCommit, Mode, format_model_chain, resolve_model_name
+from .models import (
+    ChangelogContext,
+    ChangelogUpdate,
+    ConventionalAnalysis,
+    ConventionalCommit,
+    Mode,
+    format_model_chain,
+    resolve_model_name,
+)
 from .normalization import post_process_commit_message
 from .tokens import create_token_counter
 from .validation import check_type_scope_consistency, validate_commit_message, validate_summary_quality
@@ -329,11 +345,18 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
         if _should_update_changelog(args, config, mode) and not args.dry_run:
             async with profile.section("run_changelog_flow", collector):
                 if changelog_runner is not None:
-                    await changelog_runner.finish()
+                    updated_changelogs = await changelog_runner.finish()
                 else:
-                    await run_changelog_flow(args, config)
+                    updated_changelogs = await run_changelog_flow(args, config)
             with profile.section("write_real_index_tree_after_changelog", collector):
-                snapshot_tree = git.write_real_index_tree(args.dir)
+                if snapshot_tree is not None:
+                    snapshot_tree = git.tree_with_index_paths(
+                        snapshot_tree,
+                        [os.path.relpath(boundary.changelog_path, args.dir) for boundary in updated_changelogs],
+                        args.dir,
+                    )
+                else:
+                    snapshot_tree = git.write_real_index_tree(args.dir)
         elif mode is Mode.UNSTAGED and not args.dry_run:
             with profile.section("write_real_index_tree_after_stage", collector):
                 snapshot_tree = git.write_real_index_tree(args.dir)
@@ -484,12 +507,11 @@ def _stage_all(dir: str | os.PathLike[str]) -> None:
 
 
 class _ChangelogRunner:
-    """Overlap changelog generation with commit-message generation for staged commits.
+    """Prepare shared or standalone changelog generation without early repository writes.
 
-    ``start_with_diff``/``start_with_observations`` kick off boundary generation at
-    the earliest safe moment (idempotent; the first call wins). ``finish`` awaits
-    generation and applies the updates at the same point the sequential flow used
-    to run, so index/worktree side effects still happen only on the commit path.
+    Shared evidence is reconciled while the message is validated; separate calls
+    remain available for prompt overrides and generation failures. ``finish``
+    applies the prepared updates only on the validated commit path.
     """
 
     __slots__ = ("args", "config", "_prepared", "_task")
@@ -499,6 +521,21 @@ class _ChangelogRunner:
         self.config = config
         self._prepared: PreparedChangelogFlow | None = None
         self._task: asyncio.Task[Any] | None = None
+
+    def contexts(self) -> tuple[ChangelogContext, ...]:
+        """Capture staged changelog context before joint message generation."""
+        if self._prepared is None:
+            self._prepared = prepare_changelog_flow(self.args, self.config)
+        return prepared_changelog_contexts(self._prepared)
+
+    def start_with_evidence(self, updates: Sequence[ChangelogUpdate]) -> None:
+        """Reconcile shared evidence concurrently with summary validation, without writes."""
+        if self._task is not None:
+            raise RuntimeError("Changelog generation already started")
+        self.contexts()
+        assert self._prepared is not None
+        self._task = asyncio.create_task(prepare_synthesized_updates(self._prepared, updates, self.config))
+        self._task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
 
     def start_with_diff(self) -> None:
         """Start generation using each boundary's staged diff."""
@@ -511,17 +548,18 @@ class _ChangelogRunner:
     def _start(self, observations: Sequence[FileObservation] | None) -> None:
         if self._task is not None:
             return
-        self._prepared = prepare_changelog_flow(self.args, self.config)
+        self.contexts()
+        assert self._prepared is not None
         self._task = asyncio.create_task(generate_changelog_updates(self._prepared, self.config, observations))
         # Mark exceptions retrieved in case the run aborts before finish().
         self._task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
 
-    async def finish(self) -> None:
-        """Await generation (starting it diff-based if never started) and apply updates."""
+    async def finish(self) -> list[ChangelogBoundary]:
+        """Apply generated entries and return the paths allowed into the captured commit tree."""
         if self._task is None:
             self._start(None)
         assert self._task is not None and self._prepared is not None
-        apply_changelog_updates(self._prepared, await self._task)
+        return apply_changelog_updates(self._prepared, await self._task)
 
     def cancel(self) -> None:
         """Drop any in-flight generation without applying it."""
@@ -554,6 +592,11 @@ async def _generate_fast_workflow(
         f"{style.dim('›')} {style.dim('fast mode:')} {style.model(format_model_chain(config.effective_fast_model))}"
     )
     style.status(f"{style.info('›')} Analyzing {style.bold(mode.value)} changes...")
+    shared = await _generate_shared_message(
+        config, stat, diff, scope_candidates, user_context, args, changelog_runner, collector, fast=True
+    )
+    if shared is not None:
+        return shared
     if changelog_runner is not None:
         changelog_runner.start_with_diff()
     return await _generate_fast_message(config, stat, diff, scope_candidates, user_context, args, collector)
@@ -594,6 +637,11 @@ async def _generate_standard_workflow(
             f"{style.dim('›')} {style.dim('models:')} {style.dim('analysis')} "
             f"{style.model(format_model_chain(config.analysis_model))} {style.dim('summary')} {style.model(format_model_chain(config.summary_model))}"
         )
+    shared = await _generate_shared_message(
+        config, stat, diff, scope_candidates, user_context, args, changelog_runner, collector
+    )
+    if shared is not None:
+        return shared
     with profile.section("prepare_diff", collector):
         use_map_reduce = should_use_map_reduce(diff, config, token_counter)
         if use_map_reduce:
@@ -615,6 +663,59 @@ async def _generate_standard_workflow(
         config, stat, analysis_diff, scope_candidates, user_context, args, collector, on_observations
     )
     return await _message_from_analysis(analysis, config, stat, user_context, args, collector)
+
+
+async def _generate_shared_message(
+    config: CommitConfig,
+    stat: str,
+    diff: str,
+    scope_candidates: str,
+    user_context: str | None,
+    args: argparse.Namespace,
+    changelog_runner: _ChangelogRunner | None,
+    collector: profile.TimingCollector | None,
+    *,
+    fast: bool = False,
+) -> ConventionalCommit | None:
+    """Synthesize a message and changelog together when their prompt policies permit it."""
+    if changelog_runner is None or not synthesis.can_synthesize(config, fast=fast):
+        return None
+    boundaries = changelog_runner.contexts()
+    if not boundaries:
+        return None
+    project_context, common_scopes, recent_commits = (None, None, None)
+    if not fast:
+        with profile.section("collect_analysis_context", collector):
+            project_context, common_scopes, recent_commits = _collect_analysis_context(args.dir)
+    try:
+        async with profile.section("generate_shared_evidence", collector):
+            evidence = await synthesis.generate_commit_evidence(
+                config,
+                stat,
+                diff,
+                boundaries,
+                model_name=config.effective_fast_model if fast else config.analysis_model,
+                fast=fast,
+                scope_candidates=scope_candidates,
+                user_context=user_context,
+                project_context=project_context,
+                common_scopes=common_scopes,
+                recent_commits=recent_commits,
+                debug_output=args.debug_output,
+                debug_prefix="fast" if fast else "analysis",
+            )
+    except (LgitError, httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        style.status(style.dim(f"Joint message/changelog generation failed ({exc}); using separate generation"))
+        return None
+    changelog_runner.start_with_evidence(evidence.changelogs)
+    # Preserve the existing summary repair/rewrite and final message validation path.
+    return await _message_from_analysis(evidence.analysis, config, stat, user_context, args, collector)
+
+
+def _collect_analysis_context(directory: str | os.PathLike[str]) -> tuple[str | None, str | None, str | None]:
+    detected = repo.detect(Path(directory))
+    project_context = detected.format_for_prompt() if detected is not None else None
+    return project_context, _format_common_scopes(directory), _format_recent_commits(directory)
 
 
 async def _prune_mechanical(diff: str, config: CommitConfig, collector: profile.TimingCollector | None) -> str:
@@ -670,12 +771,7 @@ async def _generate_analysis(
     on_observations: Callable[[Sequence[FileObservation]], None] | None = None,
 ) -> ConventionalAnalysis:
     with profile.section("collect_analysis_context", collector):
-        project_context = None
-        detected = repo.detect(args.dir)
-        if detected is not None:
-            project_context = detected.format_for_prompt()
-        common_scopes = _format_common_scopes(args.dir)
-        recent_commits = _format_recent_commits(args.dir)
+        project_context, common_scopes, recent_commits = _collect_analysis_context(args.dir)
     async with profile.section("generate_analysis", collector):
         return await generate_analysis_with_map_reduce(
             config,
@@ -702,7 +798,7 @@ async def _message_from_analysis(
 ) -> ConventionalCommit:
     commit_type = str(analysis.commit_type)
     scope = None if analysis.scope is None else str(analysis.scope)
-    summary = analysis.summary or ""
+    summary = summary_from_holistic_analysis(analysis, config, stat) or ""
     max_retries = max(1, int(config.max_retries))
     for attempt in range(max_retries):
         if not summary or attempt > 0:

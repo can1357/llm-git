@@ -131,6 +131,12 @@ project/
 
 Disable with `--no-changelog` or `changelog_enabled = false` in config.
 
+When staged changes have a changelog boundary, one synthesis call generates the commit analysis and all applicable changelog updates together. Compose uses the same synthesis for each already-planned group; grouping and staging are unchanged. Large inputs reuse per-file map observations, and valid summaries avoid a separate summary call.
+
+Summary repair/rewrite, authored-entry protection, existing-entry revisions, and staged/worktree isolation still apply. Malformed shared output falls back to separate generation. `--dry-run`, commit/unstaged analysis, and `--no-changelog` retain their existing generation paths.
+
+Prompt overrides remain explicit: a relevant `analysis.md`, `fast.md`, `map.md`, `reduce.md`, or `changelog.md` override keeps separate calls unless the override directory also supplies `synthesis.md`.
+
 ## Configuration
 
 Create `~/.config/llm-git/config.toml`:
@@ -162,7 +168,7 @@ disable_git_background_features = true    # Disables fsmonitor/untrackedCache fo
 # are pruned from analysis prompts and the rest get a per-hunk type hint; compose binds
 # hunks to groups by judgment instead of the analysis model; changelog generation is
 # skipped for changes judged not user-visible and paraphrased duplicate entries are
-# dropped. Without a key every flow behaves as before.
+# dropped. Shared commit/changelog synthesis does not require a judge key.
 judgment_api_key = ""                     # Or TYPESAFE_API_KEY env var; `!cmd` runs a command
 judgment_model = "jev-latest"
 mechanical_hunk_threshold = 0.7           # Prune hunks judged mechanical with >= this probability
@@ -205,7 +211,7 @@ judgment_api_key = "!cat ~/.secrets/typesafe"   # key from https://console.types
 ```
 Set `LLM_GIT_JUDGMENT_DISABLED=1` to switch judgments off without removing the key.
 
-The client asks all providers for markdown/plain-text responses and parses the same response format across OpenRouter, LiteLLM, Anthropic, and OpenAI endpoints.
+The client uses the same response formats across OpenRouter, LiteLLM, Anthropic, and OpenAI endpoints: markdown/plain text for individual operations and a validated JSON object for shared commit/changelog synthesis.
 
 ### Commit Types
 

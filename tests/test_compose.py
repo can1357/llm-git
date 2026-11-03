@@ -1095,29 +1095,34 @@ def test_execute_compose_generates_group_changelogs_concurrently_and_weaves_per_
     started: list[str] = []
     release = asyncio.Event()
 
-    async def fake_run_oneshot(config: object, spec: object, **kwargs: object) -> SimpleNamespace:
-        user_prompt = str(getattr(spec, "user_prompt", ""))
-        group = "alpha" if "alpha = 2" in user_prompt else "beta"
+    async def fake_run_oneshot(config: CommitConfig, spec: api.OneShotSpec) -> SimpleNamespace:
+        assert spec.operation == "synthesis"
+        group = "alpha" if "alpha = 2" in spec.user_prompt else "beta"
         started.append(group)
         if len(started) == 2:
             release.set()
-        await asyncio.wait_for(release.wait(), timeout=5)  # both requests in flight before either answers
-        assert "Added alpha support" not in user_prompt  # neither prompt saw the sibling's new entry
-        if group == "alpha":
-            return SimpleNamespace(
-                output={"entries": {"Added": ["Added alpha support"]}}, text_content="# Added\n- Added alpha support"
-            )
+        await asyncio.wait_for(release.wait(), timeout=5)
+        assert "Added alpha support" not in spec.user_prompt
+        entries = ["Added alpha support"] if group == "alpha" else ["Added alpha support", "Added beta parsing"]
+        summary = "added alpha support" if group == "alpha" else "fixed beta parsing"
         return SimpleNamespace(
-            output={"entries": {"Added": ["Added alpha support", "Added beta parsing"]}},
-            text_content="# Added\n- Added alpha support\n- Added beta parsing",
+            output={
+                "commit": {"type": "feat" if group == "alpha" else "fix", "summary": summary, "details": []},
+                "changelogs": [{"path": "CHANGELOG.md", "entries": {"Added": entries}, "revisions": []}],
+            },
+            text_content="",
         )
 
-    monkeypatch.setattr(compose, "_prepare_group_messages", _prepared_two_group_messages)
     monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)
 
     hashes = asyncio.run(compose.execute_compose(snapshot, plan, config, args, base_state, weaver))
 
     assert len(hashes) == 2 and sorted(started) == ["alpha", "beta"]
+    assert run_git(empty_repo, "show", f"{hashes[0]}:a.py").stdout == "alpha = 2\n"
+    assert run_git(empty_repo, "show", f"{hashes[0]}:b.py").stdout == "beta = 1\n"
+    assert run_git(empty_repo, "show", f"{hashes[1]}:b.py").stdout == "beta = 2\n"
+    assert run_git(empty_repo, "show", "-s", "--format=%s", hashes[0]).stdout.strip() == "feat: added alpha support"
+    assert run_git(empty_repo, "show", "-s", "--format=%s", hashes[1]).stdout.strip() == "fix: fixed beta parsing"
     first = run_git(empty_repo, "show", f"{hashes[0]}:CHANGELOG.md").stdout
     final = run_git(empty_repo, "show", f"{hashes[1]}:CHANGELOG.md").stdout
     assert first.count("- Added alpha support\n") == 1 and "beta" not in first
@@ -1125,6 +1130,58 @@ def test_execute_compose_generates_group_changelogs_concurrently_and_weaves_per_
     assert final.count("- Added beta parsing\n") == 1
     assert (empty_repo / "CHANGELOG.md").read_text(encoding="utf-8") == final
     assert run_git(empty_repo, "diff", "--cached", "--", "CHANGELOG.md").stdout == ""
+
+
+def test_shared_compose_keeps_explicit_summary_prompt_policy(
+    empty_repo: Path,
+    run_git: Callable[..., object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot, plan, config, args, base_state, weaver = _prepare_two_group_weave(empty_repo, run_git)
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "summary.md").write_text(
+        "custom summary policy\n<!-- USER -->\n{{ details }}",
+        encoding="utf-8",
+    )
+    config.prompts_dir = str(prompt_dir)
+    monkeypatch.setattr(compose.templates, "_PROMPTS_DIR", prompt_dir)
+    summary_calls: list[str] = []
+
+    async def fake_response(config: CommitConfig, spec: api.OneShotSpec) -> SimpleNamespace:
+        if spec.operation == "synthesis":
+            alpha = "alpha = 2" in spec.user_prompt
+            return SimpleNamespace(
+                output={
+                    "commit": {
+                        "type": "feat" if alpha else "fix",
+                        "summary": "added alpha support" if alpha else "fixed beta parsing",
+                        "details": ["Added alpha support."] if alpha else ["Fixed beta parsing."],
+                    },
+                    "changelogs": [{"path": "CHANGELOG.md", "entries": {}, "revisions": []}],
+                },
+                text_content="",
+            )
+        assert spec.operation == "summary" and spec.system_prompt == "custom summary policy"
+        summary = (
+            "added alpha support under the custom policy"
+            if "alpha" in spec.user_prompt
+            else "fixed beta parsing under the custom policy"
+        )
+        summary_calls.append(summary)
+        return SimpleNamespace(output={"summary": summary}, text_content="")
+
+    monkeypatch.setattr(api, "_run_oneshot_response", fake_response)
+    hashes = asyncio.run(compose.execute_compose(snapshot, plan, config, args, base_state, weaver))
+
+    assert len(summary_calls) == 2
+    assert run_git(empty_repo, "show", "-s", "--format=%s", hashes[0]).stdout.strip() == (
+        "feat: added alpha support under the custom policy"
+    )
+    assert run_git(empty_repo, "show", "-s", "--format=%s", hashes[1]).stdout.strip() == (
+        "fix: fixed beta parsing under the custom policy"
+    )
 
 
 def test_execute_compose_seeds_and_protects_authored_changelog_entry(
@@ -1151,6 +1208,7 @@ def test_execute_compose_seeds_and_protects_authored_changelog_entry(
         )
 
     monkeypatch.setattr(compose, "_prepare_group_messages", _prepared_two_group_messages)
+    monkeypatch.setattr(compose.synthesis, "can_synthesize", lambda config: False)
     monkeypatch.setattr(api, "run_oneshot", fake_run_oneshot)
 
     hashes = asyncio.run(compose.execute_compose(snapshot, plan, config, args, base_state, weaver))

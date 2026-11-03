@@ -8,30 +8,35 @@ from subprocess import CompletedProcess
 from types import SimpleNamespace
 
 import pytest
-from lgit import api, changelog
+from lgit import api, changelog, git
 from lgit.api import _extract_json_from_content
 from lgit.changelog import (
-    ChangelogRevision,
+    ChangelogWeaver,
     UnreleasedSection,
     _entries_added_since,
     _format_existing_entries,
     _head_unreleased,
     _parse_jsonish,
     _staged_changelog_content,
+    apply_changelog_updates,
     apply_revisions,
     drop_duplicate_entries,
     generate_changelog_entries,
     parse_changelog_revisions,
     parse_unreleased_section,
+    prepare_changelog_flow,
+    prepare_synthesized_updates,
+    prepared_changelog_contexts,
     run_changelog_flow,
     stage_changelog_blob,
     write_entries,
 )
 from lgit.config import CommitConfig
+from lgit.errors import ValidationFailure
 from lgit.judgment import Answers, Judge, JudgmentRequest, NoulAnswer
 from lgit.map_reduce import FileObservation
 from lgit.markdown_output import parse_changelog_response
-from lgit.models import ChangelogCategory
+from lgit.models import ChangelogCategory, ChangelogRevision, ChangelogUpdate
 
 type RunGit = Callable[..., CompletedProcess[str]]
 
@@ -39,6 +44,12 @@ BASE_CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2020-01-01\n\n#
 
 BATCH_ENTRY = "- Added widget frobnication."
 BATCH_CHANGELOG = f"# Changelog\n\n## [Unreleased]\n\n### Added\n\n{BATCH_ENTRY}\n\n## [1.0.0] - 2020-01-01\n"
+
+
+def _added_changelog(*entries: str) -> str:
+    bullets = "\n".join(f"- {entry}" for entry in entries)
+    section = f"\n\n### Added\n\n{bullets}" if bullets else ""
+    return f"# Changelog\n\n## [Unreleased]{section}\n"
 
 
 def _commit_batch_changelog(repo: Path, run_git: RunGit) -> Path:
@@ -65,8 +76,8 @@ def test_changelog_staging_keeps_unrelated_unstaged_edits_out(repo: Path, run_gi
     worktree_unreleased = parse_unreleased_section(worktree_content, changelog_path)
     new_entries = {ChangelogCategory.ADDED: ["New pinned entry."]}
 
-    updated_staged = write_entries(staged_content, unreleased, new_entries)
-    updated_worktree = write_entries(worktree_content, worktree_unreleased, new_entries)
+    updated_staged = write_entries(unreleased, new_entries)
+    updated_worktree = write_entries(worktree_unreleased, new_entries)
     changelog_path.write_text(updated_worktree, encoding="utf-8")
     stage_changelog_blob("CHANGELOG.md", updated_staged, repo)
 
@@ -212,6 +223,7 @@ def test_parse_unreleased_section() -> None:
 def test_format_existing_entries() -> None:
     unreleased = UnreleasedSection(
         Path("CHANGELOG.md"),
+        lines=(),
         header_line=0,
         end_line=10,
         entries={
@@ -246,7 +258,7 @@ def test_write_entries_trims_and_skips_empty_bullets() -> None:
         ]
     }
 
-    updated = write_entries(content, unreleased, new_entries)
+    updated = write_entries(unreleased, new_entries)
 
     assert "- Added configurable power assertions\n" in updated
     assert "- Fixed prompt cancellation cleanup\n" in updated
@@ -269,11 +281,79 @@ def test_write_entries_keeps_category_bullets_contiguous() -> None:
     unreleased = parse_unreleased_section(content, Path("CHANGELOG.md"))
     new_entries = {ChangelogCategory.CHANGED: ["Enabled reasoning effort controls."]}
 
-    updated = write_entries(content, unreleased, new_entries)
+    updated = write_entries(unreleased, new_entries)
 
     assert (
         "- Enabled reasoning effort controls.\n- Standardized reasoning effort levels.\n- Updated costs and context windows.\n"
         in updated
+    )
+
+
+def test_write_entries_preserves_subsections_prose_and_unknown_categories() -> None:
+    content = """# Changelog
+
+## [Unreleased]
+
+### Highlights
+
+Long chats got faster.
+
+### Changed
+
+#### Tabs
+
+- Tabs scroll with a mouse wheel.
+
+### Fixed
+
+* Fixed a crash.
+
+#### macOS
+
+- Threads run in QoS classes.
+
+## [1.0.0] - 2024-01-01
+"""
+    unreleased = parse_unreleased_section(content, Path("CHANGELOG.md"))
+    new_entries = {
+        ChangelogCategory.CHANGED: ["Switching tabs is faster."],
+        ChangelogCategory.FIXED: ["Fixed a hang."],
+        ChangelogCategory.ADDED: ["Added a tab peek."],
+    }
+
+    assert (
+        write_entries(unreleased, new_entries)
+        == """# Changelog
+
+## [Unreleased]
+
+### Highlights
+
+Long chats got faster.
+
+### Added
+
+- Added a tab peek.
+
+### Changed
+
+- Switching tabs is faster.
+
+#### Tabs
+
+- Tabs scroll with a mouse wheel.
+
+### Fixed
+
+* Fixed a hang.
+* Fixed a crash.
+
+#### macOS
+
+- Threads run in QoS classes.
+
+## [1.0.0] - 2024-01-01
+"""
     )
 
 
@@ -297,56 +377,106 @@ def test_parse_unreleased_section_skips_empty_bullets() -> None:
 
 
 def test_format_existing_entries_empty() -> None:
-    unreleased = UnreleasedSection(Path("CHANGELOG.md"), header_line=0, end_line=10, entries={})
+    unreleased = UnreleasedSection(Path("CHANGELOG.md"), lines=(), header_line=0, end_line=10, entries={})
 
     assert _format_existing_entries(unreleased) is None
 
 
-def test_entries_added_since_isolates_hand_written_entries() -> None:
-    head = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Old entry.\n")
-    staged = parse_unreleased_section(
-        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- New staged entry.\n- Old entry.\n\n### Fixed\n\n- New fix.\n"
-    )
-    worktree = parse_unreleased_section(
-        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- New staged entry.\n- Worktree only entry.\n- Old entry.\n"
-    )
+def test_flow_authored_entries_exclude_unstaged_worktree_entries(repo: Path, run_git: RunGit) -> None:
+    # Unstaged entries may document other pending work; presenting them as authored for this
+    # commit made the model describe that work in the message.
+    old = "Documented the original behavior."
+    staged_authored = "Documented a staged author change."
+    unrelated = "Added an unrelated feature still being written."
+    path = repo / "CHANGELOG.md"
+    path.write_text(_added_changelog(old), encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: add changelog")
 
-    added = _entries_added_since(head, staged, worktree)
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    path.write_text(_added_changelog(staged_authored, old), encoding="utf-8")
+    run_git(repo, "add", ".")
+    path.write_text(_added_changelog(unrelated, staged_authored, old), encoding="utf-8")
 
-    assert added == {
-        ChangelogCategory.ADDED: ["- New staged entry.", "- Worktree only entry."],
-        ChangelogCategory.FIXED: ["- New fix."],
-    }
+    prepared = prepare_changelog_flow(SimpleNamespace(dir=str(repo)), CommitConfig())
+    (context,) = prepared_changelog_contexts(prepared)
+
+    assert context.authored_entries is not None
+    assert f"- {staged_authored}" in context.authored_entries
+    assert unrelated not in context.authored_entries
 
 
 def test_entries_added_since_empty_when_unchanged() -> None:
     head = parse_unreleased_section("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Old entry.\n")
 
-    assert _entries_added_since(head, head, None) == {}
+    assert _entries_added_since(head, head) == {}
 
 
 def test_apply_revisions_replaces_drops_and_skips_unsafe_ops() -> None:
-    entries = {
-        ChangelogCategory.ADDED: ["- Before", "- Target entry", "- After", "- Authored entry"],
-        ChangelogCategory.FIXED: ["- Drop entry"],
-    }
+    content = """# Changelog
+
+## [Unreleased]
+
+### Added
+
+#### CLI
+
+* Before
+* Target entry
+* Authored entry
+
+### Fixed
+
+#### macOS
+
+- Drop entry
+  wrapped detail of the dropped entry
+
+#### Windows
+
+- Kept fix
+
+## [1.0.0] - 2024-01-01
+"""
     replace_op = ChangelogRevision("- TARGET ENTRY", "- Replacement entry")
     drop_op = ChangelogRevision("- Drop entry", None)
     authored_op = ChangelogRevision("- Authored entry", None)
     unmatched_op = ChangelogRevision("- Missing entry", None)
 
     revised, applied = apply_revisions(
-        entries,
+        parse_unreleased_section(content),
         [replace_op, drop_op, authored_op, unmatched_op],
         {"- target entry", "- drop entry", "- missing entry"},
     )
 
-    assert revised == {
-        ChangelogCategory.ADDED: ["- Before", "- Replacement entry", "- After", "- Authored entry"],
-        ChangelogCategory.FIXED: [],
-    }
     assert applied == [replace_op, drop_op]
-    assert entries[ChangelogCategory.ADDED][1] == "- Target entry"
+    assert revised.entries == {
+        ChangelogCategory.ADDED: ["- Before", "- Replacement entry", "- Authored entry"],
+        ChangelogCategory.FIXED: ["- Kept fix"],
+    }
+    assert (
+        "\n".join(revised.lines)
+        == """# Changelog
+
+## [Unreleased]
+
+### Added
+
+#### CLI
+
+* Before
+* Replacement entry
+* Authored entry
+
+### Fixed
+
+#### Windows
+
+- Kept fix
+
+## [1.0.0] - 2024-01-01
+"""
+    )
 
 
 def test_drop_duplicate_entries_filters_case_insensitively() -> None:
@@ -689,3 +819,230 @@ def test_flow_revision_switch_disables_reconciliation(
     assert "<revise>" not in spec.system_prompt  # type: ignore[attr-defined]
     assert _staged_changelog_content("CHANGELOG.md", repo) == BATCH_CHANGELOG
     assert changelog_path.read_text(encoding="utf-8") == BATCH_CHANGELOG
+
+
+def test_synthesized_updates_reconcile_multiple_boundaries_and_preserve_all_entries(
+    repo: Path,
+    run_git: RunGit,
+) -> None:
+    root_old = "Documented the original root behavior."
+    package_old = "Documented the original package behavior."
+    authored = "Documented an author-approved root change."
+    (repo / "CHANGELOG.md").write_text(_added_changelog(root_old), encoding="utf-8")
+    package = repo / "packages" / "widget"
+    package.mkdir(parents=True)
+    (package / "CHANGELOG.md").write_text(_added_changelog(package_old), encoding="utf-8")
+    (package / "widget.py").write_text("value = 1\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "docs: add changelog boundaries")
+
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    (package / "widget.py").write_text("value = 2\n", encoding="utf-8")
+    (repo / "CHANGELOG.md").write_text(_added_changelog(authored, root_old), encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    config = CommitConfig()
+    prepared = prepare_changelog_flow(SimpleNamespace(dir=str(repo)), config)
+    contexts = prepared_changelog_contexts(prepared)
+    paths = {context.path: context for context in contexts}
+    updates = [
+        ChangelogUpdate(
+            path="packages/widget/CHANGELOG.md",
+            entries={
+                ChangelogCategory.ADDED: [
+                    "- Added package alpha support.",
+                    "- Added package beta support.",
+                    "- Added package gamma support.",
+                ]
+            },
+            revisions=[ChangelogRevision(f"- {package_old}", "- Clarified the package behavior.")],
+        ),
+        ChangelogUpdate(
+            path="CHANGELOG.md",
+            entries={
+                ChangelogCategory.ADDED: [
+                    f"- {authored}",
+                    "- Added a distinct synthesized root change.",
+                ]
+            },
+            revisions=[
+                ChangelogRevision(f"- {root_old}", "- Clarified the root behavior."),
+                ChangelogRevision(f"- {authored}", None),
+            ],
+        ),
+    ]
+
+    assert set(paths) == {"CHANGELOG.md", "packages/widget/CHANGELOG.md"}
+    generated = asyncio.run(prepare_synthesized_updates(prepared, updates, config))
+    applied = apply_changelog_updates(prepared, generated)
+
+    assert len(applied) == 2
+    root_staged = _staged_changelog_content("CHANGELOG.md", repo)
+    package_staged = _staged_changelog_content("packages/widget/CHANGELOG.md", repo)
+    assert root_staged is not None and package_staged is not None
+    assert root_staged.count(f"- {authored}") == 1
+    assert f"- {root_old}" not in root_staged
+    assert "- Clarified the root behavior." in root_staged
+    assert "- Added a distinct synthesized root change." in root_staged
+    assert f"- {package_old}" not in package_staged
+    assert "- Clarified the package behavior." in package_staged
+    assert "- Added package alpha support." in package_staged
+    assert "- Added package beta support." in package_staged
+    assert "- Added package gamma support." in package_staged
+
+
+def test_synthesized_updates_preserve_staged_and_worktree_authored_divergence(
+    repo: Path,
+    run_git: RunGit,
+) -> None:
+    old = "Documented the original behavior."
+    staged_authored = "Documented a staged author change."
+    worktree_authored = "Documented an unstaged author change."
+    path = repo / "CHANGELOG.md"
+    path.write_text(_added_changelog(old), encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    path.write_text(_added_changelog(staged_authored, old), encoding="utf-8")
+    run_git(repo, "add", ".")
+    path.write_text(_added_changelog(worktree_authored, staged_authored, old), encoding="utf-8")
+
+    config = CommitConfig()
+    prepared = prepare_changelog_flow(SimpleNamespace(dir=str(repo)), config)
+    (context,) = prepared_changelog_contexts(prepared)
+    updates = [
+        ChangelogUpdate(
+            path=context.path,
+            entries={
+                ChangelogCategory.ADDED: [
+                    f"- {worktree_authored}",
+                    "- Added a synthesized behavior.",
+                ]
+            },
+            revisions=[
+                ChangelogRevision(f"- {old}", "- Clarified the original behavior."),
+                ChangelogRevision(f"- {staged_authored}", None),
+            ],
+        )
+    ]
+
+    generated = asyncio.run(prepare_synthesized_updates(prepared, updates, config))
+    apply_changelog_updates(prepared, generated)
+
+    staged = _staged_changelog_content("CHANGELOG.md", repo)
+    worktree = path.read_text(encoding="utf-8")
+    assert staged is not None
+    assert f"- {worktree_authored}" not in staged
+    assert f"- {staged_authored}" in staged
+    assert "- Clarified the original behavior." in staged
+    assert "- Added a synthesized behavior." in staged
+    assert f"- {worktree_authored}" in worktree
+    assert f"- {staged_authored}" in worktree
+    assert "- Clarified the original behavior." in worktree
+    assert worktree.count("- Added a synthesized behavior.") == 1
+
+
+def test_synthesized_updates_honor_disabled_revisions(repo: Path, run_git: RunGit) -> None:
+    old = "Documented stable behavior."
+    path = repo / "CHANGELOG.md"
+    path.write_text(_added_changelog(old), encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+
+    config = CommitConfig(changelog_revise=False)
+    prepared = prepare_changelog_flow(SimpleNamespace(dir=str(repo)), config)
+    (context,) = prepared_changelog_contexts(prepared)
+    update = ChangelogUpdate(
+        path=context.path,
+        entries={ChangelogCategory.FIXED: ["- Fixed a separate behavior."]},
+        revisions=[ChangelogRevision(f"- {old}", "- Replaced despite disabled revisions.")],
+    )
+
+    generated = asyncio.run(prepare_synthesized_updates(prepared, [update], config))
+    apply_changelog_updates(prepared, generated)
+
+    staged = _staged_changelog_content("CHANGELOG.md", repo)
+    assert staged is not None
+    assert f"- {old}" in staged
+    assert "Replaced despite disabled revisions." not in staged
+    assert "- Fixed a separate behavior." in staged
+
+
+def test_synthesized_updates_reject_malformed_boundary_coverage(repo: Path, run_git: RunGit) -> None:
+    path = repo / "CHANGELOG.md"
+    path.write_text(_added_changelog(), encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+
+    config = CommitConfig()
+    prepared = prepare_changelog_flow(SimpleNamespace(dir=str(repo)), config)
+    valid = ChangelogUpdate("CHANGELOG.md", {}, [])
+
+    with pytest.raises(ValidationFailure, match="missing changelog updates"):
+        asyncio.run(prepare_synthesized_updates(prepared, [], config))
+    with pytest.raises(ValidationFailure, match="unknown changelog update path"):
+        asyncio.run(
+            prepare_synthesized_updates(
+                prepared,
+                [ChangelogUpdate("unknown/CHANGELOG.md", {}, [])],
+                config,
+            )
+        )
+    with pytest.raises(ValidationFailure, match="duplicate changelog update path"):
+        asyncio.run(prepare_synthesized_updates(prepared, [valid, valid], config))
+
+
+def test_weaver_accepts_seeded_synthesized_context_and_preserves_authored_entries(
+    repo: Path,
+    run_git: RunGit,
+) -> None:
+    old = "Documented the original compose behavior."
+    authored = "Documented an authored compose behavior."
+    path = repo / "CHANGELOG.md"
+    path.write_text(_added_changelog(old), encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: add changelog")
+
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    path.write_text(_added_changelog(authored, old), encoding="utf-8")
+    run_git(repo, "add", ".")
+    target_tree = git.write_real_index_tree(repo)
+    weaver = ChangelogWeaver.create(repo, CommitConfig(), target_tree)
+    assert weaver is not None
+
+    with git.TempGitIndex(repo) as index:
+        git.read_tree_into_index(index.path, git.get_head_hash(repo), repo)
+        weaver.seed_temp_index(repo, index.path)
+        (context,) = weaver.contexts_for_group(["app.py"], repo)
+        converted = weaver.updates_for_group(
+            [
+                ChangelogUpdate(
+                    path=context.path,
+                    entries={ChangelogCategory.ADDED: ["- Added synthesized compose behavior."]},
+                    revisions=[
+                        ChangelogRevision(f"- {old}", "- Clarified the compose behavior."),
+                        ChangelogRevision(f"- {authored}", None),
+                    ],
+                )
+            ],
+            repo,
+        )
+        asyncio.run(weaver.weave_group(["app.py"], "", "", repo, index.path, converted))
+        temporary = git.run_git(["show", ":CHANGELOG.md"], cwd=repo, index_file=index.path).stdout
+
+    weaver.flush(repo)
+    staged = _staged_changelog_content("CHANGELOG.md", repo)
+    assert staged == temporary
+    assert f"- {old}" not in staged
+    assert "- Clarified the compose behavior." in staged
+    assert staged.count(f"- {authored}") == 1
+    assert "- Added synthesized compose behavior." in staged
+    assert path.read_text(encoding="utf-8") == staged
+
+    with pytest.raises(ValidationFailure, match="unknown changelog update path"):
+        weaver.updates_for_group([ChangelogUpdate("unknown/CHANGELOG.md", {}, [])], repo)

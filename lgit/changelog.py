@@ -6,8 +6,8 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +18,13 @@ from .git import run_git
 from .judgment import Judge, JudgmentRequest, Noul, NoulAnswer, clip_text
 from .map_reduce import render_observations_markdown
 from .markdown_output import parse_changelog_response
-from .models import ChangelogCategory, resolve_model_name
+from .models import (
+    ChangelogCategory,
+    ChangelogContext,
+    ChangelogRevision,
+    ChangelogUpdate,
+    resolve_model_name,
+)
 from .templates import render_changelog_prompt
 
 if TYPE_CHECKING:
@@ -49,20 +55,18 @@ _REVISION_LINE_RE = re.compile(r"^\s*(OLD|NEW)\s*:(.*)$", re.IGNORECASE)
 
 @dataclass(frozen=True, slots=True)
 class UnreleasedSection:
-    """Parsed bounds and entries for a changelog's Unreleased section."""
+    """A changelog's `[Unreleased]` section, parsed from ``lines``.
+
+    ``header_line`` and ``end_line`` index ``lines``. :func:`apply_revisions` and
+    :func:`write_entries` splice into ``lines``, so subsection headings, prose and
+    unknown categories around the touched bullets survive verbatim.
+    """
 
     path: Path
+    lines: tuple[str, ...]
     header_line: int
     end_line: int
     entries: dict[ChangelogCategory, list[str]]
-
-
-@dataclass(frozen=True, slots=True)
-class ChangelogRevision:
-    """One reconcile operation that replaces or drops an existing Unreleased entry."""
-
-    old: str
-    new: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +88,6 @@ class _BoundaryPrep:
     stat: str
     rel_path: str
     is_tracked: bool
-    changelog_content: str
-    worktree_content: str
     unreleased: UnreleasedSection
     worktree_unreleased: UnreleasedSection | None
     head_unreleased: UnreleasedSection | None
@@ -149,7 +151,7 @@ def prepare_changelog_flow(args: Any, config: CommitConfig) -> PreparedChangelog
             authored_entries = None
         else:
             existing_entries = _format_entry_map(head_unreleased.entries)
-            authored_entries = _format_entry_map(_entries_added_since(head_unreleased, unreleased, worktree_unreleased))
+            authored_entries = _format_entry_map(_entries_added_since(head_unreleased, unreleased))
 
         can_revise = bool(config.changelog_revise) and head_unreleased is not None and bool(existing_entries)
         prepared.preps.append(
@@ -159,8 +161,6 @@ def prepare_changelog_flow(args: Any, config: CommitConfig) -> PreparedChangelog
                 stat,
                 rel_path,
                 is_tracked,
-                changelog_content,
-                worktree_content,
                 unreleased,
                 worktree_unreleased,
                 head_unreleased,
@@ -170,6 +170,22 @@ def prepare_changelog_flow(args: Any, config: CommitConfig) -> PreparedChangelog
             )
         )
     return prepared
+
+
+def prepared_changelog_contexts(prepared: PreparedChangelogFlow) -> tuple[ChangelogContext, ...]:
+    """Export the captured generation context for every prepared changelog boundary."""
+
+    return tuple(
+        ChangelogContext(
+            path=prep.rel_path,
+            files=prep.boundary.files,
+            is_package=_is_package_changelog(prep.boundary.changelog_path, prepared.repo_dir),
+            existing_entries=prep.existing_entries,
+            authored_entries=prep.authored_entries,
+            can_revise=prep.can_revise,
+        )
+        for prep in prepared.preps
+    )
 
 
 async def generate_changelog_updates(
@@ -200,27 +216,102 @@ async def generate_changelog_updates(
             config,
             observations=_observations_markdown(observations, prep.boundary.files),
         )
-        staged_entries, worktree_entries, _ = _revised_entries(prep, revisions)
-        entries = await drop_duplicate_entries(entries, staged_entries, worktree_entries, judge=judge, config=config)
-        return entries, revisions
+        return await _prepare_generated_update(prep, entries, revisions, judge, config)
 
     return list(await asyncio.gather(*(generate(prep) for prep in prepared.preps)))
 
 
-def _revised_entries(
+async def prepare_synthesized_updates(
+    prepared: PreparedChangelogFlow,
+    updates: Sequence[ChangelogUpdate],
+    config: CommitConfig,
+) -> list[tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]]:
+    """Validate and prepare fused updates in boundary order using standalone reconciliation semantics."""
+
+    by_path = _validated_updates_by_path(updates, tuple(prep.rel_path for prep in prepared.preps), require_all=True)
+    judge = Judge.from_config(config)
+    return list(
+        await asyncio.gather(
+            *(
+                _prepare_generated_update(
+                    prep,
+                    by_path[prep.rel_path].entries,
+                    by_path[prep.rel_path].revisions,
+                    judge,
+                    config,
+                )
+                for prep in prepared.preps
+            )
+        )
+    )
+
+
+async def _prepare_generated_update(
+    prep: _BoundaryPrep,
+    entries: Mapping[ChangelogCategory, Sequence[str]],
+    revisions: Sequence[ChangelogRevision],
+    judge: Judge | None,
+    config: CommitConfig,
+) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
+    """Apply revision protection before filtering generated entries against both changelog snapshots."""
+
+    staged, worktree, _ = _revised_sections(prep, revisions)
+    deduped = await drop_duplicate_entries(
+        entries,
+        staged.entries,
+        worktree.entries if worktree is not None else None,
+        judge=judge,
+        config=config,
+    )
+    return deduped, list(revisions)
+
+
+def _validated_updates_by_path(
+    updates: Sequence[ChangelogUpdate],
+    expected_paths: Collection[str],
+    *,
+    require_all: bool,
+) -> dict[str, ChangelogUpdate]:
+    """Index updates after rejecting paths that cannot be reconciled safely."""
+
+    expected = set(expected_paths)
+    by_path: dict[str, ChangelogUpdate] = {}
+    for update in updates:
+        if update.path not in expected:
+            raise ValidationFailure(
+                f"unknown changelog update path: {update.path!r}",
+                field="changelog",
+                value=update.path,
+            )
+        if update.path in by_path:
+            raise ValidationFailure(
+                f"duplicate changelog update path: {update.path!r}",
+                field="changelog",
+                value=update.path,
+            )
+        by_path[update.path] = update
+    missing = expected.difference(by_path)
+    if require_all and missing:
+        paths = ", ".join(sorted(missing))
+        raise ValidationFailure(f"missing changelog updates for: {paths}", field="changelog", value=paths)
+    return by_path
+
+
+def _revised_sections(
     prep: _BoundaryPrep, revisions: Sequence[ChangelogRevision]
-) -> tuple[dict[ChangelogCategory, list[str]], dict[ChangelogCategory, list[str]] | None, list[ChangelogRevision]]:
-    """Staged and worktree Unreleased entries after ``revisions``, plus the revisions actually applied."""
-    staged_entries = prep.unreleased.entries
-    worktree_entries = prep.worktree_unreleased.entries if prep.worktree_unreleased is not None else None
-    applied: list[ChangelogRevision] = []
-    if prep.can_revise:
-        assert prep.head_unreleased is not None
-        revisable = {entry.casefold() for values in prep.head_unreleased.entries.values() for entry in values}
-        staged_entries, applied = apply_revisions(staged_entries, revisions, revisable)
-        if worktree_entries is not None:
-            worktree_entries, _ = apply_revisions(worktree_entries, revisions, revisable)
-    return staged_entries, worktree_entries, applied
+) -> tuple[UnreleasedSection, UnreleasedSection | None, list[ChangelogRevision]]:
+    """Staged and worktree Unreleased sections after ``revisions``, plus the revisions applied to the staged one."""
+    if not prep.can_revise:
+        return prep.unreleased, prep.worktree_unreleased, []
+    assert prep.head_unreleased is not None
+    revisable = {entry.casefold() for values in prep.head_unreleased.entries.values() for entry in values}
+    staged, applied = apply_revisions(prep.unreleased, revisions, revisable)
+    worktree = (
+        apply_revisions(prep.worktree_unreleased, revisions, revisable)[0]
+        if prep.worktree_unreleased is not None
+        else None
+    )
+    return staged, worktree, applied
 
 
 def apply_changelog_updates(
@@ -233,24 +324,12 @@ def apply_changelog_updates(
     updated: list[ChangelogBoundary] = []
     untracked_to_stage: list[str] = []
     for prep, (entries, revisions) in zip(prepared.preps, generated, strict=True):
-        staged_entries, worktree_entries, applied = _revised_entries(prep, revisions)
+        staged, worktree, applied = _revised_sections(prep, revisions)
         if not entries and not applied:
             continue
 
-        updated_staged = write_entries(
-            prep.changelog_content,
-            replace(prep.unreleased, entries=staged_entries),
-            entries,
-        )
-        updated_worktree = (
-            write_entries(
-                prep.worktree_content,
-                replace(prep.worktree_unreleased, entries=worktree_entries),
-                entries,
-            )
-            if prep.worktree_unreleased is not None and worktree_entries is not None
-            else updated_staged
-        )
+        updated_staged = write_entries(staged, entries)
+        updated_worktree = write_entries(worktree, entries) if worktree is not None else updated_staged
         prep.boundary.changelog_path.write_text(updated_worktree, encoding="utf-8")
 
         if prep.is_tracked:
@@ -357,15 +436,12 @@ class ChangelogWeaver:
             try:
                 target_unreleased = parse_unreleased_section(target_content, path)
                 worktree_content = path.read_text(encoding="utf-8")
-                worktree_unreleased = parse_unreleased_section(worktree_content, path)
+                # weave_group re-parses the worktree copy unguarded; claim only boundaries it can parse.
+                parse_unreleased_section(worktree_content, path)
             except OSError, UnicodeError, ValidationFailure:
                 continue
 
-            authored = _entries_added_since(
-                head_unreleased,
-                target_unreleased,
-                worktree_unreleased if worktree_content != target_content else None,
-            )
+            authored = _entries_added_since(head_unreleased, target_unreleased)
             boundaries.append(
                 _ComposeBoundaryState(
                     rel_path=rel_path,
@@ -486,6 +562,44 @@ class ChangelogWeaver:
         can_revise = bool(self.config.changelog_revise) and bool(existing_entries)
         return _BoundaryContext(parent_unreleased, existing_map, existing_entries, can_revise)
 
+    def contexts_for_group(
+        self,
+        files: Sequence[str],
+        repo_dir: str | os.PathLike[str],
+    ) -> tuple[ChangelogContext, ...]:
+        """Export seeded boundary contexts for one compose group without re-reading its diff."""
+
+        states = {state.changelog_path: state for state in self.boundaries}
+        contexts: list[ChangelogContext] = []
+        for boundary in detect_boundaries(files, tuple(states), repo_dir):
+            state = states[boundary.changelog_path]
+            context = self._boundary_context(state)
+            if context is None:
+                continue
+            contexts.append(
+                ChangelogContext(
+                    path=state.rel_path,
+                    files=boundary.files,
+                    is_package=state.is_package,
+                    existing_entries=context.existing_entries,
+                    authored_entries=_format_entry_map(state.authored),
+                    can_revise=context.can_revise,
+                )
+            )
+        return tuple(contexts)
+
+    def updates_for_group(
+        self,
+        updates: Sequence[ChangelogUpdate],
+        repo_dir: str | os.PathLike[str],
+    ) -> GroupEntries:
+        """Convert validated fused updates to the original paths consumed by :meth:`weave_group`."""
+
+        repo_path = Path(repo_dir)
+        states = {_relative_to(state.changelog_path, repo_path): state for state in self.boundaries}
+        by_path = _validated_updates_by_path(updates, states, require_all=False)
+        return {states[path].changelog_path: (update.entries, update.revisions) for path, update in by_path.items()}
+
     def _prompt_diff(self, diff: str) -> str:
         group_diff = scrub_diff_for_prompt(diff)
         if len(group_diff) > self.config.max_diff_length:
@@ -529,45 +643,22 @@ class ChangelogWeaver:
             else:
                 entries, revisions = await self._generate(state, context, stat, group_diff)
             revisable = {entry.casefold() for values in existing_map.values() for entry in values}
-            if can_revise:
-                revised_map, applied = apply_revisions(
-                    parent_unreleased.entries,
-                    revisions,
-                    revisable,
-                )
-            else:
-                revised_map = {category: list(values) for category, values in parent_unreleased.entries.items()}
-                applied = []
-
-            shadow_unreleased = parse_unreleased_section(
-                state.worktree_content,
-                state.changelog_path,
+            permitted = revisions if can_revise else ()
+            revised, applied = apply_revisions(parent_unreleased, permitted, revisable)
+            shadow, _ = apply_revisions(
+                parse_unreleased_section(state.worktree_content, state.changelog_path),
+                permitted,
+                revisable,
             )
-            if can_revise:
-                shadow_revised_map, _ = apply_revisions(
-                    shadow_unreleased.entries,
-                    revisions,
-                    revisable,
-                )
-            else:
-                shadow_revised_map = {category: list(values) for category, values in shadow_unreleased.entries.items()}
 
             entries = await drop_duplicate_entries(
-                entries, revised_map, shadow_revised_map, judge=Judge.from_config(self.config), config=self.config
+                entries, revised.entries, shadow.entries, judge=Judge.from_config(self.config), config=self.config
             )
             if not entries and not applied:
                 continue
 
-            state.chain_content = write_entries(
-                state.chain_content,
-                replace(parent_unreleased, entries=revised_map),
-                entries,
-            )
-            state.worktree_content = write_entries(
-                state.worktree_content,
-                replace(shadow_unreleased, entries=shadow_revised_map),
-                entries,
-            )
+            state.chain_content = write_entries(revised, entries)
+            state.worktree_content = write_entries(shadow, entries)
             stage_changelog_blob(
                 state.rel_path,
                 state.chain_content,
@@ -613,7 +704,7 @@ class ChangelogWeaver:
 def parse_unreleased_section(content: str, path: str | os.PathLike[str] = "CHANGELOG.md") -> UnreleasedSection:
     """Parse the `[Unreleased]` section boundaries and existing entries."""
 
-    lines = content.splitlines()
+    lines = tuple(content.split("\n"))
     header_line: int | None = None
     for index, line in enumerate(lines):
         trimmed = line.strip().lower()
@@ -635,52 +726,187 @@ def parse_unreleased_section(content: str, path: str | os.PathLike[str] = "CHANG
             break
 
     entries: dict[ChangelogCategory, list[str]] = {}
-    current_category: ChangelogCategory | None = None
-    for line in lines[header_line + 1 : end_line]:
-        trimmed = line.strip()
-        if trimmed.startswith("### "):
-            category_name = trimmed.removeprefix("### ").strip()
-            current_category = _category_or_none(category_name)
-        elif current_category is not None and trimmed.startswith(("- ", "* ")):
-            normalized = normalize_changelog_entry(trimmed)
-            if normalized is not None:
-                entries.setdefault(current_category, []).append(normalized)
-    return UnreleasedSection(Path(path), header_line, end_line, entries)
+    for _, category, entry in _section_bullets(lines, header_line + 1, end_line):
+        entries.setdefault(category, []).append(entry)
+    return UnreleasedSection(Path(path), lines, header_line, end_line, entries)
 
 
 def write_entries(
-    content: str,
-    unreleased: UnreleasedSection,
+    section: UnreleasedSection,
     new_entries: Mapping[ChangelogCategory, Sequence[str]] | Mapping[str, Sequence[str]],
 ) -> str:
-    """Rebuild the Unreleased section with new entries before existing entries."""
+    """Return the changelog with ``new_entries`` added at the top of their Unreleased categories.
 
-    normalized_new = _coerce_entries(new_entries)
+    Only the inserted lines change: subsection headings, prose, unknown categories and
+    existing bullets stay byte-for-byte. New bullets join a category's leading list (in its
+    marker style) or, when the category opens with a subsection, sit as their own list above
+    it. A missing category is created at its :meth:`ChangelogCategory.render_order` slot.
+    """
 
-    lines = content.split("\n")
-    result: list[str] = list(lines[: unreleased.header_line + 1])
-    result.append("")
-
-    existing = unreleased.entries
-    for category in ChangelogCategory.render_order():
-        fresh = normalized_new.get(category, [])
-        old = existing.get(category, [])
-        if not fresh and not old:
+    lines = list(section.lines)
+    start, end = section.header_line + 1, section.end_line
+    order = ChangelogCategory.render_order()
+    for category, fresh in sorted(_coerce_entries(new_entries).items(), key=lambda item: order.index(item[0])):
+        headings = _category_headings(lines, start, end)
+        heading = next((index for index, found in headings if found is category), None)
+        if heading is None:
+            later = next((index for index, found in headings if order.index(found) > order.index(category)), None)
+            if later is None:
+                later = next(index + 1 for index in range(end - 1, section.header_line - 1, -1) if lines[index].strip())
+            end += _splice(lines, later, [f"### {category.value}", "", *fresh])
             continue
+        first = next((index for index in range(heading + 1, end) if lines[index].strip()), None)
+        if first is not None and _is_list_item(lines[first]):
+            prefix = _bullet_prefix(lines[first])
+            lines[first:first] = [prefix + entry.removeprefix("- ") for entry in fresh]
+            end += len(fresh)
+        else:
+            end += _splice(lines, heading + 1 if first is None else first, fresh)
+    return "\n".join(lines)
 
-        result.append(f"### {category.value}")
-        result.append("")
-        result.extend(fresh)
-        result.extend(old)
-        result.append("")
 
-    while result and result[-1] == "":
-        result.pop()
-    result.append("")
-    if unreleased.end_line < len(lines):
-        result.extend(lines[unreleased.end_line :])
+def apply_revisions(
+    section: UnreleasedSection,
+    revisions: Sequence[ChangelogRevision],
+    revisable: Collection[str],
+) -> tuple[UnreleasedSection, list[ChangelogRevision]]:
+    """Reword or drop existing Unreleased bullets in place; returns the revised section and the revisions that matched.
 
-    return "\n".join(result)
+    Each revision takes the first bullet (file order) whose normalized text matches ``old``
+    case-insensitively, and only when that text is in ``revisable``. A reworded bullet keeps
+    its indent and marker; a dropped one takes its continuation lines along, plus any
+    subsection or category heading it leaves empty.
+    """
+
+    lines = list(section.lines)
+    start, end = section.header_line + 1, section.end_line
+    applied: list[ChangelogRevision] = []
+    for revision in revisions:
+        target = revision.old.casefold()
+        if target not in revisable:
+            continue
+        bullet = next((i for i, _, entry in _section_bullets(lines, start, end) if entry.casefold() == target), None)
+        if bullet is None:
+            continue
+        if revision.new is None:
+            end -= _drop_item(lines, bullet, start, end)
+        else:
+            lines[bullet] = _bullet_prefix(lines[bullet]) + revision.new.removeprefix("- ")
+        applied.append(revision)
+    if not applied:
+        return section, applied
+    return parse_unreleased_section("\n".join(lines), section.path), applied
+
+
+def _section_bullets(lines: Sequence[str], start: int, end: int) -> Iterator[tuple[int, ChangelogCategory, str]]:
+    """Index, category and normalized text of each bullet filed under a known `###` category."""
+
+    category: ChangelogCategory | None = None
+    for index in range(start, end):
+        trimmed = lines[index].strip()
+        if (name := _subheading(trimmed)) is not None:
+            category = _category_or_none(name)
+        elif category is not None and trimmed.startswith(("- ", "* ")):
+            entry = normalize_changelog_entry(trimmed)
+            if entry is not None:
+                yield index, category, entry
+
+
+def _category_headings(lines: Sequence[str], start: int, end: int) -> list[tuple[int, ChangelogCategory]]:
+    """Index and category of each `###` heading naming a known category, in file order."""
+
+    return [
+        (index, category)
+        for index in range(start, end)
+        if (name := _subheading(lines[index])) is not None and (category := _category_or_none(name)) is not None
+    ]
+
+
+def _subheading(line: str) -> str | None:
+    """Title of a `###` heading line, or None for any other line."""
+
+    trimmed = line.strip()
+    return trimmed.removeprefix("### ") if trimmed.startswith("### ") else None
+
+
+def _heading_level(line: str) -> int:
+    """ATX heading level of ``line``; 0 when it is not a heading."""
+
+    stripped = line.strip()
+    level = len(stripped) - len(stripped.lstrip("#"))
+    return level if 1 <= level <= 6 and stripped[level : level + 1] in ("", " ", "\t") else 0
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _is_list_item(line: str) -> bool:
+    return line.lstrip().startswith(("- ", "* "))
+
+
+def _bullet_prefix(line: str) -> str:
+    """Indent and marker (``- ``/``* ``) of a list item line."""
+
+    return line[: _indent(line) + 2]
+
+
+def _splice(lines: list[str], index: int, block: Sequence[str]) -> int:
+    """Insert ``block`` at ``index`` set off by blank lines from non-blank neighbours; returns lines added."""
+
+    lead = [""] if index > 0 and lines[index - 1].strip() else []
+    trail = [""] if index < len(lines) and lines[index].strip() else []
+    padded = [*lead, *block, *trail]
+    lines[index:index] = padded
+    return len(padded)
+
+
+def _item_end(lines: Sequence[str], index: int, end: int) -> int:
+    """Index just past the list item at ``index``: its bullet line plus continuation lines and nested items."""
+
+    indent = _indent(lines[index])
+    stop = index + 1
+    while stop < end:
+        line = lines[stop]
+        if not line.strip():
+            following = next((i for i in range(stop + 1, end) if lines[i].strip()), end)
+            if following == end or _indent(lines[following]) <= indent:
+                break
+            stop = following
+        elif _heading_level(line) or (_is_list_item(line) and _indent(line) <= indent):
+            break
+        stop += 1
+    return stop
+
+
+def _drop_item(lines: list[str], index: int, start: int, end: int) -> int:
+    """Delete the list item at ``index`` and each enclosing `###`/`####` heading it leaves empty.
+
+    ``start``/``end`` bound the Unreleased body; returns how many lines were deleted.
+    """
+
+    stop = _item_end(lines, index, end)
+    if stop < end and not lines[stop].strip() and not lines[index - 1].strip():
+        stop += 1  # the item was a paragraph of its own: keep one separating blank, not two
+    del lines[index:stop]
+    removed = stop - index
+    end -= removed
+    emptied_level = 7
+    while True:
+        heading = next((i for i in range(index - 1, start - 1, -1) if _heading_level(lines[i])), None)
+        if heading is None:
+            break
+        level = _heading_level(lines[heading])
+        if level < 3 or level >= emptied_level:
+            break
+        body_end = next((i for i in range(heading + 1, end) if 0 < _heading_level(lines[i]) <= level), end)
+        if any(lines[i].strip() for i in range(heading + 1, body_end)):
+            break
+        del lines[heading:body_end]
+        removed += body_end - heading
+        end -= body_end - heading
+        index, emptied_level = heading, level
+    return removed
 
 
 def stage_changelog_blob(
@@ -923,59 +1149,26 @@ def _head_unreleased(
     """
     result = run_git(["show", f"HEAD:{rel_path}"], cwd=dir, check=False, allow_exit_codes=(128,))
     if result.returncode != 0:
-        return UnreleasedSection(Path(path), 0, 0, {})
+        return UnreleasedSection(Path(path), (), 0, 0, {})
     try:
         return parse_unreleased_section(result.stdout, path)
     except ValidationFailure:
         return None
 
 
-def _entries_added_since(
-    head: UnreleasedSection,
-    *sections: UnreleasedSection | None,
-) -> dict[ChangelogCategory, list[str]]:
-    """Unreleased entries present now but absent from HEAD — hand-written for this change."""
+def _entries_added_since(head: UnreleasedSection, committed: UnreleasedSection) -> dict[ChangelogCategory, list[str]]:
+    """Unreleased entries the commit's own changelog copy adds over HEAD — hand-written for this change.
+
+    ``committed`` is the staged copy (compose: the target tree), never the worktree: unstaged entries
+    may document other pending work, so they only reach the duplicate filter.
+    """
     baseline = {entry.casefold() for values in head.entries.values() for entry in values}
     added: dict[ChangelogCategory, list[str]] = {}
-    for section in sections:
-        if section is None:
-            continue
-        for category, values in section.entries.items():
-            bucket = added.setdefault(category, [])
-            for entry in values:
-                if entry.casefold() not in baseline and entry not in bucket:
-                    bucket.append(entry)
-    return {category: values for category, values in added.items() if values}
-
-
-def apply_revisions(
-    entries: Mapping[ChangelogCategory, Sequence[str]],
-    revisions: Sequence[ChangelogRevision],
-    revisable: Collection[str],
-) -> tuple[dict[ChangelogCategory, list[str]], list[ChangelogRevision]]:
-    """Apply safe reconciliation operations and return the operations that matched."""
-
-    revised = {category: list(values) for category, values in entries.items()}
-    applied: list[ChangelogRevision] = []
-    for revision in revisions:
-        target = revision.old.casefold()
-        if target not in revisable:
-            continue
-        matched = False
-        for values in revised.values():
-            for index, entry in enumerate(values):
-                if entry.casefold() != target:
-                    continue
-                if revision.new is None:
-                    values.pop(index)
-                else:
-                    values[index] = revision.new
-                applied.append(revision)
-                matched = True
-                break
-            if matched:
-                break
-    return revised, applied
+    for category, values in committed.entries.items():
+        fresh = [entry for entry in values if entry.casefold() not in baseline]
+        if fresh:
+            added[category] = list(dict.fromkeys(fresh))
+    return added
 
 
 def _report_applied_revisions(applied: Sequence[ChangelogRevision]) -> None:
@@ -1188,7 +1381,6 @@ def _parse_jsonish(value: Any) -> Any:
 __all__ = [
     "ChangelogBoundary",
     "ChangelogWeaver",
-    "ChangelogRevision",
     "PreparedChangelogFlow",
     "UnreleasedSection",
     "apply_changelog_updates",
@@ -1202,6 +1394,8 @@ __all__ = [
     "parse_unreleased_section",
     "judge_changelog_worthiness",
     "prepare_changelog_flow",
+    "prepare_synthesized_updates",
+    "prepared_changelog_contexts",
     "run_changelog_flow",
     "stage_changelog_blob",
     "write_entries",

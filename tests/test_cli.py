@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from lgit import cli, git, profile
+from lgit import api, cli, git, profile
 from lgit.api import summary_from_holistic_analysis
 from lgit.config import CommitConfig
 from lgit.models import ConventionalAnalysis
@@ -229,3 +231,187 @@ def test_auto_fast_changed_lines_can_be_disabled() -> None:
     numstat = "10\t5\tsrc/main.rs"
 
     assert cli._auto_fast_changed_lines(numstat, config) is None
+
+
+@pytest.mark.parametrize("auto_fast", [0, 200])
+def test_shared_generation_repairs_summary_and_preserves_changelog_copies(
+    repo: Path,
+    run_git: Callable[..., subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    auto_fast: int,
+) -> None:
+    original = "# Changelog\n\n## [Unreleased]\n\n### Changed\n\n- Returned one as the default value\n"
+    authored = "- Added hand-authored migration guidance\n"
+    staged = original + authored
+    worktree = staged + "- Retained local draft notes\n"
+    (repo / "CHANGELOG.md").write_text(original, encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: recorded unreleased behavior")
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    (repo / "CHANGELOG.md").write_text(staged, encoding="utf-8")
+    run_git(repo, "add", "app.py", "CHANGELOG.md")
+    (repo / "CHANGELOG.md").write_text(worktree, encoding="utf-8")
+    operations: list[str] = []
+    models: list[str | None] = []
+
+    async def fake_response(config: CommitConfig, spec: api.OneShotSpec) -> SimpleNamespace:
+        operations.append(spec.operation)
+        models.append(spec.model)
+        if spec.operation == "synthesis":
+            (repo / "later.py").write_text("later = True\n", encoding="utf-8")
+            run_git(repo, "add", "later.py")
+            return SimpleNamespace(
+                output={
+                    "commit": {
+                        "type": "fix",
+                        "summary": "default result is now two",
+                        "details": ["Changed the default result from one to two."],
+                    },
+                    "changelogs": [
+                        {
+                            "path": "CHANGELOG.md",
+                            "entries": {"Changed": ["Added hand-authored migration guidance"]},
+                            "revisions": [
+                                {"old": "- Returned one as the default value", "new": "- Returned two by default"},
+                            ],
+                        }
+                    ],
+                },
+                text_content="",
+            )
+        if spec.operation == "summary":
+            return SimpleNamespace(output={"summary": "default result is now two"}, text_content="")
+        if spec.operation == "summary-rewrite":
+            return SimpleNamespace(output={"summary": "fixed the default result"}, text_content="")
+        raise AssertionError(f"Unexpected independent diff read: {spec.operation}")
+
+    monkeypatch.setattr(api, "_run_oneshot_response", fake_response)
+    config = CommitConfig(
+        auto_fast_threshold_lines=auto_fast,
+        analysis_model="analysis-model",
+        fast_model="fast-model",
+        summary_model="summary-model",
+        judgment_enabled=False,
+    )
+    asyncio.run(cli._run_standard(_args("--dir", str(repo)), config))
+
+    assert operations == ["synthesis", "summary", "summary-rewrite"]
+    assert models[0] == ("fast-model" if auto_fast else "analysis-model")
+    assert models[1:] == ["summary-model", "summary-model"]
+    assert run_git(repo, "log", "-1", "--format=%s").stdout.strip() == "fix: fixed the default result"
+    assert run_git(repo, "show", "HEAD:app.py").stdout == "def value():\n    return 2\n"
+    committed = run_git(repo, "show", "HEAD:CHANGELOG.md").stdout
+    assert "- Returned two by default" in committed
+    assert "- Returned one as the default value" not in committed
+    assert committed.count(authored.strip()) == 1
+    assert "local draft" not in committed
+    assert "local draft" in (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert run_git(repo, "diff", "--cached", "--name-only").stdout.strip() == "later.py"
+    assert run_git(repo, "cat-file", "-e", "HEAD:later.py", check=False).returncode != 0
+
+
+def test_shared_generation_does_not_force_docs_type_from_boundary_files(
+    repo: Path,
+    run_git: Callable[..., subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = repo / "packages" / "example"
+    package.mkdir(parents=True)
+    (package / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n", encoding="utf-8")
+    (package / "README.md").write_text("Example package.\n", encoding="utf-8")
+    prompt = repo / "prompts" / "response.md"
+    prompt.parent.mkdir()
+    prompt.write_text("Return a successful result.\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-m", "feat: added response policy")
+
+    (package / "README.md").write_text("Example package documentation.\n", encoding="utf-8")
+    prompt.write_text("Return a successful result or explain validation errors.\n", encoding="utf-8")
+    run_git(repo, "add", ".")
+
+    async def fake_response(config: CommitConfig, spec: api.OneShotSpec) -> SimpleNamespace:
+        assert spec.operation == "synthesis"
+        return SimpleNamespace(
+            output={
+                "commit": {
+                    "type": "fix",
+                    "summary": "clarified validation failures in the response policy",
+                    "details": ["Documented validation failures in generated responses."],
+                },
+                "changelogs": [{"path": "packages/example/CHANGELOG.md", "entries": {}, "revisions": []}],
+            },
+            text_content="",
+        )
+
+    monkeypatch.setattr(api, "_run_oneshot_response", fake_response)
+    asyncio.run(cli._run_standard(_args("--dir", str(repo)), CommitConfig(judgment_enabled=False)))
+
+    assert run_git(repo, "log", "-1", "--format=%s").stdout.strip().startswith("fix:")
+    assert run_git(repo, "show", "HEAD:prompts/response.md").stdout.endswith("explain validation errors.\n")
+    assert run_git(repo, "show", "HEAD:packages/example/CHANGELOG.md").stdout == "# Changelog\n\n## [Unreleased]\n"
+
+
+@pytest.mark.parametrize("option", ["--dry-run", "--no-changelog"])
+def test_nonwriting_or_changelog_disabled_mode_does_not_synthesize_updates(
+    repo: Path,
+    run_git: Callable[..., subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    option: str,
+) -> None:
+    changelog = "# Changelog\n\n## [Unreleased]\n"
+    (repo / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: added changelog")
+    original_head = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+
+    async def fake_response(config: CommitConfig, spec: api.OneShotSpec) -> SimpleNamespace:
+        assert spec.operation == "fast"
+        return SimpleNamespace(
+            output={"type": "fix", "summary": "fixed the default result", "details": ["Returned two by default."]},
+            text_content="",
+        )
+
+    monkeypatch.setattr(api, "_run_oneshot_response", fake_response)
+    asyncio.run(cli._run_standard(_args("--dir", str(repo), option), CommitConfig(judgment_enabled=False)))
+
+    assert (repo / "CHANGELOG.md").read_text(encoding="utf-8") == changelog
+    if option == "--dry-run":
+        assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == original_head
+        assert run_git(repo, "diff", "--cached", "--name-only").stdout.strip() == "app.py"
+    else:
+        assert run_git(repo, "show", "HEAD:app.py").stdout == "def value():\n    return 2\n"
+        assert run_git(repo, "show", "HEAD:CHANGELOG.md").stdout == changelog
+
+
+def test_incomplete_shared_changelog_falls_back_without_losing_updates(
+    repo: Path,
+    run_git: Callable[..., subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n", encoding="utf-8")
+    run_git(repo, "add", "CHANGELOG.md")
+    run_git(repo, "commit", "-m", "docs: added changelog")
+    (repo / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    run_git(repo, "add", "app.py")
+    operations: list[str] = []
+
+    async def fake_response(config: CommitConfig, spec: api.OneShotSpec) -> SimpleNamespace:
+        operations.append(spec.operation)
+        commit = {"type": "fix", "summary": "fixed the default result", "details": ["Returned two by default."]}
+        if spec.operation == "synthesis":
+            return SimpleNamespace(output={"commit": commit, "changelogs": []}, text_content="")
+        if spec.operation == "fast":
+            return SimpleNamespace(output=commit, text_content="")
+        if spec.operation == "changelog":
+            return SimpleNamespace(output={"entries": {"Fixed": ["Returned two by default"]}}, text_content="")
+        raise AssertionError(spec.operation)
+
+    monkeypatch.setattr(api, "_run_oneshot_response", fake_response)
+    asyncio.run(cli._run_standard(_args("--dir", str(repo)), CommitConfig(judgment_enabled=False)))
+
+    assert operations[0] == "synthesis"
+    assert sorted(operations[1:]) == ["changelog", "fast"]
+    assert run_git(repo, "show", "HEAD:app.py").stdout == "def value():\n    return 2\n"
+    assert "- Returned two by default" in run_git(repo, "show", "HEAD:CHANGELOG.md").stdout

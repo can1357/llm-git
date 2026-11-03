@@ -682,6 +682,43 @@ class ChangelogCategory(StrEnum):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ChangelogRevision:
+    """One reconcile operation replacing or dropping an existing Unreleased entry."""
+
+    old: str
+    new: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChangelogContext:
+    """One changelog boundary and the captured Unreleased context used for generation."""
+
+    path: str
+    files: tuple[str, ...]
+    is_package: bool
+    existing_entries: str | None
+    authored_entries: str | None
+    can_revise: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChangelogUpdate:
+    """Generated entries and reconciliation operations for one changelog boundary."""
+
+    path: str
+    entries: dict[ChangelogCategory, list[str]]
+    revisions: list[ChangelogRevision]
+
+
+@dataclass(frozen=True, slots=True)
+class CommitEvidence:
+    """Shared conventional-commit analysis and boundary-specific changelog updates."""
+
+    analysis: ConventionalAnalysis
+    changelogs: tuple[ChangelogUpdate, ...]
+
+
 def _strict_changelog_category(name: str) -> ChangelogCategory:
     normalized = name.strip().lower()
     for category in ChangelogCategory:
@@ -924,6 +961,10 @@ __all__ = [
     "ConventionalAnalysis",
     "CommitMetadata",
     "ChangelogCategory",
+    "ChangelogRevision",
+    "ChangelogContext",
+    "ChangelogUpdate",
+    "CommitEvidence",
     "HunkSelector",
     "FileChange",
     "ChangeGroup",
