@@ -17,7 +17,8 @@ splits large inputs under that ceiling.
 key is configured; every caller treats that as "no judge" and keeps its LLM-only
 behaviour, so the feature degrades to the previous flow rather than failing.
 Answers are cached in the shared :class:`~lgit.cache.LlmCache` and usage is
-recorded through :mod:`lgit.pricing` like any other model call.
+recorded through :mod:`lgit.pricing` like any other model call, including billed
+responses whose answers fail validation.
 """
 
 from __future__ import annotations
@@ -225,8 +226,9 @@ class Judge:
                 return _parse_answers(json.loads(cached.response), request.questions)
         profile.print_llm_progress(lambda: f"judge {operation} model={self.model} questions={len(wire_questions)}")
         payload = await self._post(client, body)
-        answers = _parse_answers(payload.get("answers"), request.questions)
+        # A completed request is billed even when its answers cannot be used.
         cost = self._record_spend(cache_operation, payload.get("usage"))
+        answers = _parse_answers(payload.get("answers"), request.questions)
         if sink is not None and key is not None:
             sink.put(key, self.model, cache_operation, json.dumps(body), json.dumps(payload.get("answers")), cost)
         return answers

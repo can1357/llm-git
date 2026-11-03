@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 from lgit import cache as llm_cache
-from lgit import pricing
+from lgit import cli, pricing
 from lgit.config import CommitConfig
 from lgit.judgment import Choice, ChoiceAnswer, Judge, JudgmentError, JudgmentRequest, Noul, NoulAnswer, chunk_by_chars
 
@@ -101,6 +101,23 @@ def test_judge_parses_answers_and_records_spend(monkeypatch: pytest.MonkeyPatch)
     spend = pricing.session_spend()
     assert spend.usage.input_tokens == 1_000_000
     assert spend.cost_usd == pytest.approx(0.042)
+
+
+def test_printed_cost_includes_billed_judgments_that_cannot_be_used(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pricing.reset_session()
+    monkeypatch.setattr(llm_cache.LlmCache, "instance", classmethod(lambda cls: None))
+    _mock_client(monkeypatch, lambda request, _: _ok({}, input_tokens=1_000_000))
+    try:
+        pricing.record_usage("claude-haiku-4-5", pricing.TokenUsage(input_tokens=10_000))
+        with pytest.warns(RuntimeWarning, match="1/1 op judgments failed"):
+            answers = asyncio.run(_judge().judge_all("op", [JudgmentRequest("s", {"m": Noul("q")})]))
+        assert answers == [None]
+        cli._print_llm_spend()
+        assert "LLM cost: $0.0520" in capsys.readouterr().out
+    finally:
+        pricing.reset_session()
 
 
 def test_judge_rejects_unknown_choice_and_missing_answer(monkeypatch: pytest.MonkeyPatch) -> None:

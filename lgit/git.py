@@ -495,6 +495,31 @@ def write_index_tree(index_file: str | os.PathLike[str], dir: str | os.PathLike[
     return run_git(["write-tree"], cwd=dir, index_file=index_file).stdout.strip()
 
 
+def tree_with_index_paths(tree: str, paths: Sequence[str], dir: str | os.PathLike[str] = ".") -> str:
+    """Overlay exact index objects onto a captured tree without including unrelated staging.
+
+    Raises GitError when a selected entry is conflicted or a tree cannot be
+    written. The live index and worktree are never modified.
+    """
+    if not paths:
+        return tree
+    entries = run_git_bytes(
+        ["ls-files", "--stage", "-z", "--", *(f":(literal){path}" for path in paths)],
+        cwd=dir,
+    ).stdout_bytes
+    with TempGitIndex(dir) as index:
+        read_tree_into_index(index.path, tree, dir)
+        run_git(["update-index", "--force-remove", "--", *paths], cwd=dir, index_file=index.path)
+        if entries:
+            run_git_bytes(
+                ["update-index", "-z", "--index-info"],
+                cwd=dir,
+                index_file=index.path,
+                input_bytes=entries,
+            )
+        return write_index_tree(index.path, dir)
+
+
 def get_head_hash(dir: str | os.PathLike[str] = ".") -> str:
     """Return HEAD's commit oid."""
 

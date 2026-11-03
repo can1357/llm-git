@@ -67,6 +67,33 @@ def test_commit_snapshot_tree_commits_snapshot_and_keeps_drifted_staging(repo: P
     assert run_git(repo, "rev-parse", "HEAD").stdout.strip() == commit_hash
 
 
+def test_snapshot_overlay_preserves_bytes_literal_paths_and_unrelated_staging(repo: Path, run_git: RunGit) -> None:
+    run_git(repo, "config", "core.autocrlf", "false")
+    path = "release [draft].md"
+    old = b"# Changelog\r\n\r\n- Existing entry\r\n"
+    staged = b"# Changelog\r\n\r\n- Generated entry  \r\n- Existing entry\r\n"
+    local = staged + b"- Local only\r\n"
+    (repo / path).write_bytes(old)
+    run_git(repo, "add", "--", path)
+    captured = git.write_real_index_tree(repo)
+
+    (repo / path).write_bytes(staged)
+    (repo / "unrelated.txt").write_text("next commit\n", encoding="utf-8")
+    run_git(repo, "add", "--", path, "unrelated.txt")
+    (repo / path).write_bytes(local)
+    live_index = git.write_real_index_tree(repo)
+    run_git(repo, "config", "color.ui", "always")
+    run_git(repo, "config", "diff.noprefix", "true")
+    run_git(repo, "config", "apply.whitespace", "fix")
+
+    result = git.tree_with_index_paths(captured, [path], repo)
+
+    assert git.run_git_bytes(["show", f"{result}:{path}"], cwd=repo).stdout_bytes == staged
+    assert run_git(repo, "cat-file", "-e", f"{result}:unrelated.txt", check=False).returncode != 0
+    assert git.write_real_index_tree(repo) == live_index
+    assert (repo / path).read_bytes() == local
+
+
 def test_get_git_diff_uses_minimal_context_when_large(repo: Path, run_git: RunGit) -> None:
     base = "".join(f"base {index}\n" if index % 5 == 0 else f"stable {index}\n" for index in range(200))
     (repo / "file.txt").write_text(base, encoding="utf-8")
