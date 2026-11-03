@@ -1,0 +1,6 @@
+#!/bin/sh
+# Launch the reel review widget for a repo (default: current directory).
+# Usage: reel [dir]   — symlink this file onto your PATH to use it anywhere.
+DIR="$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)"
+[ -d "$DIR/dist" ] || (cd "$DIR" && bunx vite build) || exit 1
+exec "$DIR/node_modules/.bin/electron" "$DIR" "${1:-$PWD}"
