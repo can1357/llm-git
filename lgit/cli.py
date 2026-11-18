@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from . import cache, git, pricing, profile, repo, style, synthesis
+from . import cache, git, pricing, profile, reformat, repo, style, synthesis
 from .analysis import ScopeAnalyzer, extract_scope_candidates
 from .api import (
     generate_analysis_with_map_reduce,
@@ -115,6 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--fast", "-f", action="store_true", help="use one LLM call to generate the complete commit message"
     )
     routes.add_argument("--rewrite", action="store_true", help="rewrite recent commit messages")
+    routes.add_argument(
+        "--fmt",
+        action="store_true",
+        help="commit only the formatting-only part of pending changes as a style commit, without any LLM call",
+    )
     routes.add_argument("--test", action="store_true", help="run fixture-test mode")
 
     rewrite = parser.add_argument_group("rewrite")
@@ -211,6 +216,8 @@ async def run_cli(args: argparse.Namespace) -> int:
         with profile.section("ensure_git_repo", collector):
             git.ensure_git_repo(args.dir)
 
+        if args.fmt:
+            return _run_fmt(args, config)
         if _wants_rewrite(args):
             return await _run_rewrite(args, config)
         if _wants_compose(args):
@@ -370,6 +377,39 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
                 _push_changes(args.dir)
 
     _print_llm_spend()
+    return 0
+
+
+def _run_fmt(args: argparse.Namespace, config: CommitConfig) -> int:
+    """Commit the formatting-only regions of every pending modification; everything else stays pending."""
+
+    plan = reformat.plan_formatting(args.dir)
+    if plan.partially_staged:
+        style.status(
+            f"{style.info('›')} "
+            f"{style.dim(f'Skipped {len(plan.partially_staged)} files with both staged and unstaged changes')}"
+        )
+    if not plan.files:
+        print("No formatting-only changes found.")
+        return 0
+    message = _build_reformat_commit([file.path for file in plan.files], config, args)
+    partial = sum(not file.complete for file in plan.files)
+    style.status(
+        f"{style.info('›')} "
+        f"{style.dim(f'{len(plan.files)} files with formatting-only changes ({partial} keep other changes pending)')}"
+    )
+    if args.dry_run:
+        for file in plan.files:
+            print(f"  {file.path}{'' if file.complete else ' (partial)'}")
+        _print_message(message, title="DRY RUN")
+        return 0
+    text = message.format_commit_message()
+    if args.signoff or config.signoff:
+        text = git.append_signoff_trailer(text, args.dir)
+    commit = reformat.commit_formatting(plan, text, args.dir, sign=bool(args.sign or config.gpg_sign))
+    print(style.success(f"{style.icons.SUCCESS} Committed {message.format_commit_message()} as {commit[:8]}"))
+    if args.push:
+        git.run_git(["push"], cwd=args.dir)
     return 0
 
 
@@ -1162,6 +1202,7 @@ def _validate_arg_conflicts(parser: argparse.ArgumentParser, args: argparse.Name
     selected_routes = [
         name
         for name, active in (
+            ("--fmt", bool(args.fmt)),
             ("--compose", _wants_compose(args)),
             ("--rewrite", _wants_rewrite(args)),
             ("--test", _wants_test(args)),
@@ -1171,7 +1212,9 @@ def _validate_arg_conflicts(parser: argparse.ArgumentParser, args: argparse.Name
     if len(selected_routes) > 1:
         parser.error(f"conflicting modes: {' and '.join(selected_routes)}")
     if args.fast and selected_routes:
-        parser.error("--fast cannot be combined with compose, rewrite, or test mode")
+        parser.error("--fast cannot be combined with fmt, compose, rewrite, or test mode")
+    if args.fmt and (args.mode != Mode.STAGED.value or args.amend):
+        parser.error("--fmt commits pending changes on top of HEAD; it cannot be combined with --mode or --amend")
     if args.mode == Mode.COMMIT.value and not args.target:
         parser.error("--target is required with --mode commit")
     if args.test_add and not args.test_name:

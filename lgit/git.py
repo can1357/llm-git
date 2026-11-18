@@ -520,6 +520,15 @@ def tree_with_index_paths(tree: str, paths: Sequence[str], dir: str | os.PathLik
         return write_index_tree(index.path, dir)
 
 
+def hash_blob(contents: bytes, dir: str | os.PathLike[str] = ".") -> str:
+    """Write `contents` as a blob object and return its oid."""
+
+    oid = run_git_bytes(["hash-object", "-w", "--stdin"], cwd=dir, input_bytes=contents).stdout.decode().strip()
+    if not oid:
+        raise GitError("git hash-object returned an empty oid")
+    return oid
+
+
 def get_head_hash(dir: str | os.PathLike[str] = ".") -> str:
     """Return HEAD's commit oid."""
 

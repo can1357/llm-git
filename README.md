@@ -87,6 +87,24 @@ lgit --compose --compose-max-commits 5
 lgit --compose --compose-test-after-each
 ```
 
+### Format Mode
+
+Commit only the formatting-only part of pending changes (after running a formatter), without any LLM call:
+
+```bash
+lgit --fmt                          # Commit as `style: reformatted N files`; other changes stay pending
+lgit --fmt --dry-run                # List the files (partial ones keep other changes) and the message
+```
+
+Format mode recognizes layout changes and selected formatter rewrites, including reordered import groups:
+
+- **JS, TS, JSX, TSX:** quote style, optional semicolons and arrow parentheses, sorted named imports, and text reflow that preserves rendered spaces. Component children keep their shape.
+- **Python:** equivalent string literals and implicit string joins, redundant annotation and expression parentheses, and sorted import names.
+- **Rust:** nested `use` groups, continued strings, and braces around simple match-arm values.
+- **Go:** grouped imports, redundant expression parentheses, optional semicolons, and numeric literal case.
+
+Lexical formatting changes are also recognized in C/C++/C#, Java/Kotlin/Scala/Swift/Dart, JSON, and TOML. Format mode skips files with both staged and unstaged edits and does not run commit hooks.
+
 ### Rewrite Mode
 
 Convert repository history to conventional commits:

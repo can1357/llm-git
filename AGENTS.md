@@ -2,10 +2,11 @@
 
 Git commit message generator using AI via LiteLLM (or any OpenAI-compatible API). Generates conventional commit messages with concise summaries (≤72 chars) and structured detail points from git diffs.
 
-**Three operational modes:**
+**Four operational modes:**
 1. **Standard mode**: Single commit generation from staged/unstaged changes
 2. **Compose mode**: AI-powered splitting of large changesets into multiple atomic commits
 3. **Rewrite mode**: Batch rewriting of git history to conventional format
+4. **Format mode** (`--fmt`): commits only the formatting-only part of pending changes as `style:`, no LLM
 
 **Two-phase generation (standard mode):**
 1. Analysis phase: Extract 0-6 detail points from diff using Sonnet/Opus
@@ -37,6 +38,10 @@ uv run lgit --compose                       # Execute compose
 uv run lgit --compose --compose-preview     # Preview splits only
 uv run lgit --compose --compose-max-commits 3       # Limit to 3 commits
 uv run lgit --compose --compose-test-after-each     # Run tests after each
+
+# Format mode - commit only formatting-only changes, no LLM
+uv run lgit --fmt                           # style: reformatted N files
+uv run lgit --fmt --dry-run                 # List files without committing
 ```
 
 After `uv tool install .` (or installing the wheel) the `lgit` command is on `PATH` directly, no `uv run` prefix needed.
@@ -74,6 +79,7 @@ uv run pytest -k truncate                    # Match by name
 - `patch` - Hunk-level staging for compose mode
 - `pricing` - Token-usage parsing, per-model cost estimation, session spend accounting
 - `profile` - Lightweight timing / JSONL profiling
+- `reformat` - `--fmt`: extracts formatting regions using lexical and syntax-tree comparisons; commits them without an LLM
 - `repo` - Repository metadata detection
 - `style` - Terminal styling helpers
 - `synthesis` - Shared `CommitEvidence`: one diff/observation reading produces conventional analysis plus typed per-boundary changelog updates, using existing API accounting and prompt overrides
@@ -128,6 +134,11 @@ uv run pytest -k truncate                    # Match by name
    - `ChangelogWeaver.contexts_for_group` captures the round's seeded chain context; `updates_for_group` routes validated updates to existing changelog paths. `weave_group` reconciles each group's entries against the accumulating chain before writing its commit tree. Cross-group repeats are filtered, unmatched revisions are skipped, and authored entries stay protected. As with the existing concurrent generation, sibling groups do not see each other's newly generated entries. Claimed changelogs stay out of planning; authored staged edits ride the first commit. `--no-changelog` or `changelog_enabled = false` disables the weave.
    - Create commit + capture new HEAD hash
    - Optionally run tests
+
+**Format Mode** (`lgit/reformat.py`, `--fmt`):
+1. `plan_formatting()` reads every pending content-only modification of a regular file: staged-only files from the index, unstaged-only files from the worktree (`hash-object --stdin-paths`, clean filters applied); files with both are skipped and reported. Unknown languages (by suffix), binaries, renames and mode changes are never touched.
+2. `reformat_only()` matches reordered sibling imports with `syntax_tree`, then extracts equivalent regions from the line diff. `format_tree` canonicalizes parser-confirmed changes for JS/TS/JSX/TSX, Python, Rust, and Go; Python also checks CPython AST equivalence. The candidate is checked against the full file before committing to catch parse changes at region boundaries.
+3. `commit_formatting()` builds the style commit in a temporary index, checks HEAD before updating the ref, and advances unstaged files' index entries so content edits stay unstaged. Hooks are skipped; signing and signoff are honored.
 
 **Rewrite Mode** (`lgit/rewrite.py`):
 1. `get_commit_list()` - Extract commit hashes via `git rev-list --reverse`
