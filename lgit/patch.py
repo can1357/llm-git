@@ -8,8 +8,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .errors import GitError, ValidationFailure
-from .git import run_git, run_git_bytes
+from .errors import ValidationFailure
+from .git import hash_blob, run_git, run_git_bytes
 from .mechanical import HunkJudgments, PrunableHunk, render_pruned_diff
 from .models import ComposeFile, ComposeHunk, ComposeSnapshot, StagedPin, StagedPinKind
 
@@ -734,21 +734,13 @@ def _remove_index_path(
 def _stage_index_blob(
     blob: _IndexBlob, dir: str | os.PathLike[str], index_file: str | os.PathLike[str] | None
 ) -> StageResult:
-    oid = blob.oid if blob.oid is not None else _hash_blob_bytes(blob.contents or b"", blob.path, dir)
+    oid = blob.oid if blob.oid is not None else hash_blob(blob.contents or b"", dir)
     current = run_git(["ls-files", "-s", "--", blob.path], cwd=dir, index_file=index_file)
     parts = current.stdout.split()
     if len(parts) >= 2 and parts[0] == blob.mode and parts[1] == oid:
         return StageResult.ALREADY_APPLIED
     run_git(["update-index", "--add", "--cacheinfo", f"{blob.mode},{oid},{blob.path}"], cwd=dir, index_file=index_file)
     return StageResult.STAGED
-
-
-def _hash_blob_bytes(contents: bytes, path: str, dir: str | os.PathLike[str]) -> str:
-    result = run_git_bytes(["hash-object", "-w", "--stdin"], cwd=dir, input_bytes=contents)
-    oid = result.stdout.decode("utf-8", errors="strict").strip()
-    if not oid:
-        raise GitError(f"git hash-object returned empty oid for {path}")
-    return oid
 
 
 def _resolve_base_blob(file: ComposeFile, dir: str | os.PathLike[str]) -> tuple[bytes, str]:

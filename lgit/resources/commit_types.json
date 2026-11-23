@@ -1,15 +1,15 @@
 {
-  "classifier_hint": "CRITICAL disambiguation rules:\n- feat vs refactor: feat=ANY observable behavior change OR new public API; refactor=provably unchanged (same tests, same API). When in doubt, prefer feat.\n- fix vs hotfix: hotfix=critical production emergency; fix=normal bug.\n- fix vs security: security=proactive hardening, CVE patches, auth hardening; fix=non-security bugs.\n- deps vs chore: deps=dependency version bumps only; chore=other maintenance (tooling, scripts).\n- deps vs build: build=build system scripts/config; deps=bumping library versions in manifests.\n- config vs chore: config=application/runtime config; chore=dev tooling and housekeeping.\n- ux vs feat: ux=existing feature made easier/clearer; feat=new capability.\n- init=bootstrap commit for a project or major subsystem; use once.\n- wip=in-progress save-point; prefer a real type for finished commits.\n- hack=deliberate temporary workaround; body must note intent to revisit.\n- merge=merge/sync commits with no standalone logic change.",
+  "classifier_hint": "CRITICAL disambiguation rules:\n- feat vs refactor vs fix: feat=a new capability or a deliberate change to what one does; refactor=existing code reworked, replaced, or migrated with the same intended behavior, even when files are added or incidental output shifts; fix=existing behavior was wrong. Ask what users or callers can do now that they could not before; if nothing, it is not feat. When a rework also ships a new capability (command, option, API, or user-facing feature), the capability decides: feat.\n- fix vs hotfix: hotfix=critical production emergency; fix=normal bug.\n- fix vs security: security=proactive hardening, CVE patches, auth hardening; fix=non-security bugs.\n- deps vs chore: deps=dependency version bumps only; chore=other maintenance (tooling, scripts).\n- deps vs build: build=build system scripts/config; deps=bumping library versions in manifests.\n- config vs chore: config=application/runtime config; chore=dev tooling and housekeeping.\n- ux vs feat: ux=existing feature made easier/clearer; feat=new capability.\n- init=bootstrap commit for a project or major subsystem; use once.\n- wip=in-progress save-point; prefer a real type for finished commits.\n- hack=deliberate temporary workaround; body must note intent to revisit.\n- merge=merge/sync commits with no standalone logic change.",
   "types": [
     {
       "name": "feat",
-      "description": "New public API surface OR user-observable capability/behavior change",
+      "description": "New capability, or a deliberate change to what an existing capability does (new API, command, option, default, or user-facing behavior)",
       "diff_indicators": ["pub fn", "pub struct", "pub enum", "export function", "#[arg]"],
       "examples": [
         "Added pub fn process_batch() → feat (new API)",
-        "Migrated HTTP client to async → feat (behavior change)"
+        "Switched search results from relevance to recency order → feat (deliberate behavior change)"
       ],
-      "hint": "ANY observable behavior change OR new public API. When unsure between feat and refactor, prefer feat.",
+      "hint": "Judge by intent, not diff shape: new files, rewritten modules, and replaced dependencies are not feat by themselves.",
       "aliases": ["feature", "features", "enhancement", "enhancements"]
     },
     {
@@ -25,13 +25,13 @@
     },
     {
       "name": "refactor",
-      "description": "Internal restructuring with provably unchanged behavior",
+      "description": "Reworking, replacing, or reorganizing existing code while its intended behavior stays the same",
       "diff_indicators": ["rename", "extract", "consolidate", "reorganize"],
       "examples": [
-        "Renamed internal module structure → refactor (no API change)",
+        "Replaced a third-party diff crate with an in-house implementation → refactor",
         "Extracted shared helper from three call sites → refactor"
       ],
-      "hint": "Requires proof: same tests pass, same API. If behavior changes, use feat.",
+      "hint": "Includes replacing a dependency with an in-house implementation, migrating to another library or API, and extracting or rewriting modules. Incidental output differences stay refactor; a new or deliberately changed capability → feat; correcting wrong behavior → fix.",
       "aliases": ["refactoring", "refactors", "rework", "rewrite", "cleanup"]
     },
     {

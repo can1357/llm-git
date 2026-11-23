@@ -86,6 +86,7 @@ class _ValidationData:
     irregular_past: frozenset[str]
     ed_blocklist: frozenset[str]
     d_blocklist: frozenset[str]
+    inflection_blocklist: frozenset[str]
     code_extensions: frozenset[str]
     doc_extensions: frozenset[str]
     filler_words: tuple[str, ...]
@@ -125,6 +126,7 @@ def _load_validation_data() -> _ValidationData:
         irregular_past=frozenset(irregular),
         ed_blocklist=frozenset(str(value).lower() for value in data["ed_blocklist"]),
         d_blocklist=frozenset(str(value).lower() for value in data["d_blocklist"]),
+        inflection_blocklist=frozenset(str(value).lower() for value in data["inflection_blocklist"]),
         code_extensions=frozenset(str(value).lower() for value in data["code_extensions"]),
         doc_extensions=frozenset(str(value).lower() for value in data["doc_extensions"]),
         filler_words=tuple(str(value).lower() for value in data["filler_words"]),
@@ -153,10 +155,28 @@ def _byte_len(value: str) -> int:
     return len(value.encode("utf-8"))
 
 
-def present_to_past(present: str) -> str | None:
-    """Return the configured past-tense form for a lowercase present-tense verb."""
+_REGULAR_PAST_SUFFIXES = (("ify", "ified"), ("ize", "ized"), ("ise", "ised"), ("ate", "ated"))
 
-    return _load_validation_data().past_tense.get(present.lower())
+
+def present_to_past(present: str) -> str | None:
+    """Return the past tense of a present-tense verb, or ``None`` when ``present`` is not a known verb.
+
+    The configured table wins; past it, only the verb-forming suffixes ``-ify``, ``-ize``, ``-ise``
+    and ``-ate`` inflect regularly (``unify`` → ``unified``), minus ``inflection_blocklist`` nouns.
+    A blanket ``+ed`` rule would let non-verbs pass validation (``auto`` → ``autoed``).
+    """
+
+    lower = present.lower()
+    data = _load_validation_data()
+    known = data.past_tense.get(lower)
+    if known is not None:
+        return known
+    if len(lower) < 5 or not (lower.isascii() and lower.isalpha()) or lower in data.inflection_blocklist:
+        return None
+    for suffix, past in _REGULAR_PAST_SUFFIXES:
+        if lower.endswith(suffix):
+            return lower[: -len(suffix)] + past
+    return None
 
 
 def repair_summary_tense(summary: str) -> str | None:

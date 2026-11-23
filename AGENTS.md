@@ -106,7 +106,7 @@ uv run pytest -k truncate                    # Match by name
 5. Shared synthesis (staged mode, committing, with applicable changelogs): `_generate_shared_message` calls `synthesis.generate_commit_evidence` once for conventional analysis and all boundary updates. `ChangelogContext` snapshots carry paths, governed files, existing entries, authored entries and revision permissions; the response must cover every path exactly once. Fast mode uses `effective_fast_model`; standard mode uses `analysis_model`. Large standard inputs reuse map observations before synthesis, not a separate reduce/changelog reread. There is no docs-by-extension override or arbitrary changelog-entry cap.
 6. `_ChangelogRunner.start_with_evidence` prepares revision-aware deduplication while summary validation runs; mutation still waits for final validation. Invalid/incomplete synthesis or relevant legacy prompt overrides use the existing separate analysis/changelog flow. Dry-run, no-changelog, no-boundary, commit-mode and unstaged generation stay on their existing paths.
 7. `summary_from_holistic_analysis` reuses a compliant heading, mechanically repairs tense, and checks the full type/scope-prefixed soft/hard length. Otherwise `generate_summary_from_analysis()` retains the summary/rewrite fallback:
-   - Input: type + scope + detail points + stat
+   - Input: type + scope + detail points + stat, plus the rejected analysis heading as `<draft_summary>`: the model keeps its verb framing and edits only what the rules require, so a replacement or migration is not retitled as "added"/"implemented"
    - Returns plain text in `<summary>...</summary>` tags (≤72 chars)
 8. `post_process_commit_message()` - Enforce capitalization, punctuation
 9. `validate_commit_message()` - Check past-tense verbs, length limits
@@ -201,7 +201,7 @@ uv run pytest -k truncate                    # Match by name
 
 **Validation retry**: Summary generation salvages rejected model output before falling back
 - Validates: past-tense verb, no type repetition, type-file consistency heuristics
-- Mechanical repair first: a leading present-tense verb is rewritten via `present_to_past()` (`repair_summary_tense()`), no extra API call; the reduce/analysis heading is tried as a second candidate
+- Mechanical repair first: a leading present-tense verb is rewritten via `present_to_past()` (`repair_summary_tense()`), no extra API call; the reduce/analysis heading is tried as a second candidate. `present_to_past()` looks up `validation_data.json` `past_tense`, then inflects only `-ify`/`-ize`/`-ise`/`-ate` words regularly (`unify` → `unified`) minus `inflection_blocklist` nouns; a blanket `+ed` rule would let nouns such as `auto` pass validation
 - Then one `summary-rewrite` call: the summary model minimally edits the rejected draft into compliance (`summary-rewrite.md`) — a pure text task with no diff/details context
 - Fallback: Uses first detail or heuristic if repair and rewrite are exhausted
 - See `validate_summary_quality()` in `lgit/validation.py`

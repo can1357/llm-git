@@ -238,6 +238,7 @@ async def generate_summary_from_analysis(
     prefix_len = len(commit_type) + 2 + (len(scope) + 2 if scope else 0)
     chars = max(20, config.summary_guideline - prefix_len)
     details = "\n".join(f"- {detail}" for detail in analysis.body_texts()) or f"- {analysis.summary or ''}"
+    heading = strip_type_prefix(str(analysis.summary or ""), commit_type, scope).rstrip(" .")
     system_prompt, user_prompt = render_prompt(
         "summary",
         {
@@ -245,6 +246,7 @@ async def generate_summary_from_analysis(
             "scope": scope,
             "chars": chars,
             "user_context": user_context or "",
+            "draft": heading,
             "details": details,
             "stat": condense_stat(stat, max_files=30),
         },

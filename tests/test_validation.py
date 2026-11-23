@@ -196,9 +196,20 @@ def test_repair_summary_tense_converts_leading_present_verb() -> None:
     assert repair_summary_tense("add") == "added"
 
 
+def test_repair_summary_tense_inflects_verb_suffixes_missing_from_table() -> None:
+    from lgit.validation import repair_summary_tense
+
+    assert repair_summary_tense("unify runtime dependencies") == "unified runtime dependencies"
+    assert repair_summary_tense("synthesize map observations") == "synthesized map observations"
+    assert repair_summary_tense("generate fixtures") == "generated fixtures"
+
+
 def test_repair_summary_tense_returns_none_when_no_repair_applies() -> None:
     from lgit.validation import repair_summary_tense
 
     assert repair_summary_tense("") is None
     assert repair_summary_tense("garbled nonsense words") is None
     assert repair_summary_tense("added already-past summary") is None
+    assert repair_summary_tense("template rendering fixes") is None
+    assert repair_summary_tense("auto-switch to fast mode") is None
+    assert repair_summary_tense("cleanup of stale caches") is None
