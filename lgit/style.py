@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 from collections.abc import Awaitable
+from io import TextIOWrapper
 from typing import Any, TextIO
 
 _COLOR_ENABLED: bool | None = None
@@ -37,6 +38,16 @@ class box_chars:
     BOTTOM_RIGHT = "╯"
     HORIZONTAL = "─"
     VERTICAL = "│"
+
+
+def configure_output() -> None:
+    """Use UTF-8 for redirected CLI output on Windows unless the user chose an encoding."""
+    if sys.platform != "win32" or os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper) and not stream.isatty():
+            # Windows consoles already use UTF-8, but redirected streams default to the ANSI code page.
+            stream.reconfigure(encoding="utf-8", errors=stream.errors)
 
 
 def colors_enabled() -> bool:

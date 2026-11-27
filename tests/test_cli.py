@@ -5,7 +5,9 @@ import asyncio
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +24,26 @@ def _args(*argv: str) -> argparse.Namespace:
 
 def _analysis(summary: str | None) -> ConventionalAnalysis:
     return ConventionalAnalysis(commit_type="feat", scope="api", summary=summary)
+
+
+def test_redirected_windows_output_is_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lgit import style
+
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    stdout, stderr = BytesIO(), BytesIO()
+    with TextIOWrapper(stdout, encoding="cp1252") as out, TextIOWrapper(stderr, encoding="cp1252") as err:
+        with monkeypatch.context() as options:
+            options.setattr(sys, "platform", "win32")
+            options.setattr(sys, "stdout", out)
+            options.setattr(sys, "stderr", err)
+            options.setattr(style, "_PIPE_MODE", None)
+            style.configure_output()
+            print("✓ Committed")
+            style.status("› Analyzing changes")
+        out.flush()
+        err.flush()
+        assert stdout.getvalue().decode() == "✓ Committed\n"
+        assert stderr.getvalue().decode() == "› Analyzing changes\n"
 
 
 def test_cli_definition_builds_and_parses_representative_args() -> None:

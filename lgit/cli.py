@@ -181,6 +181,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     """Console-script entry point."""
     try:
+        style.configure_output()
         args = parse_args(argv)
         return asyncio.run(run_cli(args))
     except KeyboardInterrupt:
