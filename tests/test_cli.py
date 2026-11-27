@@ -31,7 +31,10 @@ def test_redirected_windows_output_is_utf8(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
     stdout, stderr = BytesIO(), BytesIO()
-    with TextIOWrapper(stdout, encoding="cp1252") as out, TextIOWrapper(stderr, encoding="cp1252") as err:
+    with (
+        TextIOWrapper(stdout, encoding="cp1252", newline="") as out,
+        TextIOWrapper(stderr, encoding="cp1252", newline="") as err,
+    ):
         with monkeypatch.context() as options:
             options.setattr(sys, "platform", "win32")
             options.setattr(sys, "stdout", out)

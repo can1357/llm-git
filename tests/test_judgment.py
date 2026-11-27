@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 from lgit import cache as llm_cache
-from lgit import cli, pricing
+from lgit import cli, pricing, style
 from lgit.config import CommitConfig
 from lgit.judgment import Choice, ChoiceAnswer, Judge, JudgmentError, JudgmentRequest, Noul, NoulAnswer, chunk_by_chars
 
@@ -107,6 +107,7 @@ def test_printed_cost_includes_billed_judgments_that_cannot_be_used(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     pricing.reset_session()
+    monkeypatch.setattr(style, "_PIPE_MODE", True)
     monkeypatch.setattr(llm_cache.LlmCache, "instance", classmethod(lambda cls: None))
     _mock_client(monkeypatch, lambda request, _: _ok({}, input_tokens=1_000_000))
     try:
@@ -115,7 +116,9 @@ def test_printed_cost_includes_billed_judgments_that_cannot_be_used(
             answers = asyncio.run(_judge().judge_all("op", [JudgmentRequest("s", {"m": Noul("q")})]))
         assert answers == [None]
         cli._print_llm_spend()
-        assert "LLM cost: $0.0520" in capsys.readouterr().out
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "LLM cost: $0.0520" in captured.err
     finally:
         pricing.reset_session()
 
