@@ -137,7 +137,7 @@ uv run pytest -k truncate                    # Match by name
 
 **Format Mode** (`lgit/reformat.py`, `--fmt`):
 1. `plan_formatting()` reads every pending content-only modification of a regular file: staged-only files from the index, unstaged-only files from the worktree (`hash-object --stdin-paths`, clean filters applied); files with both are skipped and reported. Unknown languages (by suffix), binaries, renames and mode changes are never touched.
-2. `reformat_only()` matches reordered sibling imports with `syntax_tree`, then extracts equivalent regions from the line diff. `format_tree` canonicalizes parser-confirmed changes for JS/TS/JSX/TSX, Python, Rust, and Go; Python also checks CPython AST equivalence. The candidate is checked against the full file before committing to catch parse changes at region boundaries.
+2. `reformat_only()` matches reordered sibling imports with `syntax_tree`, then extracts equivalent regions from the line diff. `format_tree` canonicalizes parser-confirmed changes for JS/TS/JSX/TSX, Python, Rust, and Go; Python also checks CPython AST equivalence. `format_data` handles JSON, YAML, and CSS; `format_markdown` compares Markdown structure and delegates supported fences to their language. Candidates are checked against the full file before committing.
 3. `commit_formatting()` builds the style commit in a temporary index, checks HEAD before updating the ref, and advances unstaged files' index entries so content edits stay unstaged. Hooks are skipped; signing and signoff are honored.
 
 **Rewrite Mode** (`lgit/rewrite.py`):

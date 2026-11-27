@@ -5,9 +5,9 @@ model call; every other change stays pending exactly where it was (staged or uns
 
 Formatting regions match by normalized tokens or language-specific syntax rules. In Rust, Python,
 Go, and JS/TS, parsed comparisons recognize formatter rewrites that change tokens (see
-``format_tree``). Other rules cover whitespace, trailing commas, comment wrapping, and runs of
-reordered imports. Mixed changes are spliced into HEAD and checked in whole-file context before
-committing. Unknown languages, binaries, mode changes, renames, and partially staged files are skipped.
+``format_tree``). Other rules cover whitespace, trailing commas, comment wrapping, and runs of reordered imports. Mixed changes are spliced into HEAD and checked in whole-file context before
+committing. Formats are resolved by Git attribute, filename, then shell shebang. Unknown formats,
+binaries, mode changes, renames, and partially staged files are skipped.
 
 Example (Rust): ``fn f(a: u8, b: u8) {`` → ``fn f(\\n\\ta: u8,\\n\\tb: u8,\\n) {`` is formatting-only;
 ``"a b"`` → ``"ab"``, ``(x,)`` → ``(x)``, and ``foo();`` → ``// foo();`` are not.
@@ -20,16 +20,32 @@ advanced to the committed blob, so the remaining changes show up exactly as befo
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
+from functools import partial
 from itertools import chain
-from pathlib import PurePosixPath
 
 from tree_sitter import Node
 
 from .errors import GitError
+from .format_build import build_document
+from .format_data import (
+    FormatDocument,
+    Key,
+    css_document,
+    json_document,
+    jsonc_document,
+    ndjson_document,
+    toml_document,
+    yaml_document,
+)
+from .format_infra import infra_document
+from .format_markdown import format_fences, markdown_document
+from .format_markup import html_document, kdl_document
+from .format_paths import path_suffix, shebang_suffix
 from .format_tree import SUPPORTED, format_tree
+from .format_web import web_document
 from .git import (
     TempGitIndex,
     commit_tree,
@@ -60,11 +76,68 @@ class _Syntax:
     # Rust raw strings (`r#"…"#`) and `'a` lifetimes next to `'x'` char literals.
     rust: bool = False
     indent_sensitive: bool = False
-    # Tree-sitter grammar for finding reorderable import runs; "" when order is never formatting.
+    # Grammar for structural comparison or import ordering.
     grammar: str = ""
     # Rust and Python: `(x,)` is a one-element tuple, so its trailing comma is not formatting.
     paren_tuples: bool = False
 
+
+_BUILD_SUFFIXES = {
+    "shell": (".sh", ".bash", ".zsh"),
+    "fish": (".fish",),
+    "powershell": (".ps1", ".psm1", ".psd1"),
+    "dockerfile": (".dockerfile", ".containerfile"),
+    "make": (".mk", ".mak"),
+    "cmake": (".cmake",),
+    "starlark": (".bzl", ".star", ".bazel"),
+}
+_INFRA_SUFFIXES = {
+    "hcl": (".hcl", ".tf", ".tfvars"),
+    "nix": (".nix",),
+    "proto": (".proto",),
+    "textproto": (".textproto", ".pbtxt"),
+    "graphql": (".graphql", ".graphqls", ".gql"),
+    "sql": (".sql",),
+    "ini": (".ini",),
+    "editorconfig": (".editorconfig",),
+    "gitconfig": (".gitconfig",),
+    "gitignore": (".gitignore",),
+    "gitattributes": (".gitattributes",),
+    "dotenv": (".env",),
+    "properties": (".properties",),
+}
+_WEB_SUFFIXES = {
+    "xml": (
+        ".xml",
+        ".svg",
+        ".xhtml",
+        ".xaml",
+        ".plist",
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".props",
+        ".targets",
+        ".resx",
+        ".xsd",
+        ".xsl",
+        ".xslt",
+        ".iml",
+        ".vcxproj",
+        ".storyboard",
+        ".xib",
+    ),
+    "scss": (".scss",),
+    "sass": (".sass",),
+    "less": (".less",),
+    "mdx": (".mdx",),
+    "vue": (".vue",),
+    "svelte": (".svelte",),
+    "astro": (".astro",),
+    "asciidoc": (".adoc", ".asciidoc", ".asc"),
+    "rst": (".rst",),
+    "latex": (".tex", ".sty", ".cls"),
+}
 
 _C_LIKE = _Syntax()
 _JS = _Syntax(template_literals=True, grammar="javascript")
@@ -83,9 +156,34 @@ _SYNTAX_BY_SUFFIX: dict[str, _Syntax] = {
     **dict.fromkeys((".kt", ".kts"), replace(_JVM, grammar="kotlin")),
     **dict.fromkeys((".swift",), replace(_JVM, grammar="swift")),
     **dict.fromkeys((".scala", ".dart"), _JVM),
-    **dict.fromkeys((".json",), _Syntax(line_comments=(), block_comment=None, quotes=('"',))),
-    **dict.fromkeys((".jsonc", ".json5"), _Syntax(quotes=('"', "'"))),
-    **dict.fromkeys((".toml",), _Syntax(line_comments=("#",), block_comment=None, quotes=('"""', "'''", '"', "'"))),
+    **dict.fromkeys(
+        (".json", ".sarif", ".webmanifest", ".geojson", ".gltf", ".ipynb", ".avsc"), _Syntax(grammar="json")
+    ),
+    **dict.fromkeys(
+        (
+            ".jsonc",
+            ".code-workspace",
+            ".code-snippets",
+            ".sublime-settings",
+            ".sublime-keymap",
+            ".sublime-build",
+            ".sublime-project",
+        ),
+        _Syntax(grammar="jsonc"),
+    ),
+    **dict.fromkeys((".ndjson", ".jsonl"), _Syntax(grammar="ndjson")),
+    **dict.fromkeys((".yaml", ".yml", ".sublime-syntax"), _Syntax(grammar="yaml")),
+    **dict.fromkeys((".md", ".markdown"), _Syntax(grammar="markdown")),
+    **dict.fromkeys((".html", ".htm"), _Syntax(grammar="html")),
+    ".css": _Syntax(grammar="css"),
+    ".kdl": _Syntax(grammar="kdl"),
+    ".json5": _Syntax(quotes=('"', "'")),
+    ".toml": _Syntax(grammar="toml"),
+    **{
+        suffix: _Syntax(grammar=grammar)
+        for grammar, suffixes in (_BUILD_SUFFIXES | _INFRA_SUFFIXES | _WEB_SUFFIXES).items()
+        for suffix in suffixes
+    },
     **dict.fromkeys(
         (".py", ".pyi"),
         _Syntax(
@@ -98,6 +196,43 @@ _SYNTAX_BY_SUFFIX: dict[str, _Syntax] = {
         ),
     ),
 }
+
+_DOCUMENTS: dict[str, Callable[[str], FormatDocument | None]] = {
+    "css": css_document,
+    "html": html_document,
+    "json": json_document,
+    "jsonc": jsonc_document,
+    "kdl": kdl_document,
+    "ndjson": ndjson_document,
+    "toml": toml_document,
+    "yaml": yaml_document,
+    **{name: partial(build_document, format_name=name) for name in _BUILD_SUFFIXES},
+    **{name: partial(infra_document, format_name=name) for name in _INFRA_SUFFIXES},
+    **{name: partial(web_document, format_name=name) for name in _WEB_SUFFIXES},
+}
+_FENCE_SUFFIXES = {
+    "golang": ".go",
+    "javascript": ".js",
+    "python": ".py",
+    "python3": ".py",
+    "rust": ".rs",
+    "typescript": ".ts",
+}
+
+_SYNTAX_BY_GRAMMAR = {syntax.grammar: syntax for syntax in _SYNTAX_BY_SUFFIX.values() if syntax.grammar}
+
+
+def _named_syntax(name: str) -> _Syntax | None:
+    name = name.lower().removeprefix(".")
+    suffix = _FENCE_SUFFIXES.get(name, f".{name}")
+    return _SYNTAX_BY_GRAMMAR.get(name) or _SYNTAX_BY_SUFFIX.get(suffix)
+
+
+type _Region = tuple[int, int, int, int]
+type _RegionKey = str | tuple[Key, ...]
+type _LineKey = Callable[[int, int], _RegionKey]
+type _KeyPair = tuple[_LineKey, _LineKey]
+
 
 _CODE = "code"
 _STRING = "str"
@@ -512,13 +647,79 @@ def reformat_only(old: str, new: str, syntax: _Syntax) -> str:
     everything else is decided region by region (see `_reformat_regions`).
     """
 
+    if old == new:
+        return old
+    grammar = syntax.grammar
+    if grammar == "markdown":
+        before, after = markdown_document(old), markdown_document(new)
+        if before is None or after is None:
+            return old
+        old, before = format_fences(old, new, before, after, _format_fenced_code)
+        return _reformat_document(old, new, before.document, after.document, _markdown_key)
+    if (document := _DOCUMENTS.get(grammar)) is not None:
+        before_document, after_document = document(old), document(new)
+        if before_document is None or after_document is None:
+            return old
+        return _reformat_document(old, new, before_document, after_document, document)
+    return _reformat_source(old, new, syntax)
+
+
+def _reformat_source(old: str, new: str, syntax: _Syntax, *, require_parse: bool = False) -> str:
     grammar = syntax.grammar
     old_root, new_root = (parse(old, grammar), parse(new, grammar)) if grammar else (None, None)
+    if require_parse and (old_root is None or new_root is None):
+        return old
     if old_root is not None and new_root is not None:
         reordered = _reorder_imports(old, new, syntax, old_root, new_root)
         if reordered != old and (root := parse(reordered, grammar)) is not None:
             old, old_root = reordered, root
     return _reformat_regions(old, new, syntax, old_root, new_root)
+
+
+def _format_fenced_code(language: str, old: str, new: str) -> str:
+    syntax = _named_syntax(language)
+    if syntax is None or syntax.grammar == "markdown":
+        return old
+    if syntax.grammar in _DOCUMENTS:
+        return reformat_only(old, new, syntax)
+    if syntax.grammar in SUPPORTED:
+        return _reformat_source(old, new, syntax, require_parse=True)
+    return old
+
+
+def _markdown_key(text: str) -> FormatDocument | None:
+    parsed = markdown_document(text)
+    return parsed.document if parsed is not None else None
+
+
+def _reformat_document(
+    old: str,
+    new: str,
+    before: FormatDocument,
+    after: FormatDocument,
+    parse_document: Callable[[str], FormatDocument | None],
+) -> str:
+    if before.tokens == after.tokens:
+        return new
+
+    def norm_old(i1: int, i2: int) -> _RegionKey:
+        return tuple(chain.from_iterable(before.rows[i1:i2]))
+
+    def norm_new(j1: int, j2: int) -> _RegionKey:
+        return tuple(chain.from_iterable(after.rows[j1:j2]))
+
+    def valid(text: str) -> bool:
+        parsed = parse_document(text)
+        return parsed is not None and parsed.tokens == before.tokens
+
+    return _extract_regions(
+        old.split("\n"),
+        new.split("\n"),
+        ((norm_old, norm_new),),
+        valid,
+        guard_mixed=False,
+        retry_independently=True,
+    )
 
 
 def _reorder_imports(old: str, new: str, syntax: _Syntax, old_root: Node, new_root: Node) -> str:
@@ -584,86 +785,22 @@ def _reformat_regions(old: str, new: str, syntax: _Syntax, old_root: Node | None
     def norm_new(j1: int, j2: int) -> str:
         return _normalize(new_lex[j1:j2], syntax, new_lex[j2 : j2 + _LOOKAHEAD])
 
-    def equivalent(i1: int, i2: int, j1: int, j2: int) -> bool:
-        if old_tree is not None and new_tree is not None:
-            if tuple(chain.from_iterable(old_tree.rows[i1:i2])) == tuple(chain.from_iterable(new_tree.rows[j1:j2])):
-                return True
-        return norm_old(i1, i2) == norm_new(j1, j2)
+    key_pairs: tuple[_KeyPair, ...] = ((norm_old, norm_new),)
+    if old_tree is not None and new_tree is not None:
+        old_rows, new_rows = old_tree.rows, new_tree.rows
 
-    def standalone(i1: int, i2: int, j1: int, j2: int) -> bool:
-        if i1 == i2 or j1 == j2:
-            return False
-        first_old, first_new = old_lines[i1], new_lines[j1]
-        if (
-            first_old[: len(first_old) - len(first_old.lstrip())]
-            != first_new[: len(first_new) - len(first_new.lstrip())]
-        ):
-            return False
-        return [line.lstrip() for line in old_lines[i1:i2]] != [line.lstrip() for line in new_lines[j1:j2]]
+        def tree_old(i1: int, i2: int) -> _RegionKey:
+            return tuple(chain.from_iterable(old_rows[i1:i2]))
 
-    def mixed(i1: int, i2: int, j1: int, j2: int) -> Iterable[tuple[int, int, int, int]]:
-        """Formatting-only pieces of a region that also changes content."""
+        def tree_new(j1: int, j2: int) -> _RegionKey:
+            return tuple(chain.from_iterable(new_rows[j1:j2]))
 
-        if equivalent(i1, i2, j1, j2):
-            yield (i1, i2, j1, j2)
-            return
-        old_norms = [norm_old(i, i + 1) for i in range(i1, i2)]
-        new_norms = [norm_new(j, j + 1) for j in range(j1, j2)]
-        for tag, a1, a2, b1, b2 in SequenceMatcher(None, old_norms, new_norms, autojunk=False).get_opcodes():
-            if tag == "equal":
-                pairs = zip(range(i1 + a1, i1 + a2), range(j1 + b1, j1 + b2), strict=True)
-                yield from ((i, i + 1, j, j + 1) for i, j in pairs)
-            elif tag == "replace":
-                yield from edges(i1 + a1, i1 + a2, j1 + b1, j1 + b2)
+        key_pairs += ((tree_old, tree_new),)
 
-    def edges(i1: int, i2: int, j1: int, j2: int) -> Iterable[tuple[int, int, int, int]]:
-        """The longest formatting-only head and tail of a region whose middle changes content."""
-
-        if equivalent(i1, i2, j1, j2):
-            pieces = [(i1, i2, j1, j2)]
-        elif i2 - i1 > _EDGE_LIMIT or j2 - j1 > _EDGE_LIMIT:
-            return
-        else:
-            heads = {norm_old(i1, a): a for a in range(i1, i2)}
-            head = max(((heads[key], b) for b in range(j1, j2) if (key := norm_new(j1, b)) in heads), default=None)
-            a0, b0 = head or (i1, j1)
-            tails = {norm_old(a, i2): a for a in range(i2, a0, -1)}
-            tail = min(((tails[key], b) for b in range(j2, b0, -1) if (key := norm_new(b, j2)) in tails), default=None)
-            pieces = [(i1, a0, j1, b0)] if head else []
-            if tail:
-                pieces.append((tail[0], i2, tail[1], j2))
-        yield from pieces
-
-    def splice(regions: Sequence[tuple[int, int, int, int]]) -> str:
-        out: list[str] = []
-        cursor = 0
-        for i1, i2, j1, j2 in sorted(regions):
-            out.extend(old_lines[cursor:i1])
-            out.extend(new_lines[j1:j2])
-            cursor = i2
-        out.extend(old_lines[cursor:])
-        return "\n".join(out)
-
-    changes = [
-        op[1:] for op in SequenceMatcher(None, old_lines, new_lines, autojunk=False).get_opcodes() if op[0] != "equal"
-    ]
-    whole: list[tuple[int, int, int, int]] = []
-    pieces: list[tuple[int, int, int, int]] = []
-    for cluster in _clusters(changes):
-        (i1, _, j1, _), (_, i2, _, j2) = cluster[0], cluster[-1]
-        if equivalent(i1, i2, j1, j2):
-            whole.append((i1, i2, j1, j2))
-            continue
-        for region in cluster:
-            pieces.extend(piece for piece in mixed(*region) if standalone(*piece))
-
-    # Pieces that match locally can still change their surrounding syntax (ASI, indentation, a
-    # string or comment). Verify the entire candidate before taking anything.
+    # A local match can still change the surrounding syntax (ASI, indentation, strings or comments).
     expected = _normalize(old_lex, syntax)
 
     def valid(text: str) -> bool:
-        if text == old:
-            return True
         if old_tree is not None:
             root = parse(text, grammar)
             tree = format_tree(root, text, grammar) if root is not None else None
@@ -676,24 +813,127 @@ def _reformat_regions(old: str, new: str, syntax: _Syntax, old_root: Node | None
                 return False
         return _normalize(_lex(text, syntax), syntax) == expected
 
-    for regions in (whole + pieces, whole):
+    return _extract_regions(
+        old_lines,
+        new_lines,
+        key_pairs,
+        valid,
+        guard_mixed=True,
+        retry_independently=old_tree is not None,
+    )
+
+
+def _extract_regions(
+    old_lines: list[str],
+    new_lines: list[str],
+    key_pairs: tuple[_KeyPair, ...],
+    valid: Callable[[str], bool],
+    *,
+    guard_mixed: bool,
+    retry_independently: bool,
+) -> str:
+    def equivalent(i1: int, i2: int, j1: int, j2: int) -> bool:
+        return any(old_key(i1, i2) == new_key(j1, j2) for old_key, new_key in key_pairs)
+
+    def standalone(i1: int, i2: int, j1: int, j2: int) -> bool:
+        if i1 == i2 or j1 == j2:
+            return False
+        first_old, first_new = old_lines[i1], new_lines[j1]
+        if (
+            first_old[: len(first_old) - len(first_old.lstrip())]
+            != first_new[: len(first_new) - len(first_new.lstrip())]
+        ):
+            return False
+        return [line.lstrip() for line in old_lines[i1:i2]] != [line.lstrip() for line in new_lines[j1:j2]]
+
+    def mixed(i1: int, i2: int, j1: int, j2: int, keys: tuple[_KeyPair, ...]) -> Iterable[_Region]:
+        """Align changed lines lexically first, then by parser keys in the unmatched spans."""
+
+        if equivalent(i1, i2, j1, j2):
+            yield (i1, i2, j1, j2)
+            return
+        if not keys:
+            yield from edges(i1, i2, j1, j2)
+            return
+        (old_key, new_key), *rest = keys
+        old_norms = [old_key(i, i + 1) for i in range(i1, i2)]
+        new_norms = [new_key(j, j + 1) for j in range(j1, j2)]
+        for tag, a1, a2, b1, b2 in SequenceMatcher(None, old_norms, new_norms, autojunk=False).get_opcodes():
+            if tag == "equal":
+                pairs = zip(range(i1 + a1, i1 + a2), range(j1 + b1, j1 + b2), strict=True)
+                yield from ((i, i + 1, j, j + 1) for i, j in pairs)
+            elif tag == "replace":
+                yield from mixed(i1 + a1, i1 + a2, j1 + b1, j1 + b2, tuple(rest))
+
+    def edges(i1: int, i2: int, j1: int, j2: int) -> Iterable[_Region]:
+        """The longest formatting-only head and tail of a region whose middle changes content."""
+
+        if i2 - i1 > _EDGE_LIMIT or j2 - j1 > _EDGE_LIMIT:
+            return
+        head = (i1, j1)
+        for old_key, new_key in key_pairs:
+            heads = {old_key(i1, a): a for a in range(i1, i2)}
+            head = max(
+                head, max(((heads[key], b) for b in range(j1, j2) if (key := new_key(j1, b)) in heads), default=head)
+            )
+        a0, b0 = head
+        if a0 != i1 or b0 != j1:
+            yield i1, a0, j1, b0
+
+        tail = (i2, j2)
+        for old_key, new_key in key_pairs:
+            tails = {old_key(a, i2): a for a in range(i2, a0, -1)}
+            tail = min(
+                tail,
+                min(((tails[key], b) for b in range(j2, b0, -1) if (key := new_key(b, j2)) in tails), default=tail),
+            )
+        if tail != (i2, j2):
+            yield tail[0], i2, tail[1], j2
+
+    def splice(regions: Sequence[_Region]) -> str:
+        out: list[str] = []
+        cursor = 0
+        for i1, i2, j1, j2 in sorted(regions):
+            out.extend(old_lines[cursor:i1])
+            out.extend(new_lines[j1:j2])
+            cursor = i2
+        out.extend(old_lines[cursor:])
+        return "\n".join(out)
+
+    changes = [
+        op[1:] for op in SequenceMatcher(None, old_lines, new_lines, autojunk=False).get_opcodes() if op[0] != "equal"
+    ]
+    whole: list[_Region] = []
+    pieces: list[_Region] = []
+    for cluster in _clusters(changes):
+        (i1, _, j1, _), (_, i2, _, j2) = cluster[0], cluster[-1]
+        if equivalent(i1, i2, j1, j2):
+            whole.append((i1, i2, j1, j2))
+            continue
+        for region in cluster:
+            pieces.extend(piece for piece in mixed(*region, key_pairs) if not guard_mixed or standalone(*piece))
+
+    if not whole and not pieces:
+        return "\n".join(old_lines)
+    all_regions = whole + pieces
+    for regions in (all_regions, whole) if pieces and whole else (all_regions,):
         text = splice(regions)
         if valid(text):
             return text
-    if old_tree is not None:
-        # A lexical false positive (for example a JSX text edit) shouldn't poison an otherwise
-        # independent formatting region. Re-check the final combination as well.
-        safe = [region for region in whole + pieces if valid(splice([region]))]
-        text = splice(safe)
-        if valid(text):
-            return text
-    return old
+    if retry_independently and len(all_regions) > 1:
+        # A false positive (e.g. a JSX text edit) should not poison independent formatting.
+        safe = [region for region in all_regions if valid(splice([region]))]
+        if safe:
+            text = splice(safe)
+            if valid(text):
+                return text
+    return "\n".join(old_lines)
 
 
-def _clusters(changes: Sequence[tuple[int, int, int, int]]) -> Iterable[list[tuple[int, int, int, int]]]:
+def _clusters(changes: Sequence[_Region]) -> Iterable[list[_Region]]:
     """Group changed regions separated by at most `_MERGE_GAP` equal lines."""
 
-    cluster: list[tuple[int, int, int, int]] = []
+    cluster: list[_Region] = []
     for region in changes:
         if cluster and region[0] - cluster[-1][1] > _MERGE_GAP:
             yield cluster
@@ -722,6 +962,7 @@ class FormattingPlan:
     head: str
     files: tuple[FormattedFile, ...]
     partially_staged: tuple[str, ...]
+    skipped: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -732,44 +973,70 @@ class _Change:
     new_oid: str
 
 
-def plan_formatting(dir: str | os.PathLike[str] = ".") -> FormattingPlan:
-    """Collect the formatting-only regions of every pending modification.
+def plan_formatting(dir: str | os.PathLike[str] = ".", *, explain: bool = False) -> FormattingPlan:
+    """Collect formatting-only regions of pending modifications, optionally with skip reasons.
 
-    Staged-only files are read from the index, unstaged-only files from the worktree (clean filters
-    applied); files with both are reported in `partially_staged` and left alone.
-
-    Raises GitError when HEAD does not exist yet.
+    Staged-only files come from the index and unstaged-only files from the worktree, with clean
+    filters applied. Files changed in both snapshots are left alone. Raises GitError without HEAD.
     """
 
+    dir = run_git(["rev-parse", "--show-toplevel"], cwd=dir).stdout.removesuffix("\n")
     head = get_head_hash(dir)
-    staged = _modified(["diff", "--cached"], dir)
-    unstaged = _modified(["diff"], dir)
-    partial = staged.keys() & unstaged.keys()
-    worktree = [change for path, change in unstaged.items() if path not in partial]
+    staged, staged_skipped = _modified(["diff", "--cached"], dir)
+    unstaged, unstaged_skipped = _modified(["diff"], dir)
+    partial_paths = (staged.keys() | staged_skipped.keys()) & (unstaged.keys() | unstaged_skipped.keys())
+    worktree = [change for path, change in unstaged.items() if path not in partial_paths]
     worktree_oids = _hash_worktree_files([change.path for change in worktree], dir)
     changes = [
-        *((change, True) for path, change in staged.items() if path not in partial),
+        *((change, True) for path, change in staged.items() if path not in partial_paths),
         *(
             (_Change(change.path, change.mode, change.old_oid, worktree_oids[change.path]), False)
             for change in worktree
         ),
     ]
     blobs = _read_blobs({oid for change, _ in changes for oid in (change.old_oid, change.new_oid)}, dir)
+    overrides = _format_attributes([change.path for change, _ in changes], dir)
+    skipped: dict[str, str] = {}
+    if explain:
+        skipped.update(staged_skipped)
+        skipped.update(unstaged_skipped)
+        skipped.update(dict.fromkeys(partial_paths, "both staged and unstaged changes"))
+        untracked = run_git_bytes(["ls-files", "--others", "--exclude-standard", "-z"], cwd=dir).stdout
+        for path in untracked.decode().split("\0"):
+            if path:
+                skipped.setdefault(path, "untracked file")
     files: list[FormattedFile] = []
     for change, from_index in sorted(changes, key=lambda item: item[0].path):
-        syntax = _SYNTAX_BY_SUFFIX.get(PurePosixPath(change.path).suffix.lower())
+        path = change.path
         old, new = blobs[change.old_oid], blobs[change.new_oid]
-        if syntax is None or b"\0" in old or b"\0" in new:
-            continue
-        try:
-            old_text, new_text = old.decode(), new.decode()
-        except UnicodeDecodeError:
-            continue
-        text = reformat_only(old_text, new_text, syntax)
-        if text != old_text:
-            contents = text.encode()
-            files.append(FormattedFile(change.path, change.mode, change.old_oid, contents, contents == new, from_index))
-    return FormattingPlan(head, tuple(files), tuple(sorted(partial)))
+        override = overrides.get(path)
+        if override is not None:
+            syntax = _named_syntax(override)
+            unsupported = "disabled by lgit-format" if override == "unset" else f"unknown lgit-format {override!r}"
+        else:
+            suffix = path_suffix(path)
+            syntax = _SYNTAX_BY_SUFFIX.get(suffix or shebang_suffix(old, new))
+            unsupported = "unknown file format"
+        reason = unsupported
+        if syntax is not None:
+            reason = "binary or non-UTF-8 content"
+            if b"\0" not in old and b"\0" not in new:
+                try:
+                    old_text, new_text = old.decode(), new.decode()
+                except UnicodeDecodeError:
+                    pass
+                else:
+                    text = reformat_only(old_text, new_text, syntax)
+                    if text != old_text:
+                        contents = text.encode()
+                        files.append(
+                            FormattedFile(path, change.mode, change.old_oid, contents, contents == new, from_index)
+                        )
+                        continue
+                    reason = "no formatting-only edits proved"
+        if explain:
+            skipped[path] = reason
+    return FormattingPlan(head, tuple(files), tuple(sorted(partial_paths)), tuple(sorted(skipped.items())))
 
 
 def commit_formatting(
@@ -780,6 +1047,7 @@ def commit_formatting(
     Raises GitError when HEAD moved since planning; nothing is committed then.
     """
 
+    dir = run_git(["rev-parse", "--show-toplevel"], cwd=dir).stdout.removesuffix("\n")
     oids = {file.path: hash_blob(file.contents, dir) for file in plan.files}
     with TempGitIndex(dir) as index:
         read_tree_into_index(index.path, plan.head, dir)
@@ -803,19 +1071,38 @@ def commit_formatting(
     return commit
 
 
-def _modified(command: Sequence[str], dir: str | os.PathLike[str]) -> dict[str, _Change]:
-    """Content-only modifications of regular files reported by `git diff --raw` (`command`)."""
+def _modified(command: Sequence[str], dir: str | os.PathLike[str]) -> tuple[dict[str, _Change], dict[str, str]]:
+    """Return content-only regular-file modifications and ineligible changes from raw Git output."""
 
     raw = run_git_bytes(
-        [*command, "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--diff-filter=M"], cwd=dir
+        [*command, "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff"], cwd=dir
     ).stdout.decode()
     fields = raw.split("\0")
     changes: dict[str, _Change] = {}
+    skipped: dict[str, str] = {}
     for meta, path in zip(fields[0::2], fields[1::2], strict=False):
-        old_mode, new_mode, old_oid, new_oid, _status = meta.lstrip(":").split()
-        if old_mode == new_mode and old_mode in ("100644", "100755"):
+        old_mode, new_mode, old_oid, new_oid, status = meta.lstrip(":").split()
+        if status == "M" and old_mode == new_mode and old_mode in ("100644", "100755"):
             changes[path] = _Change(path, old_mode, old_oid, new_oid)
-    return changes
+        else:
+            skipped[path] = {
+                "A": "added file",
+                "D": "deleted file",
+                "U": "unmerged file",
+            }.get(status, "not a content-only modification of a regular file")
+    for path in skipped:
+        changes.pop(path, None)
+    return changes, skipped
+
+
+def _format_attributes(paths: Sequence[str], dir: str | os.PathLike[str]) -> dict[str, str]:
+    if not paths:
+        return {}
+    raw = run_git_bytes(
+        ["check-attr", "-z", "--stdin", "lgit-format"], cwd=dir, input_bytes=("\0".join(paths) + "\0").encode()
+    ).stdout.decode()
+    fields = raw.split("\0")
+    return {path: value for path, value in zip(fields[0:-1:3], fields[2:-1:3], strict=True) if value != "unspecified"}
 
 
 def _hash_worktree_files(paths: Sequence[str], dir: str | os.PathLike[str]) -> dict[str, str]:

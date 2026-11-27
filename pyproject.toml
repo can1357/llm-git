@@ -37,6 +37,12 @@ dependencies = [
   "tree-sitter-c-sharp>=0.23.5",
   "tree-sitter-kotlin>=1.1.0",
   "tree-sitter-swift>=0.7.4",
+  "ruamel-yaml>=0.19.1",
+  "markdown-it-py>=4.3.0",
+  "tinycss2>=1.5.1",
+  "tree-sitter-html>=0.23.2",
+  "tree-sitter-kdl>=2.0.0",
+  "tree-sitter-language-pack>=0.13,<0.14",
 ]
 
 [project.urls]

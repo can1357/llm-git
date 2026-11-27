@@ -14,6 +14,7 @@ _JS = frozenset({"javascript", "typescript", "tsx"})
 SUPPORTED = _JS | {"python", "rust", "go"}
 _COMMENTS = frozenset({"comment", "line_comment", "block_comment"})
 _JS_OBJECT_TYPES = frozenset({"interface_body", "object_type"})
+_TYPE_JOINERS = {"union_type": "|", "intersection_type": "&"}
 _GO_SEPARATORS = frozenset(
     {
         "source_file",
@@ -226,6 +227,14 @@ def _events(node: Node, grammar: str) -> Iterator[Event]:
         if kind == "line_continuation":
             return
     elif grammar in _JS:
+        if (joiner := _TYPE_JOINERS.get(kind)) is not None:
+            first = next((i for i, child in enumerate(children) if child.type not in _COMMENTS), None)
+            if first is not None and children[first].type == joiner:
+                # A leading operator is a unary wrapper in the grammar, not another member.
+                for i, child in enumerate(children):
+                    if i != first:
+                        yield from _events(child, grammar)
+                return
         if kind == "string":
             yield _event(node, kind, _js_string(node))
             return

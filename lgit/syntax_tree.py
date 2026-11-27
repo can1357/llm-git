@@ -10,19 +10,23 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
+from typing import TypeIs, get_args
 
 import tree_sitter_c
 import tree_sitter_c_sharp
 import tree_sitter_cpp
 import tree_sitter_go
+import tree_sitter_html
 import tree_sitter_java
 import tree_sitter_javascript
+import tree_sitter_kdl
 import tree_sitter_kotlin
 import tree_sitter_python
 import tree_sitter_rust
 import tree_sitter_swift
 import tree_sitter_typescript
 from tree_sitter import Language, Node, Parser
+from tree_sitter_language_pack import SupportedLanguage, get_parser
 
 # A run item: `[start, end)` source lines, covering leading comments/attributes and a trailing comment.
 type Item = tuple[int, int]
@@ -32,7 +36,7 @@ type Item = tuple[int, int]
 class _Grammar:
     language: Callable[[], object]
     # Node types of the statements whose order is insignificant.
-    items: frozenset[str]
+    items: frozenset[str] = frozenset()
     # Whether a blank line ends a run (C include blocks are sorted per block, never across blocks).
     blank_breaks: bool = False
 
@@ -51,6 +55,8 @@ _GRAMMARS = {
     "c_sharp": _Grammar(tree_sitter_c_sharp.language, frozenset({"using_directive"})),
     "c": _Grammar(tree_sitter_c.language, frozenset({"preproc_include"}), blank_breaks=True),
     "cpp": _Grammar(tree_sitter_cpp.language, frozenset({"preproc_include"}), blank_breaks=True),
+    "html": _Grammar(tree_sitter_html.language),
+    "kdl": _Grammar(tree_sitter_kdl.language),
 }
 # Nodes that belong to the item they precede (or, on the same line, follow).
 _LEADERS = frozenset({"comment", "line_comment", "block_comment", "multiline_comment", "attribute_item"})
@@ -133,9 +139,29 @@ def _runs_of(parent: Node, grammar: str) -> list[list[Item]]:
     return runs
 
 
-def parse(text: str, grammar: str) -> Node | None:
+def parse(text: str | bytes, grammar: str) -> Node | None:
     """Return the source tree only when the grammar parsed the whole file."""
-    root = _parser(grammar).parse(text.encode()).root_node
+    root = _parser(grammar).parse(text.encode() if isinstance(text, str) else text).root_node
+    return None if root.has_error else root
+
+
+_PACKED_LANGUAGES = frozenset(get_args(SupportedLanguage))
+
+
+def _is_packed_language(grammar: str) -> TypeIs[SupportedLanguage]:
+    return grammar in _PACKED_LANGUAGES
+
+
+@cache
+def _packed_parser(grammar: str) -> Parser:
+    if not _is_packed_language(grammar):
+        raise ValueError(f"unregistered bundled grammar: {grammar}")
+    return get_parser(grammar)
+
+
+def parse_packed(text: str, grammar: str) -> Node | None:
+    """Parse with an offline bundled grammar; reject incomplete or malformed trees."""
+    root = _packed_parser(grammar).parse(text.encode()).root_node
     return None if root.has_error else root
 
 

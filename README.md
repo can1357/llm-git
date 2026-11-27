@@ -94,16 +94,32 @@ Commit only the formatting-only part of pending changes (after running a formatt
 ```bash
 lgit --fmt                          # Commit as `style: reformatted N files`; other changes stay pending
 lgit --fmt --dry-run                # List the files (partial ones keep other changes) and the message
+lgit --fmt --dry-run --fmt-explain  # Explain skipped files without committing
 ```
 
 Format mode recognizes layout changes and selected formatter rewrites, including reordered import groups:
 
-- **JS, TS, JSX, TSX:** quote style, optional semicolons and arrow parentheses, sorted named imports, and text reflow that preserves rendered spaces. Component children keep their shape.
+- **JS, TS, JSX, TSX:** quote style, optional semicolons and arrow parentheses, sorted named imports, and text reflow that preserves rendered spaces. TypeScript also recognizes optional leading `|` and `&` in types.
 - **Python:** equivalent string literals and implicit string joins, redundant annotation and expression parentheses, and sorted import names.
 - **Rust:** nested `use` groups, continued strings, and braces around simple match-arm values.
 - **Go:** grouped imports, redundant expression parentheses, optional semicolons, and numeric literal case.
+- **Data:** JSON (including SARIF, notebooks, GeoJSON, glTF, web manifests, and Avro schemas), JSON with comments (including VS Code and Sublime settings), line-delimited JSON, YAML, and TOML. Known names such as `.clang-format`, `Pipfile`, and `Cargo.lock` are recognized without relying on a suffix.
+- **Markdown:** prose reflow, list and table layout, and formatting inside fences labeled with a supported language. Unlabeled or unknown snippets are kept verbatim.
+- **CSS:** rule, selector, and declaration layout that preserves selector and value tokens.
+- **HTML:** tag and attribute layout and whitespace between block elements. Inline spacing, preformatted text, and embedded script/style content are preserved.
+- **KDL:** layout and optional node terminators that preserve node structure and values.
+- **Build and shell:** sh/Bash, shared Zsh syntax, Fish, PowerShell, Dockerfile/Containerfile, Make, CMake, and Bazel/Starlark. Extensionless shell scripts are recognized by their shebang.
+- **Infrastructure and configuration:** Terraform/HCL, Nix, Protobuf and textproto, GraphQL, SQL, INI, EditorConfig, Git config and ignore/attribute files, dotenv, and Java properties.
+- **Markup, styles, and docs:** XML and related files (including SVG and MSBuild), SCSS/Sass/Less, MDX, Vue, Svelte, Astro, AsciiDoc, reStructuredText, and LaTeX. Significant whitespace and opaque embedded content are left alone.
 
-Lexical formatting changes are also recognized in C/C++/C#, Java/Kotlin/Scala/Swift/Dart, JSON, and TOML. Format mode skips files with both staged and unstaged edits and does not run commit hooks.
+Lexical formatting changes are also recognized in C/C++/C#, Java/Kotlin/Scala/Swift/Dart, and JSON5. Format mode leaves changes it can't prove equivalent pending, skips files with both staged and unstaged edits, and does not run commit hooks.
+
+Use the `lgit-format` Git attribute to override detection for repository paths. Add rules to `.gitattributes` (shared) or `.git/info/attributes` (local only). Format names such as `jsonc`, `yaml`, `shell`, and `textproto`, or a supported suffix such as `.tf`, select the parser; `-lgit-format` disables detection.
+
+```gitattributes
+config/*.app lgit-format=jsonc
+vendor/** -lgit-format
+```
 
 ### Rewrite Mode
 

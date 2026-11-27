@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="commit only the formatting-only part of pending changes as a style commit, without any LLM call",
     )
+    routes.add_argument("--fmt-explain", action="store_true", help="show why --fmt skipped pending files")
     routes.add_argument("--test", action="store_true", help="run fixture-test mode")
 
     rewrite = parser.add_argument_group("rewrite")
@@ -383,8 +384,10 @@ async def _run_standard(args: argparse.Namespace, config: CommitConfig) -> int:
 def _run_fmt(args: argparse.Namespace, config: CommitConfig) -> int:
     """Commit the formatting-only regions of every pending modification; everything else stays pending."""
 
-    plan = reformat.plan_formatting(args.dir)
-    if plan.partially_staged:
+    plan = reformat.plan_formatting(args.dir, explain=args.fmt_explain)
+    for path, reason in plan.skipped:
+        print(f"  {path}: {reason}")
+    if plan.partially_staged and not args.fmt_explain:
         style.status(
             f"{style.info('›')} "
             f"{style.dim(f'Skipped {len(plan.partially_staged)} files with both staged and unstaged changes')}"
@@ -1213,6 +1216,8 @@ def _validate_arg_conflicts(parser: argparse.ArgumentParser, args: argparse.Name
         parser.error(f"conflicting modes: {' and '.join(selected_routes)}")
     if args.fast and selected_routes:
         parser.error("--fast cannot be combined with fmt, compose, rewrite, or test mode")
+    if args.fmt_explain and not args.fmt:
+        parser.error("--fmt-explain requires --fmt")
     if args.fmt and (args.mode != Mode.STAGED.value or args.amend):
         parser.error("--fmt commits pending changes on top of HEAD; it cannot be combined with --mode or --amend")
     if args.mode == Mode.COMMIT.value and not args.target:
